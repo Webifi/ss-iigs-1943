@@ -97,12 +97,18 @@ game_world_append:
   .endrepeat
   lda GAME_FLOW
   cmp #3
-  bcs :+
+  bcs @typed
+  lda CAB_RESULT_ACTIVE         ; the stage result types in live play,
+  beq @special
+  lda SPECIAL_TIMER             ; after a special leaves the card
+  ora SPECIAL_HOOK
+  beq @typed
+@special:
   lda SPECIAL_TIMER
-  bra :++
-:
+  bra @count
+@typed:
   lda CAB_ENDING_TEXT
-:
+@count:
   sta a:34,x
 special_packet_site:
   lda SPECIAL_FLAGS
