@@ -818,9 +818,9 @@ def assets(host):
 
     stage_tables, _ = stage_controls.event_tables()
     # fm_stage_hint: the lookahead windows before the boss cues, from 129
-    # event records before the record after the cue up to it. They count
-    # 6-byte arcade records, but CAMERA_STAGE_OFFSET counts the 4-byte packed
-    # records (stage_controls.install): the windows start late.
+    # event records before the record after the cue up to it, as offsets of
+    # the packed records that CAMERA_STAGE_OFFSET counts (stage_controls.install
+    # packs each 6-byte arcade record into one, in order).
     hints = []
     for name, stage, callback in (
         ("CAMERA3", 2, 0x690A),
@@ -835,10 +835,11 @@ def assets(host):
             for o in range(0, len(data) - 5, 6)
             if int.from_bytes(data[o + 2 : o + 4], "little") == callback
         )
+        after_cue = at // 6 + 1  # the record after the cue
         hints += [
             f"FM_HINT_{name}_STAGE = {stage}",
-            f"FM_HINT_{name}_FIRST = {at + 6 - 129 * 6}",
-            f"FM_HINT_{name}_END = {at + 6}",
+            f"FM_HINT_{name}_FIRST = {max(0, after_cue - 129) * stage_controls.PACKED_EVENT_SIZE}",
+            f"FM_HINT_{name}_END = {after_cue * stage_controls.PACKED_EVENT_SIZE}",
         ]
     # Quiet-time boss $29 preloads must be disjoint from every capture in
     # the outgoing stage-$30 song; no live or future old voice is evicted.

@@ -1309,13 +1309,25 @@ fm_part_x:
 
 ; music_voice_on: the note of the music part X (music_event): a new note
 ; starts (fm_start); a tied note only changes its pitch. JSL.
+; music_voice_resume: the note of the part X sounds again after a slot
+; change (music_player_tick): music_all_off stopped every part, so it starts
+; again, tied or not. JSL.
+music_voice_resume:
+.a8
+  sec
+  bra music_voice_start
 music_voice_on:
 .a8
+  clc
+music_voice_start:
   phb
   lda #^FM_STATES
   pha
   plb
   lda MUSIC_STATES+MS_TIE,x
+  bcc :+
+  lda #0                        ; a resumed note starts again
+:
   sta FM_T2
   lda MUSIC_STATES+MS_CAPTURE,x
   sta FM_T2+1
@@ -2881,10 +2893,6 @@ music_all_off:
   bne @part
   plb
   rtl
-
-; music_voice_resume: no code of its own: the call runs fm_voice_tick. The
-; note of a resumed part sounds again only at its next note.
-music_voice_resume:
 
 ; fm_voice_tick: the visit of this tick, after the score (music_irq_entry):
 ; each part is visited every FM_VISIT ticks, part (-FM_TICK) mod FM_VISIT.

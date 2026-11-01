@@ -276,7 +276,6 @@ SEQ_RESULT = 2 ; STAGE_BANNER_TASK: the boss result and its raid (arcade task $3
 SEQ_BANNER = 3 ; STAGE_BANNER_TASK: a banner (arcade task $2778)
 SEQ_INTRO = 4 ; STAGE_BANNER_TASK: the stage intro (arcade task $46E9)
 STAGE_BANNER_TASK: .res $1 ; the next GAME_SEQUENCE (game_flow_tick); 0 none
-STAGE_INPUT_P2: .res $1 ; stage_flow_init: INPUT_P2 at the stage start (the secret weapon)
 STAGE_MUSIC: .res $1 ; the music of the stage (stage_control_music)
 SOUND_QUEUE_SIZE = $20 ; a power of two
 SOUND_QUEUE: .res SOUND_QUEUE_SIZE ; the sound commands for the sound interrupt

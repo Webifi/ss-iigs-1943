@@ -29,8 +29,6 @@ stage_flow_init:
   bpl @clear
   a8
   stz STAGE_BANNER_TASK
-  lda #INPUT_NONE
-  sta STAGE_INPUT_P2
   rtl
 .assert (STAGE_SCROLL_END-STAGE_SAVED_CAMERA) .mod 2 = 0, error ; word clear
 
@@ -385,7 +383,7 @@ stage_control_secret_weapon:
   adc #SECRET_STAGES*SECRET_SIZE ; the player 2 list
   tay
   a8
-  lda STAGE_INPUT_P2
+  lda INPUT_P2                  ; read now, as the arcade reads $C002 ($6E5C)
   ldx #PLAYER_SIZE
   jsr .loword(stage_secret_player)
   jmp .loword(stage_control_done)

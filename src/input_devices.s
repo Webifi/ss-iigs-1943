@@ -140,7 +140,7 @@ devices_idle:
   jsr .loword(joy_read)
 @done:
   rts
-; joy_read: start the paddle timers; at PADDLE_LOW read the X paddle, at
+; joy_read: start the paddle timers; at PADDLE_LOW read both paddles, at
 ; PADDLE_HIGH both; a read too late (an interrupt in the wait) keeps the
 ; directions before. Both axes still high at PADDLE_HIGH: right and down
 ; from a stick that is known to be there, and the next read checks it
@@ -169,6 +169,8 @@ joy_read:
 :
   lda f:PADDL0
   sta a:.loword(joyLowX)
+  lda f:PADDL1
+  sta a:.loword(joyLowY)
   plp
   lda #PADDLE_HIGH
   jsr .loword(joy_wait)
@@ -387,9 +389,10 @@ joyPresent: .byte 0             ; joy_check saw the timers of the stick end
 joyCheck: .byte 0               ; joy_read: both axes were high; check the stick first
 joyBeam: .byte 0
 joyThreshold: .byte 0
-joyLowX: .byte 0
-joyHighX: .byte 0
-joyHighY: .byte 0
+joyLowX: .byte 0                ; PADDL0 at PADDLE_LOW (joy_read indexes X, then Y)
+joyLowY: .byte 0                ; PADDL1 at PADDLE_LOW
+joyHighX: .byte 0               ; PADDL0 at PADDLE_HIGH
+joyHighY: .byte 0               ; PADDL1 at PADDLE_HIGH
 beamPeriod: .byte 131           ; VERTCNT steps of a picture (PAL: PAL_BEAM_PERIOD)
 padSerial: .byte 0
 padBits: .res 4

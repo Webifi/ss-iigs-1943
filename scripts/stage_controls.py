@@ -139,6 +139,7 @@ def event_tables():
 # 0..STAGE_CONTROL_COUNT-1 a stage control, then the enemy spawn kinds from
 # their first index (spawn_index_map), CONTROL_EXTENDED, CONTROL_NONE.
 SPAWN_FIRSTS = {"MEDIUM": 128, "LARGE": 140, "TURRET": 149}
+PACKED_EVENT_SIZE = 4  # a packed event: the camera word, the descriptor offset (install)
 CONTROL_EXTENDED = 254
 CONTROL_NONE = 255
 
@@ -226,7 +227,7 @@ def install(out, host, enemy_spawns=False):
     # A packed event: the camera word, the STAGE_DESCRIPTORS offset of its
     # descriptor: the callback word, the bank byte (bank * 4), the control index.
     lines = [f"STAGE_DESCRIPTORS = {descriptor_ptr.label}"]
-    lines += ["STAGE_EVENT_SIZE = 4", "SD_CALLBACK = 0", "SD_BANK = 2", "SD_CONTROL = 3"]
+    lines += [f"STAGE_EVENT_SIZE = {PACKED_EVENT_SIZE}", "SD_CALLBACK = 0", "SD_BANK = 2", "SD_CONTROL = 3"]
     lines += ["STAGE_POINTER_SIZE = 4"]
     lines += [f"CONTROL_{k}_FIRST = {a}\nCONTROL_{k}_END = {a + n}" for k, (a, n) in ranges.items()]
     lines += [f"CONTROL_EXTENDED = {CONTROL_EXTENDED}", f"CONTROL_NONE = {CONTROL_NONE}"]

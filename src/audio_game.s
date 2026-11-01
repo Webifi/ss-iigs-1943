@@ -222,8 +222,11 @@ audio_request_tick:
   beq @music_stop
   cmp #SND_SMOOTH_STOP
   beq @smooth_stop
+  cmp #SND_SHIP_FINISH
+  beq :+                        ; the one effect above the FM pieces (arcade sound $09FB)
   cmp #SND_FM_FIRST
   bcs @music
+:
   lda MUSIC_PAGE+SSG_PENDING
   bne @done
   lda SOUND_QUEUE,x
