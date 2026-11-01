@@ -442,14 +442,40 @@ combined_panning:
         ld (scroll_row),a
         call combined_position
 combined_ship_row:
-        ld a,1
-        ld (ship_row_count),a
         ld a,(scroll_world_row)
         ld l,a
         ld h,row_classes >> 8
         ld a,(hl)
         or a
-        jp z,combined_ship_next
+        jp nz,combined_ship_draw
+; A run of rows of class 0 holds no ship: count it in one loop (the world
+; row falls as the screen row rises), then move the row state once.
+        ld a,(scroll_row)
+        ld c,a
+        ld b,0
+combined_ship_empty:
+        dec l
+        inc b
+        inc c
+        jr z,combined_ship_last         ; the run reaches the end of the page
+        ld a,(hl)
+        or a
+        jr z,combined_ship_empty
+        ld a,c
+        ld (scroll_row),a
+        call combined_ship_skip
+        jp combined_ship_row
+combined_ship_last:
+        xor a
+        ld (scroll_row),a
+        dec b                           ; the last row moves only scroll_row
+        call combined_ship_skip
+        jp scroll_finish
+combined_ship_draw:
+        ld e,a
+        ld a,1
+        ld (ship_row_count),a
+        ld a,e
         call ship_dispatch
 combined_ship_next:
         ld a,(ship_row_count)
@@ -470,7 +496,22 @@ combined_ship_next:
         ld de,(scroll_dest)
         add hl,de
         ld (scroll_dest),hl
-        jr combined_ship_row
+        jp combined_ship_row
+; combined_ship_skip: B rows on: scroll_world_row falls by B and
+; scroll_dest moves B rows down the page. AF, DE, HL changed.
+combined_ship_skip:
+        ld e,b
+        ld d,0
+        ld hl,(scroll_world_row)
+        or a
+        sbc hl,de
+        ld (scroll_world_row),hl
+        ld l,b
+        call state_times56
+        ld de,(scroll_dest)
+        add hl,de
+        ld (scroll_dest),hl
+        ret
 scroll_finish:
         ld a,(scroll_pan_slide)
         cp PAN_SLIDE_PLACED

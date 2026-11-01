@@ -809,12 +809,15 @@ object_canonical_kernels:
         .word object_canonical_0, object_canonical_1, object_canonical_2, object_canonical_3
 
 ; A 0 map mask keeps the destination while the latch copy goes on. The
-; sequencer ignores the high nibble. Alternate D counts the rows.
+; sequencer ignores the high nibble. Alternate D counts the rows. A row
+; starts in the alternate registers and ends in the main ones, so the next
+; row needs no exchange at its start; the done path returns in the main
+; registers, as every kernel does.
         .irp phase,0,1,2,3
 object_canonical_\phase:
         ld sp,(object_stage + STAGE_CANONICAL_SP)
-object_canonical_\phase\()_row:
         exx
+object_canonical_\phase\()_row:
         pop hl                          ; the 16-pixel silhouette
         .if \phase
         xor a
@@ -847,17 +850,11 @@ object_canonical_\phase\()_row:
         out (c),a
         exx
         ldi
-        exx
         .if \phase
+        exx
         out (c),e
         exx
         ldi
-        exx
-        .endif
-        dec d
-        exx
-        jp z,object_compiled_done
-        .if \phase
         dec hl                          ; the edge group starts the next row
         ex de,hl
         ld bc,GROUPS_PER_ROW - 5
@@ -867,7 +864,11 @@ object_canonical_\phase\()_row:
         .endif
         add hl,bc
         ex de,hl
-        jr object_canonical_\phase\()_row
+        exx
+        dec d
+        jp nz,object_canonical_\phase\()_row
+        exx
+        jp object_compiled_done
         .endr
 
         .section .text.object_priority,"ax",@progbits
