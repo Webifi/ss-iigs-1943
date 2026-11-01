@@ -62,7 +62,6 @@ MOTION_FRACTION     = $d2       ; enemy_motion, bullet_motion: the new OBJ_CROSS
 
 ; Player input (src/game_players.s, src/flight.s).
 FLIGHT_INPUT        = $40       ; the stick and buttons of the player that runs, active low
-FLIGHT_SPEED        = $41       ; the speed table of the player that runs
 FLIGHT_TABLE        = $42       ; live_flight_step: the offset of the speed table
 FLIGHT_STICK        = $44       ; live_flight_step: the stick directions, active high
 

@@ -18,7 +18,6 @@ flight_loop:
   lda f:SHADOW
   ora #SHADOW_HGR1|SHADOW_HGR2
   sta f:SHADOW
-  stz FLIGHT_SPEED              ; no code changes it: speed table 0
   jsr input_init
   a16
   ldx #SHOT_COUNT*SHOT_SIZE-2

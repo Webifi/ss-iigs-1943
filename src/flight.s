@@ -13,7 +13,7 @@ ROLL_STEP_TIME = 2           ; updates of each roll step
 ROLL_TOP_POSE = 4            ; at this pose the roll turns back
 ROLL_BACK = $fe              ; ROLL_TURN after the top pose: steps of -1
 ROLL_STEPS = $18             ; the steps of one roll
-; flight_moves: for each speed table (FLIGHT_SPEED), two halves; each half has
+; flight_moves: for each speed table (STAGE_PLAYER_SPEED), two halves; each half has
 ; one FLIGHT_STEP_SIZE entry for each of the 16 stick directions.
 FLIGHT_STEP_SIZE = 3         ; cross move, along move, the pose of the direction
 FLIGHT_HALF = 16*FLIGHT_STEP_SIZE ; the half of the updates with an even PL_DRAIN
@@ -48,8 +48,8 @@ live_flight_step:
   eor #$ffff
   and #INPUT_STICK
   sta a:FLIGHT_STICK
-  ; FLIGHT_TABLE = the speed table, then its half for this update.
-  lda a:FLIGHT_SPEED
+  ; FLIGHT_TABLE = the speed table of the stage, then its half for this update.
+  lda a:STAGE_PLAYER_SPEED
   and #255
   asl
   tax
