@@ -1,177 +1,154 @@
-; Original-US bank 1 $8B46-$8C2B, $8305-$8385 and $19DF-$19EF.
-; Native state, not execution of the original CPU program.
-; Context: player offset, E430, E15A, E310, E150, E14C, attract exit, spare.
+; The death of a player (US arcade bank 1 $8B46-$8C2B, $8305-$8385 and
+; $19DF-$19EF): the plane explodes frame by frame; then the continue
+; countdown starts (DEATH_PLAYING), or the demo ends (DEATH_DEMO_END). The
+; shadow sprites follow the plane of their owner.
 .a8
 .i16
-.ifndef PLAYER
-PLAYER = $1000
-.endif
-.ifdef CONTINUOUS_GAME
-PLAYER_SHADOW = $1400
-.else
-PLAYER_SHADOW = $1200
-.endif
-DEATH_CONTEXT = $11e0
+SHADOW_OWNER = 5              ; PL_NUMBER of the player that owns the shadows
+DEATH_TIME = ANIM_WORK+1       ; updates left of this death frame
+DEATH_FRAME = ANIM_WORK+2      ; the player_death_frames offset of the next frame
+; player_death_frames: DEATH_FRAME_SIZE entries (the updates, the sprite code
+; of the body); DEATH_END ends the list.
+DEATH_FRAME_SIZE = 2
+DEATH_END = 255
+DEATH_DROP = 4                 ; the explosion is this much further along
+CONTINUE_COUNT = $0b           ; PL_COUNTDOWN: the countdown shows 10 first
+; The shadow (PLAYER_SHADOW: four pieces as a plane) is SHADOW_CROSS to the
+; right of the plane and SHADOW_ALONG above it. Hidden, it is below the field.
+SHADOW_COLOUR = $0e
+SHADOW_CROSS = 16
+SHADOW_ALONG = 18
+SHADOW_HIDDEN = $e0            ; SPR_ALONG with SPR_ALONG_HIGH: below the field
+
+; player_death: one update of the death of the player DEATH_PLAYER
+; (game_players_tick). The first frame puts the four pieces around the body.
+; JSL end; A8, X16.
 
 player_death:
-  stz DEATH_CONTEXT+6
-  rep #$20
-  lda DEATH_CONTEXT
-  and #$80
+  stz DEATH_DEMO_END
+  a16
+  lda DEATH_PLAYER
+  and #PLAYER_SIZE              ; the record of player 1 or 2
   tax
-  sep #$20
-  stz PLAYER+$55,x
-  stz PLAYER+7,x
-  stz PLAYER+4,x
-  phx
-  lda PLAYER+5,x
-  beq @other_p2
-  ldx #0
-  bra @other_state
-@other_p2:
-  ldx #128
-@other_state:
-  lda PLAYER+8,x
-  plx
-  cmp #2
-  beq @countdown
-  lda #1
-  sta DEATH_CONTEXT+1
-@countdown:
-  lda PLAYER+$1c,x
+  a8
+  stz PLAYER+PL_WEAPON_GATE,x
+  stz PLAYER+PL_COLLIDE,x
+  stz PLAYER+PL_WINGS,x
+  lda PLAYER+DEATH_TIME,x
   bne @delay
-  lda PLAYER+$1d,x
+  lda PLAYER+DEATH_FRAME,x
   bne @next_frame
-  stz PLAYER+1,x
-  stz PLAYER+$21,x
-  stz PLAYER+$41,x
-  stz PLAYER+$61,x
-  lda PLAYER+2,x
-  sta PLAYER+$42,x
+  stz PLAYER+SPR_ATTR,x
+  stz PLAYER+PL_BODY2+SPR_ATTR,x
+  stz PLAYER+PL_LEFT_WING+SPR_ATTR,x
+  stz PLAYER+PL_RIGHT_WING+SPR_ATTR,x
+  lda PLAYER+SPR_CROSS,x
+  sta PLAYER+PL_LEFT_WING+SPR_CROSS,x
   clc
-  adc #16
-  sta PLAYER+$22,x
-  sta PLAYER+$62,x
-  lda PLAYER+3,x
+  adc #BODY2_CROSS
+  sta PLAYER+PL_BODY2+SPR_CROSS,x
+  sta PLAYER+PL_RIGHT_WING+SPR_CROSS,x
+  lda PLAYER+SPR_ALONG,x
   clc
-  adc #4
-  sta PLAYER+3,x
-  sta PLAYER+$23,x
+  adc #DEATH_DROP
+  sta PLAYER+SPR_ALONG,x
+  sta PLAYER+PL_BODY2+SPR_ALONG,x
   sec
-  sbc #16
-  sta PLAYER+$43,x
-  sta PLAYER+$63,x
+  sbc #PIECE_RISE
+  sta PLAYER+PL_LEFT_WING+SPR_ALONG,x
+  sta PLAYER+PL_RIGHT_WING+SPR_ALONG,x
 @next_frame:
-  rep #$20
-  lda PLAYER+$1d,x
+  a16
+  lda PLAYER+DEATH_FRAME,x
   and #255
   tay
-  sep #$20
-  inc PLAYER+$1d,x
-  inc PLAYER+$1d,x
+  a8
+  inc PLAYER+DEATH_FRAME,x
+  inc PLAYER+DEATH_FRAME,x      ; DEATH_FRAME_SIZE
   lda player_death_frames,y
-  cmp #255
+  cmp #DEATH_END
   beq @finished
-  sta PLAYER+$1c,x
+  sta PLAYER+DEATH_TIME,x
   lda player_death_frames+1,y
-  sta PLAYER,x
+  sta PLAYER+SPR_CODE,x
   inc
-  sta PLAYER+$20,x
+  sta PLAYER+PL_BODY2+SPR_CODE,x
   clc
-  adc #7
-  sta PLAYER+$40,x
+  adc #CODE_ROW-1               ; the upper pieces
+  sta PLAYER+PL_LEFT_WING+SPR_CODE,x
   inc
-  sta PLAYER+$60,x
+  sta PLAYER+PL_RIGHT_WING+SPR_CODE,x
 @delay:
-  dec PLAYER+$1c,x
+  dec PLAYER+DEATH_TIME,x
   jmp player_shadow_death
 @finished:
-  stz DEATH_CONTEXT+2
-  lda DEATH_CONTEXT+3
+  ; The explosion ends: the demo ends, or the continue countdown starts.
+  lda DEATH_PLAYING
   bne @playing
   lda #1
-  sta DEATH_CONTEXT+6
+  sta DEATH_DEMO_END
   rts
 @playing:
-  phx
-  lda PLAYER+5,x
-  beq @finish_other_p2
-  ldx #0
-  bra @finish_other
-@finish_other_p2:
-  ldx #128
-@finish_other:
-  lda PLAYER+8,x
-  plx
-  beq @last_player
-  cmp #4
-  bne @clear_player
-@last_player:
-  lda DEATH_CONTEXT+4
-  beq @clear_player
-  stz DEATH_CONTEXT+4
-  lda #1
-  sta DEATH_CONTEXT+5
-@clear_player:
-  lda #$0b
-  sta PLAYER+$2a,x
-  stz PLAYER+8,x
-  .repeat 5,i
-    stz PLAYER+$1b+i,x
-    stz PLAYER+$5b+i,x
-    stz PLAYER+$7b+i,x
+  lda #CONTINUE_COUNT
+  sta PLAYER+PL_COUNTDOWN,x
+  stz PLAYER+PL_STATE,x
+  .repeat ANIM_WORK_SIZE,i
+    stz PLAYER+ANIM_WORK+i,x
+    stz PLAYER+PL_LEFT_WING+ANIM_WORK+i,x
+    stz PLAYER+PL_RIGHT_WING+ANIM_WORK+i,x
   .endrepeat
-  ; The original deliberately leaves the second piece's $3B-$3F alone.
-.ifdef CONTINUOUS_GAME
+  ; The arcade leaves the ANIM_WORK of the second piece ($3B-$3F) as it is.
   jsl native_player_respawn_position
-.endif
+; player_shadow_death: the shadow of the player X, when that player owns it:
+; at the plane, or hidden when PL_SHADOW is 0.
 player_shadow_death:
-  lda PLAYER_SHADOW+5
-  cmp PLAYER+5,x
+  lda PLAYER_SHADOW+SHADOW_OWNER
+  cmp PLAYER+PL_NUMBER,x
   beq @owner
   rts
 @owner:
-  lda PLAYER+$0f,x
+  lda PLAYER+PL_SHADOW,x
   bne @visible
-  lda PLAYER_SHADOW+1
-  ora #$1e
-  sta PLAYER_SHADOW+1
-  sta PLAYER_SHADOW+$21
-  sta PLAYER_SHADOW+$41
-  sta PLAYER_SHADOW+$61
-  lda #$e0
-  sta PLAYER_SHADOW+3
-  sta PLAYER_SHADOW+$23
-  lda #$d0
-  sta PLAYER_SHADOW+$43
-  sta PLAYER_SHADOW+$63
+  lda PLAYER_SHADOW+SPR_ATTR
+  ora #SPR_ALONG_HIGH|SHADOW_COLOUR
+  sta PLAYER_SHADOW+SPR_ATTR
+  sta PLAYER_SHADOW+SPRITE_SIZE+SPR_ATTR
+  sta PLAYER_SHADOW+2*SPRITE_SIZE+SPR_ATTR
+  sta PLAYER_SHADOW+3*SPRITE_SIZE+SPR_ATTR
+  lda #SHADOW_HIDDEN
+  sta PLAYER_SHADOW+SPR_ALONG
+  sta PLAYER_SHADOW+SPRITE_SIZE+SPR_ALONG
+  lda #SHADOW_HIDDEN-PIECE_RISE
+  sta PLAYER_SHADOW+2*SPRITE_SIZE+SPR_ALONG
+  sta PLAYER_SHADOW+3*SPRITE_SIZE+SPR_ALONG
   rts
 @visible:
-  lda #$0e
-  sta PLAYER_SHADOW+1
-  sta PLAYER_SHADOW+$21
-  sta PLAYER_SHADOW+$41
-  sta PLAYER_SHADOW+$61
+  lda #SHADOW_COLOUR
+  sta PLAYER_SHADOW+SPR_ATTR
+  sta PLAYER_SHADOW+SPRITE_SIZE+SPR_ATTR
+  sta PLAYER_SHADOW+2*SPRITE_SIZE+SPR_ATTR
+  sta PLAYER_SHADOW+3*SPRITE_SIZE+SPR_ATTR
   .repeat 4,i
-    lda PLAYER+i*32,x
-    sta PLAYER_SHADOW+i*32
+    lda PLAYER+i*SPRITE_SIZE+SPR_CODE,x
+    sta PLAYER_SHADOW+i*SPRITE_SIZE+SPR_CODE
   .endrepeat
-  lda PLAYER+2,x
+  lda PLAYER+SPR_CROSS,x
   clc
-  adc #16
-  sta PLAYER_SHADOW+2
-  sta PLAYER_SHADOW+$42
+  adc #SHADOW_CROSS
+  sta PLAYER_SHADOW+SPR_CROSS
+  sta PLAYER_SHADOW+2*SPRITE_SIZE+SPR_CROSS
   clc
-  adc #16
-  sta PLAYER_SHADOW+$22
-  sta PLAYER_SHADOW+$62
-  lda PLAYER+3,x
+  adc #BODY2_CROSS
+  sta PLAYER_SHADOW+SPRITE_SIZE+SPR_CROSS
+  sta PLAYER_SHADOW+3*SPRITE_SIZE+SPR_CROSS
+  lda PLAYER+SPR_ALONG,x
   sec
-  sbc #18
-  sta PLAYER_SHADOW+3
-  sta PLAYER_SHADOW+$23
+  sbc #SHADOW_ALONG
+  sta PLAYER_SHADOW+SPR_ALONG
+  sta PLAYER_SHADOW+SPRITE_SIZE+SPR_ALONG
   sec
-  sbc #16
-  sta PLAYER_SHADOW+$43
-  sta PLAYER_SHADOW+$63
+  sbc #PIECE_RISE
+  sta PLAYER_SHADOW+2*SPRITE_SIZE+SPR_ALONG
+  sta PLAYER_SHADOW+3*SPRITE_SIZE+SPR_ALONG
   rts
+.assert PLAYER_SIZE = $80 .and BODY2_CROSS = 16 .and PIECE_RISE = 16, error

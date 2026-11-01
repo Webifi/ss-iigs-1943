@@ -161,6 +161,11 @@ def merged(resolved):
 SIZES = (2, 2, 0, 0, 0, 0, 0, 0)
 STATE_BITS = 0xE8
 EXPLICIT = 15
+# A packed header byte: the delay / DELAY_UNIT in the high nibble (below 15),
+# the mask code in the low nibble; code 0: END_HEADER or REPEAT_HEADER.
+DELAY_UNIT = 8
+END_HEADER = 0x00
+REPEAT_HEADER = 0x10
 
 
 class Tables:
@@ -285,10 +290,10 @@ def pack(data, tables):
         delay, mask = data[p], data[p + 1]
         p += 2
         if mask == 0:
-            out.append(0)
+            out.append(END_HEADER)
             break
         if mask == LIST_REPEAT:
-            out.append(0x10)
+            out.append(REPEAT_HEADER)
             copies = data[p]
             target = int.from_bytes(data[p + 1 : p + 3], "little")
             p += 3
@@ -299,8 +304,8 @@ def pack(data, tables):
             assert mask == KIND
             slot = data[p]
             code = tables.code(slot)
-            if delay % 8 == 0 and delay // 8 < 15:
-                out.append(delay // 8 << 4 | code)
+            assert delay % DELAY_UNIT == 0 and delay // DELAY_UNIT < 15, delay
+            out.append(delay // DELAY_UNIT << 4 | code)
             if code == EXPLICIT:
                 out.append(slot)
             n = sum(SIZES[b] for b in range(8) if slot >> b & 1) + bool(slot & STATE_BITS)
@@ -324,9 +329,9 @@ def walk_packed(data, tables):
         h = data[p]
         p += 1
         if not h & 15:
-            if h == 0:
+            if h == END_HEADER:
                 return out
-            assert h == 0x10
+            assert h == REPEAT_HEADER
             copies = data[p]
             target = int.from_bytes(data[p + 1 : p + 3], "little")
             p += 3
@@ -340,7 +345,7 @@ def walk_packed(data, tables):
                 loop = -1
             continue
         d = h >> 4
-        d *= 8
+        d *= DELAY_UNIT
         t += d
         code = h & 15
         if code == EXPLICIT:

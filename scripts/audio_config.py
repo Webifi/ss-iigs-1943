@@ -8,7 +8,6 @@ import math
 DOC_VOICES = 26
 DOC_TIMER = 25
 FM_PAIRS = tuple((2 * ch, 2 * ch + 1) for ch in range(6))
-FM_VOICES = tuple(pair[0] for pair in FM_PAIRS)
 SSG_VOICES = tuple((12, 13 + 2 * ch, 14 + 2 * ch) for ch in range(6))
 DOC_RATE = 14318180 / 16 / (DOC_VOICES + 2)
 MASTER_NIBBLE = 5
@@ -42,4 +41,3 @@ def volume_register(linear, law):
 # Measured on songs 20, 23 and 2F: the original sound program keys each note
 # 17.4 ms (4 sequencer ticks plus write time) after the score tick. The
 # player starts every part 4 ticks after its command, as the arcade does.
-MUSIC_LEAD_TICKS = 4

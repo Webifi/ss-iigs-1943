@@ -15,33 +15,65 @@ Address spaces of the labels (the VMA of the asset sections in card.ld):
 
 SRAM = 0x100000
 PLANE = 0x200000
+# The MMU windows and the VGA window of the card (src/secondsight/include/second_sight.inc).
+WINDOW_C000 = 0xC000  # the bank window (BBR), 8 KB
+WINDOW_D000 = WINDOW_C000 + 0x1000  # its upper 4 KB
+WINDOW_E000 = 0xE000  # common area 1 (CBR)
+VGA_WINDOW = 0xA0000  # the Oak VGA window
+VGA_WINDOW_C000 = (VGA_WINDOW - WINDOW_C000) >> 12  # the BBR of the VGA window at WINDOW_C000
+VGA_WINDOW_E000 = (VGA_WINDOW - WINDOW_E000) >> 12  # the CBR of the VGA window at WINDOW_E000
+PAGE = 0x1000  # an MMU page
+
+
+def vga_window_bbr(group):
+    """The BBR that shows video RAM group GROUP (of its Oak segment) at WINDOW_C000."""
+    return VGA_WINDOW_C000 + ((group & 0xFFFF) >> 12)
+
+
+def vga_window_cbr(group):
+    """The CBR that shows video RAM group GROUP (of its Oak segment) at WINDOW_E000."""
+    return VGA_WINDOW_E000 + ((group & 0xFFFF) >> 12)
+
+
+def common_window(physical):
+    """The CBR and the pointer that show SRAM byte PHYSICAL to the card: below
+    WINDOW_C000 the logical address is the physical one (CBR 0); above, the
+    byte is in common area 1 at WINDOW_E000."""
+    if physical < WINDOW_C000:
+        return 0, physical
+    return ((physical - WINDOW_E000) >> 12) & 0xFF, WINDOW_E000 + (physical & (PAGE - 1))
+
 
 # name -> (formula, description). {0} is the label.
 FORMULAS = {
     # The bank area at $C000 maps physical BBR * 4 KB + $C000.
-    "bbr": ("(((({0}) - 0x100000) >> 12) - 0x0C) & 0xFF", "BBR value that maps the label at $C000-$CFFF"),
-    "ptr": ("0xC000 + (({0}) & 0xFFF)", "pointer to the label through the bank area"),
-    # Common area 1 at $E000 maps physical CBR * 4 KB + $E000.
+    "bbr": (f"(((({{0}}) - {SRAM:#x}) >> 12) - {WINDOW_C000 >> 12:#x}) & 0xFF", "BBR value that maps the label at $C000-$CFFF"),
+    "ptr": (f"{WINDOW_C000:#x} + (({{0}}) & {PAGE - 1:#x})", "pointer to the label through the bank area"),
+    # The same with the label in the upper 4 KB of the 8 KB bank area.
+    "bbrd": (f"(((({{0}}) - {SRAM:#x}) >> 12) - {WINDOW_D000 >> 12:#x}) & 0xFF", "BBR value that maps the label at $D000-$DFFF"),
+    "ptrd": (f"{WINDOW_D000:#x} + (({{0}}) & {PAGE - 1:#x})", "pointer to the label at $D000-$DFFF through the bank area"),
     "low16": ("({0}) & 0xFFFF", "the low 16 bits"),
-    "phys": ("({0}) - 0x100000", "physical SRAM address of a load address"),
+    "phys": (f"({{0}}) - {SRAM:#x}", "physical SRAM address of a load address"),
     # Compact glyph address: physical / 2.
-    "half": ("(((({0}) - 0x100000) >> 1) & 0xFFFF)", "physical address of the label / 2"),
-    "cbr": ("(((({0}) - 0x100000) >> 12) - 0x0E) & 0xFF", "CBR value that maps the label at $E000-$EFFF"),
+    "half": (f"(((({{0}}) - {SRAM:#x}) >> 1) & 0xFFFF)", "physical address of the label / 2"),
+    # Common area 1 at $E000 maps physical CBR * 4 KB + $E000.
+    "cbr": (f"(((({{0}}) - {SRAM:#x}) >> 12) - {WINDOW_E000 >> 12:#x}) & 0xFF", "CBR value that maps the label at $E000-$EFFF"),
+    "ptre": (f"{WINDOW_E000:#x} + (({{0}}) & {PAGE - 1:#x})", "pointer to the label at $E000-$EFFF through common area 1"),
     # Video RAM: 64 KB segments of four-byte groups, seen through 8 KB windows.
     "vseg": ("(({0}) >> 18) & 0xFF", "Oak segment of the group of the label"),
-    "vbbr": ("0x94 + (((({0}) >> 2) & 0xFFFF) >> 13) * 2", "BBR value of the 8 KB VGA window of the label"),
-    "vptr": ("0xC000 + ((({0}) >> 2) & 0x1FFF)", "window pointer to the group of the label"),
+    "vbbr": (f"{VGA_WINDOW_C000:#x} + (((({{0}}) >> 2) & 0xFFFF) >> 13) * 2", "BBR value of the 8 KB VGA window of the label"),
+    "vptr": (f"{WINDOW_C000:#x} + ((({{0}}) >> 2) & 0x1FFF)", "window pointer to the group of the label"),
     "group": ("(({0}) >> 2) & 0x3FFFF", "group address of a linear video RAM label"),
     "group16": ("(({0}) >> 2) & 0xFFFF", "group address in its Oak segment"),
-    "dma": ("0xA0000 + ((({0}) >> 2) & 0xFFFF)", "DMA address of the group through the VGA aperture"),
+    "dma": (f"{VGA_WINDOW:#x} + ((({{0}}) >> 2) & 0xFFFF)", "DMA address of the group through the VGA aperture"),
     "gb0": ("(({0}) >> 2) & 0xFF", "low byte of the group address"),
     "gb1": ("(({0}) >> 10) & 0xFF", "middle byte of the group address"),
-    "vbbr4k": ("0x94 + (((({0}) >> 2) & 0xFFFF) >> 12)", "BBR value of the 4 KB VGA window of the label"),
-    "vptr4k": ("0xC000 + ((({0}) >> 2) & 0xFFF)", "pointer to the label through its 4 KB VGA window"),
+    "vbbr4k": (f"{VGA_WINDOW_C000:#x} + (((({{0}}) >> 2) & 0xFFFF) >> 12)", "BBR value of the 4 KB VGA window of the label"),
+    "vptr4k": (f"{WINDOW_C000:#x} + ((({{0}}) >> 2) & {PAGE - 1:#x})", "pointer to the label through its 4 KB VGA window"),
     # One VGA plane: the group is the low 18 bits.
     "pseg": ("(({0}) >> 16) & 0x03", "Oak segment of a plane label"),
-    "pbbr": ("0x94 + ((({0}) & 0xFFFF) >> 13) * 2", "BBR value of the 8 KB VGA window of a plane label"),
-    "pptr": ("0xC000 + (({0}) & 0x1FFF)", "window pointer to a plane label"),
+    "pbbr": (f"{VGA_WINDOW_C000:#x} + ((({{0}}) & 0xFFFF) >> 13) * 2", "BBR value of the 8 KB VGA window of a plane label"),
+    "pptr": (f"{WINDOW_C000:#x} + (({{0}}) & 0x1FFF)", "window pointer to a plane label"),
     "plane": ("(({0}) >> 18) & 0x03", "plane of a plane label"),
 }
 
@@ -112,6 +144,11 @@ class Source:
         for i in range(0, len(data), 16):
             self.lines.append("        .byte " + ", ".join(f"0x{v:02X}" for v in data[i : i + 16]))
         self.size += len(data)
+        return self
+
+    def align(self, boundary):
+        """Start the next byte at a multiple of BOUNDARY in the section."""
+        self.lines.append(f"        .balign {boundary}")
         return self
 
     def fill(self, count, value=0):
@@ -230,16 +267,6 @@ class Vram:
         """The derived symbol KIND (FORMULAS) of this address."""
         return derived(kind, self.expression())
 
-    def value(self):
-        """The group address, after the final card link."""
-        from card_link import symbol
-
-        return (symbol(self.label) >> 2) + self.groups
-
-    def plane(self, plane, groups=0):
-        """The address of byte GROUPS of PLANE inside this block, in the
-        plane address space."""
-        return Plane(self.label, plane, self.groups + groups)
 
 
 class Plane:
@@ -251,19 +278,13 @@ class Plane:
         self.plane = plane
         self.groups = groups
 
-    def value(self):
-        """The group address, after the final card link."""
-        from card_link import symbol
-
-        return (symbol(self.label) & 0x3FFFF) + self.groups
-
     def __call__(self, kind):
         """The derived symbol KIND (FORMULAS) of this address."""
         return derived(kind, self.label if not self.groups else f"{self.label} + {self.groups}")
 
 
 class VideoRam:
-    """The video RAM sections of the asset builder. scripts/card_layout.py
+    """The video RAM sections of the asset builder. scripts/secondsight_fit.py
     places each one so that it stays inside one window of WINDOW groups.
     A rule of a section is its window, its alignment in bytes (ALIGN) and the
     groups at the start of each 64K-group segment that it keeps out of (KEEP).
@@ -275,8 +296,8 @@ class VideoRam:
         self.pins = {}  # label -> (linear address, content bytearray or size)
 
     def pin(self, label, address, content):
-        """A section at a place of the video RAM map (scripts/card_layout.py
-        pinned): CONTENT loads there at boot, or a size loads nothing."""
+        """A section at a place of the video RAM map (secondsight_link.pinned,
+        scripts/secondsight_fit.py): CONTENT loads there at boot, or a size loads nothing."""
         self.pins[label] = (address, content)
 
     def _label(self, name):
@@ -303,7 +324,7 @@ class VideoRam:
 
     def block(self, groups, window, name):
         """A block of GROUPS groups whose bytes are plane sections: section
-        .plane.NAME.P.K is the K-th part of plane P. scripts/card_layout.py
+        .plane.NAME.P.K is the K-th part of plane P. scripts/secondsight_fit.py
         places the block, then the parts of each plane in order from the
         block's first group."""
         self.parts.append((name, f"b{window}_a4_k0", "nobits", (groups * 4, None)))
@@ -316,12 +337,12 @@ class VideoRam:
         return Vram(label)
 
     def source(self):
-        import card_layout
+        import secondsight_link
 
         source = Source("video RAM data")
         for label, (address, content) in self.pins.items():
             name = f".vram_area.{label}"
-            card_layout.pinned[name] = address
+            secondsight_link.pinned[name] = address
             if isinstance(content, int):
                 source.lines.append(f'        .section {name},"aw",@nobits')
                 source.label(label)

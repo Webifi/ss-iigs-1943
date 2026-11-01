@@ -3,7 +3,6 @@
 import struct
 from roms import load
 
-CALLBACKS = (0xAD42, 0xAF09, 0xB185, 0xB34E, 0xB4ED, 0xB9B0, 0xBB4C)
 
 
 def prepare(out):

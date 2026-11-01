@@ -1,73 +1,60 @@
-; The IIgs sends game state. It does no sprite lookup, clipping, restoration
-; or HUD layout. Packet words are swapped only for the existing PEI sender.
+; The update packet (src/packet.inc): the game state that the card draws.
+; The host makes no sprite lookup, clipping or HUD layout. Each word goes
+; high byte first (XBA) for the PEI sender.
 .a16
 .i16
-; Code zero is transparent in the verified original art. Normalize its
-; palette so the otherwise unused blank/color-15 word is a compound marker.
-.macro state_code
-.ifdef STATE_COMPOUNDS
-  cmp #$0f00
-  bne :+
-  lda #0
-:
-.endif
-  xba
-.endmacro
+
+; flight_state_packet_far: write the packet of this update: the cameras,
+; the picture, the P1 score, energy and weapon (or the cabinet page and the
+; seconds), the object records of the enemies, bullets, large objects,
+; extended objects, players, dives and shots, then the world trailer
+; (game_world_append). JSL; returns A8, X16.
 flight_state_packet_far:
-  rep #$30
-  lda $6c
+  ax16
+  lda SEA_CAMERA
   xba
-  sta a:$8002
-  lda $6e
+  sta a:PACKET_SEA
+  lda FG_CAMERA
   xba
-  sta a:$8004
-.ifdef CONTINUOUS_GAME
+  sta a:PACKET_FOREGROUND
   lda GAME_PICTURE
-.else
-  lda $68
-.endif
   xba
-  sta a:$8006
-  .repeat 4,I
-    lda PLAYER+$38+I*2
+  sta a:PACKET_PICTURE
+  .repeat (PACKET_ENERGY-PACKET_SCORE)/2,I
+    lda PLAYER+PL_SCORE+I*2
     xba
-    sta a:$800a+I*2
+    sta a:PACKET_SCORE+I*2
     lda ENERGY_HUD+I*2
     xba
-    sta a:$8012+I*2
+    sta a:PACKET_ENERGY+I*2
   .endrepeat
- .if FLIGHT_PLAYER_AUX
-  sep #$20
-  lda PLAYER+$51
-  sta a:$801b
-  lda PLAYER+$57
-  sta a:$801a
-.ifdef CONTINUOUS_GAME
+  a8
+  lda PLAYER+PL_WEAPON
+  sta a:PACKET_WEAPON
+  lda PLAYER+PL_WEAPON_TIME
+  sta a:PACKET_TIME
   lda GAME_FLOW
   beq :+
   clc
-  adc #16
-  sta a:$801b
+  adc #PACKET_PAGE_WEAPON
+  sta a:PACKET_WEAPON
   lda GAME_SECONDS
-  sta a:$801a
+  sta a:PACKET_TIME
 :
-.endif
-  rep #$20
-  ldx #$801c
- .else
-  ldx #$801a
- .endif
+  ; X = the next object record; each takes PACKET_RECORD bytes.
+  a16
+  ldx #.loword(PACKET_OBJECTS)
   ldy #0
 @enemies:
-  lda ENEMY_POOL+8,y
+  lda ENEMY_POOL+OBJ_TYPE,y
   and #255
   beq @next_enemy
-  lda ENEMY_POOL,y
-  state_code
-  sta a:$0000,x
-  lda ENEMY_POOL+2,y
+  lda ENEMY_POOL+SPR_CODE,y
   xba
-  sta a:$0002,x
+  sta a:PACKET_CODE,x
+  lda ENEMY_POOL+SPR_CROSS,y
+  xba
+  sta a:PACKET_POSITION,x
   inx
   inx
   inx
@@ -75,42 +62,28 @@ flight_state_packet_far:
 @next_enemy:
   tya
   clc
-  adc #32
+  adc #OBJECT_SIZE
   tay
-  cpy #1024
+  cpy #(ENEMY_COUNT+BULLET_COUNT)*OBJECT_SIZE ; BULLETS follows ENEMY_POOL
   bne @enemies
-.ifdef NATIVE_LARGE_OBJECTS
   ldy #0
 @large_head:
-  lda LARGE_POOL+8,y
+  lda LARGE_POOL+OBJ_TYPE,y
   and #255
-.ifdef GIANT_ENEMIES
   bne :+
   jmp @large_next
 :
-  cmp #$40
+  cmp #OT_GIANT
   beq :+
   jmp @four_piece
 :
-  .repeat 16,I
-   .ifdef STATE_COMPOUNDS
-    .if (I .mod 4)=0
-      lda #$000f
-      sta a:0,x
-      lda #$0400
-      sta a:2,x
-      inx
-      inx
-      inx
-      inx
-    .endif
-   .endif
-    lda LARGE_POOL-128+I*32,y
-    state_code
-    sta a:$0000,x
-    lda LARGE_POOL-126+I*32,y
+  .repeat GIANT_ROWS*GIANT_COLUMNS,I
+    lda LARGE_POOL-GIANT_HEAD+I*SPRITE_SIZE+SPR_CODE,y
     xba
-    sta a:$0002,x
+    sta a:PACKET_CODE,x
+    lda LARGE_POOL-GIANT_HEAD+I*SPRITE_SIZE+SPR_CROSS,y
+    xba
+    sta a:PACKET_POSITION,x
     inx
     inx
     inx
@@ -118,32 +91,17 @@ flight_state_packet_far:
   .endrepeat
   tya
   clc
-  adc #256
+  adc #2*LARGE_SIZE             ; past the giant's slots 2 and 3 (slot 0 has no type)
   tay
   jmp @large_next
 @four_piece:
-.else
-  bne :+
-  jmp @large_next
-:
-.endif
-.ifdef STATE_COMPOUNDS
-  lda #$000f                 ; blank code / reserved palette, then four pieces
-  sta a:$0000,x
-  lda #$0400
-  sta a:$0002,x
-  inx
-  inx
-  inx
-  inx
-.endif
   .repeat 4,I
-    lda LARGE_POOL+I*32,y
-    state_code
-    sta a:$0000,x
-    lda LARGE_POOL+I*32+2,y
+    lda LARGE_POOL+I*SPRITE_SIZE+SPR_CODE,y
     xba
-    sta a:$0002,x
+    sta a:PACKET_CODE,x
+    lda LARGE_POOL+I*SPRITE_SIZE+SPR_CROSS,y
+    xba
+    sta a:PACKET_POSITION,x
     inx
     inx
     inx
@@ -152,31 +110,23 @@ flight_state_packet_far:
 @large_next:
   tya
   clc
-  adc #128
+  adc #LARGE_SIZE
   tay
-  cpy #1536
-.ifdef GIANT_ENEMIES
+  cpy #LARGE_COUNT*LARGE_SIZE
   beq :+
   jmp @large_head
 :
-.else
-  beq :+
-  jmp @large_head
-:
-.endif
-.endif
- .ifdef EXTENDED_STAGE_ENEMIES
   ldy #0
 @extended:
-  lda EXTENDED_POOL+8,y
+  lda EXTENDED_POOL+OBJ_TYPE,y
   and #255
   beq @extended_next
-  lda EXTENDED_POOL,y
-  state_code
-  sta a:0,x
-  lda EXTENDED_POOL+2,y
+  lda EXTENDED_POOL+SPR_CODE,y
   xba
-  sta a:2,x
+  sta a:PACKET_CODE,x
+  lda EXTENDED_POOL+SPR_CROSS,y
+  xba
+  sta a:PACKET_POSITION,x
   inx
   inx
   inx
@@ -184,87 +134,60 @@ flight_state_packet_far:
 @extended_next:
   tya
   clc
-  adc #32
+  adc #OBJECT_SIZE
   tay
-  cpy #17*32
+  cpy #EXTENDED_COUNT*OBJECT_SIZE
   bne @extended
- .endif
-  ; Active players use two pieces; death uses four; inactive players vanish.
-.if FLIGHT_DEATH
+  ; The four pieces of each player in the game.
   ldy #0
 @player_head:
-  lda PLAYER+8,y
+  lda PLAYER+PL_STATE,y
   and #255
   beq @player_next
   tya
   clc
-  adc #128
-  sta $b6
+  adc #PLAYER_SIZE
+  sta PLAYER_END
 @player_piece:
-  lda PLAYER,y
-  state_code
-  sta a:0,x
-  lda PLAYER+2,y
+  lda PLAYER+SPR_CODE,y
   xba
-  sta a:2,x
+  sta a:PACKET_CODE,x
+  lda PLAYER+SPR_CROSS,y
+  xba
+  sta a:PACKET_POSITION,x
   inx
   inx
   inx
   inx
   tya
   clc
-  adc #32
+  adc #SPRITE_SIZE
   tay
-  cpy $b6
+  cpy PLAYER_END
   bne @player_piece
   bra @player_check
 @player_next:
   tya
   clc
-  adc #128
+  adc #PLAYER_SIZE
   tay
 @player_check:
-  cpy #256
+  cpy #2*PLAYER_SIZE
   bcc @player_head
 @players_done:
-.else
-  ; The two native player pieces precede the player's projectiles.
-  lda PLAYER
-  and #255
-  xba
-  sta a:$0000,x
-  lda PLAYER+$20
-  and #255
-  xba
-  sta a:$0004,x
-  lda PLAYER+2
-  xba
-  sta a:$0002,x
-  lda PLAYER+2
-  clc
-  adc #16
-  xba
-  sta a:$0006,x
-  txa
-  clc
-  adc #8
-  tax
-.endif
-.ifdef CONTINUOUS_GAME
   jsl native_dive_append
-.endif
   ldy #0
 @shots:
-  lda SHOTS+8,y
+  lda SHOTS+SHOT_STATE,y
   and #255
   beq @next_shot
-  lda SHOTS,y
-  and #$0fff
-  state_code
-  sta a:$0000,x
-  lda SHOTS+2,y
+  lda SHOTS+SPR_CODE,y
+  and #$0fff                    ; and SPR_ATTR without bits 4-7
   xba
-  sta a:$0002,x
+  sta a:PACKET_CODE,x
+  lda SHOTS+SPR_CROSS,y
+  xba
+  sta a:PACKET_POSITION,x
   inx
   inx
   inx
@@ -272,32 +195,24 @@ flight_state_packet_far:
 @next_shot:
   tya
   clc
-  adc #32
+  adc #SHOT_SIZE
   tay
-  cpy #18*32
+  cpy #SHOT_COUNT*SHOT_SIZE
   bne @shots
   txa
   sec
- .if FLIGHT_PLAYER_AUX
-  sbc #$801c
- .else
-  sbc #$801a
- .endif
+  sbc #.loword(PACKET_OBJECTS)
   lsr
-  lsr
+  lsr                           ; / PACKET_RECORD
   xba
-  sta a:$8008
-.ifdef CONTINUOUS_GAME
+  sta a:PACKET_OBJECTS_COUNT
   jsl game_world_append
-.endif
-.ifdef FLIGHT_QUIET_ART
-  jsl quiet_packet_append
-.endif
   txa
   sec
-  sbc #$8002
-  sta $28
+  sbc #.loword(PACKET_SEA)
+  sta PACKET_LENGTH
   xba
-  sta a:$8000
-  sep #$20
+  sta a:PACKET_SIZE
+  a8
   rtl
+.assert PACKET_RECORD = 4 .and PACKET_ENERGY-PACKET_SCORE = 8, error

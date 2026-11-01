@@ -3,14 +3,6 @@
 import struct
 from ship_alignment import PITCH
 
-CODE = 0xBA00
-PHASE = 0x2ED6
-COUNT = 0x2ED8
-OFFSET = 0x2ED9
-SOURCE = 0x2EDA
-TARGET = 0x2EDC
-REMAIN = 0x2EDE
-
 
 def seed_commands(placement):
     """Three ready placement lists, shared by the four source planes."""
@@ -85,7 +77,6 @@ def layout(masks, pitch=PITCH):
 def geometry(row, placement, phase):
     """Final mask, source offset, placement and count; no runtime layout math."""
     left, width = placement
-    n = width + 1
     parts = []
 
     def source(x):
@@ -167,7 +158,6 @@ def prepare(scene, pool, cols):
     arenas = {}
     layouts = {}
     all_records = {}
-    cached = 0
     for region in sorted(cols):
         arena = Arena(addresses)
         records = {}
@@ -203,7 +193,6 @@ def prepare(scene, pool, cols):
                     offsets.append(pos)
                     pos += len(part)
                 payload = bytes([pos, *offsets[1:]]) + b"".join(parts)
-                cached += len(payload) <= 61
                 records[column, row] = (
                     bytes(placement) + b"\x01" + arena.put(payload) + seed_pointer(placement)
                 )
@@ -233,17 +222,11 @@ def prepare(scene, pool, cols):
     initial_arena = arenas[initial]
     for address, data in zip(addresses, initial_arena.blocks):
         replace(pool, address * 4, data)
-    scene.ship_row_layouts = all_records
     scene.ship_row_layouts_by_region = layouts
     scene.ship_column_programs = column_programs
-    scene.ship_rows_cached = cached
     scene.ship_row_geometry_bytes = max(a.used for a in arenas.values())
-    scene.ship_geometry_overflow_bytes = 0
     scene.ship_seed_data = bytes(seed_data[: max(seed_used) * 4])
-    scene.ship_seed_bytes = sum(seed_used)
-    scene.ship_geometry_arena = initial_arena
     scene.ship_geometry_arenas = arenas
-    scene.ship_geometry_tail = ((initial_arena.used % BLOCK) + 127) & ~127
     print(
         "Aligned ship rows",
         len(all_records),

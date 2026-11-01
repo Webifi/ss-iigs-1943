@@ -16,7 +16,7 @@ from sound_files import EFFECTS,EFFECT_LOG,RENDERER,WORK
 AMP=np.array([0,32,78,141,178,222,262,306,369,441,509,585,701,836,965,1112,
               1334,1595,1853,2146,2576,3081,3576,4135,5000,6006,7023,8155,9963,11976,14132,16382])
 
-def tone(row,reference):
+def tone(row):
     states=ssg_states(row['command'])[row['channel']]
     if any(v and noisy for _,t,p,v,on,noisy,n in states):raise ValueError('captured mixed/noise timbre required')
     if any(v&16 for _,t,p,v,on,noisy,n in states):raise ValueError('SSG envelope needs its captured control curve')
@@ -83,14 +83,13 @@ def mixed_bank(common_peak):
     """
     row=next(r for r in json.loads((EFFECTS/'captures.json').read_text())if r['command']==11)
     row=dict(row,channel=0,file=str(EFFECTS/'0b/ssg-0.wav'))
-    m,_=tone(row,None);raw,rate=readwav(row['file']);lo,hi=m['source_interval']
+    m,_=tone(row);raw,rate=readwav(row['file']);lo,hi=m['source_interval']
     count=256
     # One period of the capture, read from an 8x resample: the cut never
     # depends on where the period edges fall between source samples.
     highrate=resample(raw,rate,rate*8)
     wave=np.interp((lo+np.arange(count)/count*(hi-lo))*rate*8,np.arange(len(highrate)),highrate)
     wave-=wave.mean();peak=max(abs(wave));unit=np.clip(wave/peak,-1,1)
-    state=next(s for s in reversed(ssg_states(11)[0])if s[1]<=lo)
     tone_peak15=float(AMP[31])*.15/2
     # Keep the captured polarity and duty cycle. The DOC output filter,
     # not a filter baked at one root pitch, supplies the final bandwidth.

@@ -17,7 +17,9 @@ def prepare(out):
             offset += 3
             assert offset < 1024
         end = max(end, offset + 1)
-    text = (
+    # A pan step: the updates, the cross move, the hold flag; PAN_END ends it.
+    text = "PAN_TIME = 0\nPAN_DELTA = 1\nPAN_HOLD = 2\nPAN_STEP_SIZE = 3\nPAN_END = 255\n"
+    text += (
         "camera_pan_pointers:\n  .addr "
         + ",".join(f"camera_pan_data+{ptr - 0x8000}" for ptr in pointers)
         + "\ncamera_pan_data:\n"

@@ -5,16 +5,20 @@ vertically even when a neighbouring edge changes. All masks stay exact.
 """
 
 import struct
+
 from ship_alignment import PITCH
 
-STAGING = 0x5C00
-STAGING_END = 0x5DA0  # Anchor code follows; damage maps flank this gap.
-MAX_RECTANGLES = (STAGING_END - STAGING - 1) // 8
+# The most rectangles of a column. The rectangle list (ship_rectangles of
+# src/secondsight/ship_columns.s) is a count, then 8 bytes for each rectangle; it
+# fills the ship staging (secondsight.ld checks that it fits).
+MAX_RECTANGLES = 51
 
 
 def prepare(world, columns, pitches=None):
-    from ship_rows import layout, geometry
+    from secondsight_link import generate_include
+    from ship_rows import geometry, layout
 
+    generate_include("ship_columns", f"        .equ MAX_RECTANGLES, {MAX_RECTANGLES} ; scripts/ship_columns.py\n")
     result = {}
     pitches = pitches or {}
     for column in sorted(columns):
@@ -101,9 +105,6 @@ def prepare(world, columns, pitches=None):
                         assert so - ((end - 1) * pitch if aux else (32 - end) * 56) == (
                             source & 127 if aux else source
                         )
-                    assert STAGING + 1 + len(data) <= STAGING_END, (
-                        "Ship command DMA exceeds background staging"
-                    )
                     phases.append(bytes([len(rectangles)]) + data)
                 if len(phases) != 4:
                     break

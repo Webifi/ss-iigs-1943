@@ -17,15 +17,3 @@ def data():
     )
     return b"".join(names), offsets, digits
 
-
-def prepare(out):
-    names, offsets, digits = data()
-    (out / "weapon_timer_data.inc").write_text(
-        "weapon_names:\n .byte "
-        + ",".join(map(str, names))
-        + "\nweapon_name_offsets:\n .word "
-        + ",".join(map(str, offsets))
-        + "\nweapon_timer_digits:\n .byte "
-        + ",".join(map(str, digits))
-        + "\n"
-    )

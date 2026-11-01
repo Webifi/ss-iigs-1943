@@ -64,6 +64,13 @@ def prepare(out):
     operations = collect()
     text = [
         f"SIMPLE_SPAWN_COUNT = {len(operations)}",
+        "; A plan: the record count, then each record: SP_CAPACITY, SP_TEMPLATE,",
+        "; SP_PATCH_COUNT, then the patches (offset, value).",
+        "SP_CAPACITY = 0",
+        "SP_TEMPLATE = 1",
+        "SP_PATCH_COUNT = 3",
+        "SP_RECORD_SIZE = 4",
+        "SP_PATCH_SIZE = 2",
         "simple_spawn_plans:",
         "  .addr " + ",".join(f"simple_spawn_{i}" for i in range(len(operations))),
     ]

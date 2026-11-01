@@ -1,12 +1,10 @@
 """Diagnostic: prepare intro metadata first, then draw into hidden title twins."""
 
-READY = 0x7BF7
-ROW = 0x7BF8
 
 
 def place_banked(scene):
-    """The prepaint helper, in the banked code page (region bank-code of src/card/memory.toml)."""
-    from card_link import alias
+    """The prepaint helper, in the banked code page (.bank_code of secondsight.ld)."""
+    from secondsight_link import alias
 
     for name, value in zip(("hitch_jobs_bank", "hitch_jobs_pointer", "hitch_jobs_segment"), scene.hitch_jobs):
         alias(name, value)
@@ -45,12 +43,11 @@ def preservation_jobs(scene):
 def place_preservation_jobs(scene, jobs):
     """The jobs follow the selector code in plane 3 of the repair core block."""
     from asset_source import Source, derived
-    from card_link import asset
+    from secondsight_link import asset
 
     source = Source("title preservation jobs (scripts/hitch_scene.py)")
     source.section(".plane.repair_cores.3.1").label("hitch_jobs").data(jobs)
     asset("hitch_jobs", source)
     scene.hitch_jobs = tuple(derived(kind, "hitch_jobs") for kind in ("pbbr", "pptr", "pseg"))
-    scene.hitch_jobs_plane = 3
 
 

@@ -1,35 +1,40 @@
-; Native cabinet presentation. Timers advance with the game clock, not draws.
-; ROM material below is text, art and the authored attract control sequence.
+; The cabinet pages and the attract (native): the power-on page, the
+; rankings, the title and its P-38 fly-in, the demo with the arcade's
+; recorded controls, the start of a game, and the ending pages. The timers
+; count game updates, not pictures. The texts, the art and the demo controls
+; come from the arcade ROM at build time (scripts/arcade_flow.py).
 .a8
 .i16
-CAB_PAGE = $14c0
-CAB_LOADED = $14c1
-CAB_LOADING = $14c2
-CAB_WAIT = $14c4
-CAB_LIST = $14c6
-CAB_OFFSET = $14ca
-CAB_LENGTH = $14cc
-CAB_PACKET_MODE = $14ce
-CAB_START_PENDING = $14cf
-CAB_SCORES = $01b300
-CAB_DEMO = $1520
-CAB_DEMO_POS = $1522
-CAB_DEMO_HOLD = $1524
-CAB_BLINK = $1525
-CAB_PLANE_STEP = $1526
-CAB_PLANE_WAIT = $1527
-CAB_WORLD_TARGET = $1528
-CAB_KEYS = $1529
-CAB_ENDING_STEP = $152a
-CAB_ENDING = $152b
-CAB_ENDING_TEXT = $1544
-CAB_ENDING_RATE = $1545
-CAB_LAYOUT_LOADED = $1546
-GAME_RNG_SKIP = $17fc
+; cabinet_wire_mode: the layout of the card for this packet (CABINET_LAYOUTS;
+; the layouts: cabinet_layouts.inc).
+LAYOUT_SIZE = 6              ; a CABINET_LAYOUTS entry: the length, the long address
+UPLOAD_SIZE = 6              ; an entry of a CABINET_PAGES list: the same
+; The times, in game updates.
+POWER_ON_TICKS = 30          ; PAGE_POWER_ON
+TITLE_TICKS = 210            ; PAGE_TITLE: arcade $0324 + $0330 = 420 ticks
+RANKING_TICKS = 240          ; PAGE_RANKING: 480 arcade ticks
+RANKING_PRELOAD = 180        ; PAGE_RANKING: CAB_WAIT under this: the demo loads
+DEMO_END_TICKS = 180         ; DEMO_END: the wait before the next scene
+BLINK_PERIOD = 45            ; INSERT COIN: on for BLINK_ON updates of each period
+BLINK_ON = 30
+PLANE_TICKS = 2              ; CAB_PLANE_WAIT: the arcade ticks of one update
+PLANE_STEP_SIZE = 3          ; cabinet_plane_frames: the ticks, the scroll word
+FRAMES_END = 255             ; cabinet_plane_frames, cabinet_demo_controls: the end
+NO_SOUND = 255               ; cabinet_ending_sounds: no sound
+ATTRACT_STAGE = 2            ; CAMERA_STAGE: the attract uses the third stage
+INTRO_SCROLL = $d000         ; CAMERA_BG1_SCROLL: the resident intro rows, all clear
+DEMO_BG1_SCROLL = $b000      ; the demo start (arcade)
+DEMO_BG2_SCROLL = $3000
+DEMO_STAGE_OFFSET = $18
+START_SCROLL = $d0ff         ; the game start: arcade $0F2A, before the first event
+PLAYER_TEMPLATE = 40         ; cabinet_player_start, cabinet_demo_player: the bytes
+SEA_IDLE_WRAP = $1000        ; the attract sea scroll wraps at this
 
+; cabinet_init: the power-on page; the scores of the arcade ranking; no
+; demo, no ending, no result. JSL.
 cabinet_init:
   jsl native_dive_reset
-  lda #5
+  lda #PAGE_POWER_ON
   sta CAB_PAGE
   sta CAB_LOADED
   sta GAME_FLOW
@@ -41,59 +46,67 @@ cabinet_init:
   stz CAB_ENDING
   stz CAB_RESULT_ACTIVE
   stz CAB_LAYOUT_LOADED
-  lda #255
+  lda #WORLD_NONE
   sta CAB_WORLD_TARGET
-  rep #$20
+  a16
   stz CAB_OFFSET
-  lda #31                     ; first cabinet tick consumes one count immediately
+  lda #POWER_ON_TICKS+1         ; the first cabinet tick takes one at once
   sta CAB_WAIT
-  ldx #78
+  ldx #CAB_SCORES_SIZE-2
 @score:
   lda f:cabinet_initial_scores,x
   sta f:CAB_SCORES,x
   dex
   dex
   bpl @score
-  ldx #14
+  ldx #2*SCORE_DIGITS-2
 @clear_scores:
   stz CAB_ENDING_SCORES,x
   dex
   dex
   bpl @clear_scores
-  sep #$20
+  a8
   jsl cabinet_live_reset
   rtl
 
-; Main-loop entry after live keyboard sampling. The ordinary flow owns coins
-; and real-game continue rules. Demo input never replaces system/coin input.
+; cabinet_frame: the cabinet work of a main-loop update, after the input
+; sample: the menu, the live initials, the stage result, the game flow
+; (coins and continues), then the attract (cabinet_tick) during the demo.
+; The demo controls never replace the system and coin input. With the
+; SCREEN STOP switch on, only the menu runs. JSL.
 cabinet_frame:
   jsl native_input_menu
+  lda GAME_DIP_A
+  and #DIP_A_STOP               ; 0: SCREEN STOP: the cabinet stops too
+  beq @done
   jsl cabinet_live_tick
   jsl cabinet_result_tick
   jsl game_flow_tick
   lda CAB_DEMO
   beq @done
   lda GAME_FLOW
-  cmp #3
+  cmp #CAB_PAGE_FIRST
   bcs @done
   jsl cabinet_tick
 @done:
   rtl
 
+; cabinet_select: show the page A. In the ending all ending pages use the
+; one loaded picture. PAGE_TITLE starts the fly-in; PAGE_POWER_ON and the
+; ending pages have no page picture (PAGE_NONE). JSL.
 cabinet_select:
   pha
   jsl native_dive_reset
   lda CAB_ENDING
   beq @ordinary
   lda CAB_LOADED
-  cmp #17
+  cmp #PAGE_ENDING_FIRST
   bcc @ordinary
   pla
   sta CAB_PAGE
   sta GAME_FLOW
-  sta CAB_LOADED               ; all ending text uses the one loaded tableau
+  sta CAB_LOADED
   stz CAB_ENDING_TEXT
-  stz CAB_ENDING_RATE
   rtl
 @ordinary:
   pla
@@ -101,48 +114,55 @@ cabinet_select:
   sta GAME_FLOW
   stz CAB_LOADING
   stz CAB_DEMO
-  rep #$20
+  a16
   stz CAB_OFFSET
-  sep #$20
+  a8
   lda CAB_PAGE
-  cmp #5
+  cmp #PAGE_POWER_ON
   beq @static
-  cmp #17
+  cmp #PAGE_ENDING_FIRST
   bcs @static
   sta CAB_LOADED
-  cmp #4
+  cmp #PAGE_TITLE
   bne @done
   jsl cabinet_clear_play
-  lda #255
+  lda #PAGE_NONE
   sta CAB_LOADED
-  sta WORLD_TAGS+1             ; cabinet_surface borrows world slot 1 only
-  sta CAB_WORLD_TARGET
+  sta WORLD_TAGS+1              ; WORLD_NONE: cabinet_surface takes world slot 1 only
+  sta CAB_WORLD_TARGET          ; WORLD_NONE
   stz CAB_PLANE_STEP
   stz CAB_BLINK
-  lda #2
+  lda #PLANE_TICKS
   sta CAB_PLANE_WAIT
-  rep #$20
-  lda #$d000
-  sta CAMERA+$0f
-  lda #210                    ; $0324 plus $0330 = 420 arcade ticks
+  a16
+  lda #INTRO_SCROLL
+  sta CAMERA_BG1_SCROLL
+  lda #TITLE_TICKS
   sta CAB_WAIT
-  sep #$20
+  a8
 @done:
   rtl
 @static:
-  lda #255
+  lda #PAGE_NONE
   sta CAB_LOADED
   rtl
+.assert PAGE_NONE = WORLD_NONE, error
 
+; cabinet_tick: one attract update. A start waits for the page and the world
+; loads, then cabinet_start. A credit shows the title of the credits; START
+; pays and starts the music. With no credit: the demo blinks INSERT COIN; a
+; page counts down, then the next page: power-on, the first ranking, the
+; demo; the title, the ranking, the demo. The sea scrolls under the pages.
+; JSL.
 cabinet_tick:
-  lda $d0
+  lda SYSTEM_PRESSED
   sta CAB_KEYS
   lda CAB_START_PENDING
   beq @coin
   lda CAB_LOADING
   bne @done
   lda WORLD_LOADING
-  cmp #255
+  cmp #WORLD_NONE
   bne @done
   jmp .loword(cabinet_start)
 @coin:
@@ -155,13 +175,13 @@ cabinet_tick:
   cmp #1
   bne @both
   lda GAME_DIP_A
-  and #16
+  and #DIP_A_TWO_CREDITS
   bne @one
 @both:
-  lda #7
+  lda #PAGE_COIN_TWO
   bra @title
 @one:
-  lda #6
+  lda #PAGE_COIN_ONE
 @title:
   cmp CAB_PAGE
   beq @start
@@ -169,20 +189,20 @@ cabinet_tick:
   jsl cabinet_clear_play
   pla
   jsl cabinet_select
-  stz CAMERA_STAGE             ; preload the real first stage while waiting
-  lda #255
+  stz CAMERA_STAGE              ; the first stage loads during the wait
+  lda #WORLD_NONE
   sta CAB_WORLD_TARGET
 @start:
   lda CAB_KEYS
-  and #1
+  and #SYSTEM_START1
   bne @one_player
   lda CAB_KEYS
-  and #2
+  and #SYSTEM_START2
   bne :+
   jmp .loword(@idle_sea)
 :
   lda GAME_DIP_A
-  and #16
+  and #DIP_A_TWO_CREDITS
   beq @two_cost_one
   lda GAME_CREDITS
   cmp #2
@@ -208,7 +228,7 @@ cabinet_tick:
   beq @presentation
   inc CAB_BLINK
   lda CAB_BLINK
-  cmp #45                     ; insert-coin blink: 60 on, 30 off game ticks
+  cmp #BLINK_PERIOD
   bcc :+
   stz CAB_BLINK
 :
@@ -217,127 +237,130 @@ cabinet_tick:
   lda CAB_PAGE
   cmp CAB_LOADED
   beq :+
-  jmp .loword(@idle_sea)
+  jmp .loword(@idle_sea)        ; the page still loads
 :
-  cmp #4
+  cmp #PAGE_TITLE
   beq @plane
-  cmp #16
+  cmp #PAGE_RANKING
   bne @timer
 @plane:
   lda CAB_PAGE
-  cmp #4
+  cmp #PAGE_TITLE
   bne @ranking_preload
   inc CAB_BLINK
   lda CAB_BLINK
-  cmp #45
+  cmp #BLINK_PERIOD
   bcc @plane_draw
   stz CAB_BLINK
   bra @plane_draw
 @ranking_preload:
-  ; Once the ranking and plane have been composed on the hidden page, the
-  ; borrowed art surface can be reused to prepare the next live demo. Keep
-  ; displaying the ranking while the normal world loader fills that slot.
+  ; The ranking stays on the card; at RANKING_PRELOAD the world loader takes
+  ; the art surface back for the demo (GAME_FLOW PAGE_RANKING_FIRST).
   lda GAME_FLOW
-  cmp #3
+  cmp #PAGE_RANKING_FIRST
   beq @timer
-  rep #$20
+  a16
   lda CAB_WAIT
-  cmp #180
-  sep #$20
+  cmp #RANKING_PRELOAD
+  a8
   bcs @plane_draw
-  lda #3
+  lda #PAGE_RANKING_FIRST
   sta GAME_FLOW
-  lda #2
+  lda #ATTRACT_STAGE
   sta CAMERA_STAGE
-  rep #$20
-  lda #$d000
-  sta CAMERA+$0f
-  sep #$20
+  a16
+  lda #INTRO_SCROLL
+  sta CAMERA_BG1_SCROLL
+  a8
   bra @timer
 @plane_draw:
   jsr .loword(cabinet_plane_tick)
 @timer:
-  rep #$20
+  a16
   lda CAB_WAIT
   beq @advance
   dec CAB_WAIT
   bne @idle16
 @advance:
-  sep #$20
+  a8
   lda CAB_PAGE
-  cmp #5
+  cmp #PAGE_POWER_ON
   bne @after_warning
   jsl cabinet_clear_play
-  lda #2
-  sta CAMERA_STAGE             ; attract uses the third stage's land section
-  inc GAME_RNG_SKIP            ; coin task misses this transition frame in 1943ua
-  lda #3
+  lda #ATTRACT_STAGE            ; the land section of the third stage
+  sta CAMERA_STAGE
+  inc GAME_RNG_SKIP             ; 1943ua: the coin task misses this frame
+  lda #PAGE_RANKING_FIRST
   bra @ranking
 @after_warning:
 .a8
-  cmp #4
+  cmp #PAGE_TITLE
   bne @demo
-  lda #16
+  lda #PAGE_RANKING
 @ranking:
   jsl cabinet_select
-  rep #$20
-  lda #240                    ; ranking: 480 arcade ticks
+  a16
+  lda #RANKING_TICKS
   sta CAB_WAIT
   bra @idle16
 @demo:
 .a8
   jmp .loword(cabinet_demo_start)
 @idle16:
-  sep #$20
+  a8
 @idle_sea:
-  rep #$20
-  inc CAMERA
-  lda CAMERA
-  and #$0fff
-  sta CAMERA
-  sep #$20
+  a16
+  inc CAMERA_BG2_SCROLL          ; the sea scrolls under the pages
+  lda CAMERA_BG2_SCROLL
+  and #SEA_IDLE_WRAP-1
+  sta CAMERA_BG2_SCROLL
+  a8
   rtl
 
+; cabinet_clear_play: no sound, no play: the players, the camera (the intro
+; rows), the stage flags and the game state cleared. JSL.
 cabinet_clear_play:
-  lda #0
+  lda #SND_STOP_ALL
   jsl game_sound_request
   jsl gameplay_reset_far
-  rep #$20
-  ldx #254
+  a16
+  ldx #2*PLAYER_SIZE-2
 @players:
   stz PLAYER,x
   dex
   dex
   bpl @players
-  ldx #38
+  ldx #CAMERA_SIZE-2
 @camera:
   stz CAMERA,x
   dex
   dex
   bpl @camera
-  lda #$d000                   ; resident, fully transparent intro map rows
-  sta CAMERA+$0f
+  lda #INTRO_SCROLL
+  sta CAMERA_BG1_SCROLL
   stz GAME_SEQUENCE_TICKS
-  ldx #62
+  ldx #STAGE_FLAGS_SIZE-2
 @flags:
   stz STAGE_FLAGS,x
   dex
   dex
   bpl @flags
-  sep #$20
+  a8
   stz GAME_OUT
   stz GAME_SEQUENCE
   stz GAME_STAGE_EXIT
-  stz STAGE_EVENTS
   stz STAGE_BOSS_COUNT
   stz PLAYER_UI_MODE
   stz PLAYER_UI_MODE+1
   stz CAB_DEMO
   rtl
 
+; cabinet_demo_start: the demo starts when its world is loaded (the quiet
+; title time loads it; the ranking scrolls until the last upload is in);
+; else the world loads under the first ranking. The demo: two players from
+; the arcade templates, the attract stage, 2 * LOOPS_PER_PLAYER loops, and a
+; death ends the demo (no continue). JSL.
 cabinet_demo_start:
-  ; Quiet title time loads the demo region. A bounded final upload may still
-  ; be in flight; the displayed ranking keeps scrolling until it completes.
   lda WORLD_TAGS
   cmp #WORLD_DEMO_ID
   beq @ready
@@ -345,93 +368,92 @@ cabinet_demo_start:
   cmp #WORLD_DEMO_ID
   beq @ready
   lda CAB_PAGE
-  cmp #3
+  cmp #PAGE_RANKING_FIRST
   beq :+
-  lda #3
+  lda #PAGE_RANKING_FIRST
   jsl cabinet_select
 :
-  lda #2
+  lda #ATTRACT_STAGE
   sta CAMERA_STAGE
-  lda #255
+  lda #WORLD_NONE
   sta CAB_WORLD_TARGET
-  rep #$20
-  lda #$d000
-  sta CAMERA+$0f
-  sep #$20
+  a16
+  lda #INTRO_SCROLL
+  sta CAMERA_BG1_SCROLL
+  a8
   rtl
 @ready:
   jsl cabinet_clear_play
-  rep #$20
-  ldx #38
+  a16
+  ldx #PLAYER_TEMPLATE-2
 @players:
   lda f:cabinet_demo_player,x
   sta PLAYER,x
   lda f:cabinet_demo_player_two,x
-  sta PLAYER+128,x
+  sta PLAYER2,x
   dex
   dex
   bpl @players
-  lda #$b000
-  sta CAMERA+$0f
-  lda #$3000
-  sta CAMERA
- .ifdef STAGE_COMPACT
-  lda #$18
- .else
-  lda #$24
- .endif
-  sta CAMERA+$11
+  lda #DEMO_BG1_SCROLL
+  sta CAMERA_BG1_SCROLL
+  lda #DEMO_BG2_SCROLL
+  sta CAMERA_BG2_SCROLL
+  lda #DEMO_STAGE_OFFSET
+  sta CAMERA_STAGE_OFFSET
   stz CAB_DEMO_POS
-  sep #$20
-  lda #2
+  a8
+  lda #ATTRACT_STAGE
   sta CAMERA_STAGE
   lda #1
-  sta CAMERA+2
-  sta CAB_DEMO
+  sta CAMERA_BG2_DIVISOR
+  sta CAB_DEMO                  ; DEMO_PLAY
   sta GAME_TWO_PLAYERS
-  lda #4
+  lda #2*LOOPS_PER_PLAYER
   stz SPECIAL_TIMER
-  stz BULLET_CONTEXT+1
-  sta GAME_CONTINUE_LEVEL
+  stz BULLET_SUPPRESS
+  sta GAME_CONTINUE_LEVEL       ; SPECIAL_LOOPS
   jsl special_sync_shadow
-  lda #255
+  lda #WORLD_NONE
   sta CAB_WORLD_TARGET
   stz CAB_DEMO_HOLD
   stz CAB_BLINK
-  stz DEATH_CONTEXT+3          ; attract: death exits instead of offering continue
-  stz DEATH_CONTEXT+6
+  stz DEATH_PLAYING             ; the attract: a death ends the demo
+  stz DEATH_DEMO_END
   stz GAME_FLOW
   stz CAB_PAGE
   stz CAB_LOADED
   ldx #0
   jsl player_energy_hud_far
-  ldx #128
+  ldx #PLAYER_SIZE
   jsl player_energy_hud_far
   rtl
+.assert DEMO_PLAY = 1, error
 
-; Called once per native 59.637-Hz game tick. These controls are the arcade's
-; authored ROM demo sequence, converted at build time; no captured play state.
+; cabinet_controls: one game tick of the demo: INPUT_P1 and INPUT_P2 from
+; the arcade's recorded demo controls (cabinet_demo_controls: the ticks to
+; hold, then a cabinet_demo_dictionary pair). After DEMO_END_TICKS of
+; DEMO_END the title comes back; in that wait no control is held. JSL.
 cabinet_controls:
   lda CAB_DEMO
   bne :+
   rtl
 :
-  cmp #2
+  cmp #DEMO_END
   beq @tail
   ldx CAB_DEMO_POS
   lda CAB_DEMO_HOLD
   bne @controls
   lda f:cabinet_demo_controls+1,x
-  cmp #255
+  cmp #FRAMES_END
   beq @end
   phx
-  rep #$20
+  a16
   and #$00ff
   asl
   tax
   lda f:cabinet_demo_dictionary,x
   sta f:cabinet_demo_cached
-  sep #$20
+  a8
   plx
   lda f:cabinet_demo_controls,x
   sta CAB_DEMO_HOLD
@@ -450,279 +472,290 @@ cabinet_controls:
 @end:
   jsl cabinet_demo_finish
 @tail:
-  rep #$20
+  a16
   dec CAB_WAIT
   bne @tail_done
-  sep #$20
-  lda #4
+  a8
+  lda #PAGE_TITLE
   jsl cabinet_select
   rtl
 @tail_done:
-  sep #$20
-  lda #255
+  a8
+  lda #INPUT_NONE
   sta INPUT_P1
   sta INPUT_P2
   rtl
 
-; The arcade ends attract at the first completed player death ($8BCF-$8BDD)
-; or at the end of the authored controls ($19F0). Both wait 180 game ticks.
-; Freeze gameplay during this wait, while coins and the cabinet clock run.
+; cabinet_demo_finish: the demo ends at the first finished player death
+; (arcade $8BCF-$8BDD) or at the end of the controls ($19F0): DEMO_END for
+; DEMO_END_TICKS. The play stays frozen; the coins and the cabinet clock
+; run. JSL.
 cabinet_demo_finish:
   lda CAB_DEMO
-  cmp #1
+  cmp #DEMO_PLAY
   bne @done
-  lda #2
+  lda #DEMO_END
   sta CAB_DEMO
-  rep #$20
-  lda #180
+  a16
+  lda #DEMO_END_TICKS
   sta CAB_WAIT
-  sep #$20
+  a8
 @done:
   rtl
 
+; cabinet_plane_tick: the P-38 fly-in of the title: each step of
+; cabinet_plane_frames holds its ticks, then sets CAMERA_BG1_SCROLL (the
+; plane rows). JSR.
 cabinet_plane_tick:
   lda CAB_PLANE_WAIT
   sec
-  sbc #2
+  sbc #PLANE_TICKS
   sta CAB_PLANE_WAIT
   bcc @next
   beq @next
   rts
 @next:
   lda CAB_PLANE_STEP
-  rep #$20
+  a16
   and #255
   tax
-  sep #$20
+  a8
   lda f:cabinet_plane_frames,x
-  cmp #255
+  cmp #FRAMES_END
   beq @done
   clc
-  adc CAB_PLANE_WAIT          ; retain the odd tick between 30 Hz pictures
+  adc CAB_PLANE_WAIT            ; keep the odd tick between 30 Hz pictures
   sta CAB_PLANE_WAIT
-  rep #$20
+  a16
   lda f:cabinet_plane_frames+1,x
-  sta CAMERA+$0f
-  sep #$20
+  sta CAMERA_BG1_SCROLL
+  a8
   inx
   inx
-  inx
+  inx                           ; PLANE_STEP_SIZE
   txa
   sta CAB_PLANE_STEP
 @done:
   rts
 
-; The first byte of the world trailer carries a display layout, independently
-; of the host's live-game state. The next frame's raw packet stays untouched.
+; cabinet_wire_mode: A = the layout of this packet (the first byte of the
+; world trailer), apart from the play state; LAYOUT_LOADING while a page
+; picture loads. JSL.
 cabinet_wire_mode:
   lda CAB_RESULT_ACTIVE
   beq @ordinary
   lda CAB_RESULT_PHASE
   bne @statistics
-  lda CAB_RESULT_DATA+1
+  lda CAB_RESULT_DATA+CRD_RESULT
   beq @success
-  lda CAB_RESULT_DATA+7
-  and #1
+  lda CAB_RESULT_DATA+CRD_FLAGS
+  and #CRD_RETRY
   beq :+
-  lda #44
+  lda #LAYOUT_FAILED_RETRY
   rtl
 :
-  lda #31
+  lda #LAYOUT_FAILED
   rtl
 @success:
-  lda CAB_RESULT_DATA
+  lda CAB_RESULT_DATA+CRD_STAGE
   clc
-  adc #46
+  adc #LAYOUT_SUCCESS
   rtl
 @statistics:
-  lda CAB_RESULT_DATA+5
+  lda CAB_RESULT_DATA+CRD_REFILL
   bne :+
-  lda CAB_RESULT_DATA+3
+  lda CAB_RESULT_DATA+CRD_BAND
   clc
-  adc #62
+  adc #LAYOUT_STATISTICS_NIL
   rtl
 :
-  lda CAB_RESULT_DATA+3
+  lda CAB_RESULT_DATA+CRD_BAND
   clc
-  adc #32
+  adc #LAYOUT_STATISTICS
   rtl
 @ordinary:
   lda CAB_DEMO
-  cmp #2
-  beq @demo                    ; the insert-coin prompt keeps blinking
+  cmp #DEMO_END
+  beq @demo                     ; INSERT COIN still blinks
   lda GAME_FLOW
-  cmp #3
+  cmp #PAGE_RANKING_FIRST
   bne :+
   lda CAB_PAGE
-  cmp #16
+  cmp #PAGE_RANKING
   bne :+
-  lda #16                     ; ranking stays visible while demo loads
+  lda #PAGE_RANKING             ; the ranking stays while the demo loads
   rtl
 :
   lda GAME_FLOW
   beq @demo
-  cmp #4
+  cmp #PAGE_TITLE
   beq @static
-  cmp #5
+  cmp #PAGE_POWER_ON
   beq @static
-  cmp #17
+  cmp #PAGE_ENDING_FIRST
   bcc @done
-  cmp #30
+  cmp #PAGE_ENDING_END
   bcs @done
 @static:
   cmp CAB_LOADED
   beq @done
-  ora #128
+  ora #LAYOUT_LOADING
   rtl
 @demo:
   lda CAB_LIVE_LAYOUT
   beq :+
-  lda #85                     ; live text overlay, gameplay remains active
+  lda #LAYOUT_LIVE              ; the live initials; the play goes on
   rtl
 :
   lda CAB_DEMO
   beq @done
   lda CAB_BLINK
-  cmp #30
-  lda #1
+  cmp #BLINK_ON
+  lda #LAYOUT_DEMO
   bcc @done
-  inc
+  inc                           ; LAYOUT_DEMO_BLINK
 @done:
   rtl
 
+; cabinet_world_request: A = CAB_WORLD_TARGET when it is set, else A stays
+; (the world loader's choice). JSL.
 cabinet_world_request:
   pha
   lda CAB_WORLD_TARGET
-  cmp #255
+  cmp #WORLD_NONE
   beq @normal
-  pla
-  lda CAB_WORLD_TARGET
-  rtl
+  sta 1,s
 @normal:
   pla
   rtl
 
+; cabinet_start: a game starts: the players from the arcade templates (P2 in
+; a game of two; with one player P2 is out), LOOPS_PER_PLAYER loops for
+; each player, the camera at START_SCROLL, the stage flags cleared, the
+; takeoff (STAGE_FINISH), all spawn slots; a difficulty changed in the menu
+; (game_difficulty_init). JSL.
 cabinet_start:
+  lda GAME_DIP_A                ; a difficulty changed in the menu applies now
+  eor #$ff
+  and #DIP_A_LEVEL
+  cmp STAGE_DIP_LEVEL
+  beq :+
+  jsr .loword(game_difficulty_init)
+:
   jsl native_dive_reset
   jsl cabinet_live_reset
   jsl input_mouse_center
   lda #1
-  sta DEATH_CONTEXT+3
-  stz DEATH_CONTEXT+6
+  sta DEATH_PLAYING
+  stz DEATH_DEMO_END
   stz CAB_START_PENDING
   stz CAB_DEMO
   stz CAB_ENDING
   stz CAB_RESULT_ACTIVE
-  lda #255
+  lda #WORLD_NONE
   sta CAB_WORLD_TARGET
   stz GAME_OUT
-  stz GAME_CONTINUE_LEVEL
-  jsl special_sync_shadow
   stz SPECIAL_TIMER
-  stz BULLET_CONTEXT+1
-  lda #2
-  sta SPECIAL_LOOPS
-  jsl special_sync_shadow
-  lda GAME_TWO_PLAYERS
+  stz BULLET_SUPPRESS
+  lda GAME_TWO_PLAYERS          ; LOOPS_PER_PLAYER for each player
   beq :+
-  lda #4
+  lda #LOOPS_PER_PLAYER
+:
+  clc
+  adc #LOOPS_PER_PLAYER
   sta SPECIAL_LOOPS
   jsl special_sync_shadow
-:
   stz PLAYER_UI_MODE
   stz PLAYER_UI_MODE+1
-  rep #$20
-  ldx #14
+  a16
+  ldx #2*SCORE_DIGITS-2
 @clear_attempts:
   stz CAB_ENDING_SCORES,x
   dex
   dex
   bpl @clear_attempts
-  sep #$20
+  a8
   lda GAME_TWO_PLAYERS
   bne :+
-  lda #2
+  lda #OUT_P2
   sta GAME_OUT
 :
   jsl gameplay_reset_far
-  rep #$20
-  ldx #254
+  a16
+  ldx #2*PLAYER_SIZE-2
 @player:
   stz PLAYER,x
   dex
   dex
   bpl @player
-  ldx #38
+  ldx #PLAYER_TEMPLATE-2
 @template:
   lda f:cabinet_player_start,x
   sta PLAYER,x
   dex
   dex
   bpl @template
-  sep #$20
+  a8
   lda GAME_TWO_PLAYERS
   beq @one
-  rep #$20
-  ldx #38
+  a16
+  ldx #PLAYER_TEMPLATE-2
 @second:
   lda f:cabinet_player_two_start,x
-  sta PLAYER+128,x
+  sta PLAYER2,x
   dex
   dex
   bpl @second
 @one:
-  sep #$20
+  a8
   lda #1
-  sta PLAYER+$85
-  rep #$20
-  ldx #36
+  sta PLAYER2+PL_NUMBER
+  a16
+  ldx #CAMERA_SIZE-4            ; all but the last word of the camera
 @camera:
   stz CAMERA,x
   dex
   dex
   bpl @camera
-  lda #$d0ff                    ; US $0F2A, before the first native event
-  sta CAMERA+$0f
-  stz $6c
-  sta $6e
+  lda #START_SCROLL
+  sta CAMERA_BG1_SCROLL
+  stz SEA_CAMERA
+  sta FG_CAMERA
   stz GAME_SEQUENCE_TICKS
-  ldx #62
+  ldx #STAGE_FLAGS_SIZE-2
 @flags:
   stz STAGE_FLAGS,x
   dex
   dex
   bpl @flags
-  sep #$20
+  a8
   lda #1
-  sta CAMERA+2
-  sta STAGE_FLAGS+$10           ; original E150, takeoff control
-  lda #16
-  sta STAGE_DIFFICULTY+6
+  sta CAMERA_BG2_DIVISOR
+  sta STAGE_FINISH              ; arcade E150: the takeoff
+  lda #ENEMY_COUNT              ; spawns may use all the small-object slots
+  sta STAGE_SPAWN_SLOTS
   stz GAME_FLOW
   stz GAME_SEQUENCE
   stz GAME_STAGE_EXIT
-  stz STAGE_EVENTS
   stz STAGE_BOSS_COUNT
-  stz DEATH_CONTEXT+5
-  lda #1
-  sta DEATH_CONTEXT+4
-  stz PLAYER+$54             ; start with the cleared arcade fire timer
+  stz PLAYER+PL_CADENCE         ; the arcade fire timer starts cleared
   ldx #0
   jsl player_energy_hud_far
   lda GAME_TWO_PLAYERS
   beq :+
-  ldx #128
+  ldx #PLAYER_SIZE
   jsl player_energy_hud_far
 :
   rtl
 
-
+; cabinet_ending: the game is complete: keep the scores of the players in
+; the game (CAB_POST_MASK), clear the play, then the ending pages
+; (ENDING_PAGES) from PAGE_ENDING_FIRST. JSL.
 cabinet_ending:
-  ; Preserve the completed scores while clearing live gameplay objects.
   phx
   phy
   stz CAB_POST_MASK
-  lda PLAYER+8
+  lda PLAYER+PL_STATE
   beq :+
   inc CAB_POST_MASK
   ldx #0
@@ -730,12 +763,12 @@ cabinet_ending:
   jsr .loword(native_retain_score)
   jsr .loword(native_restore_score)
 :
-  lda PLAYER+$88
+  lda PLAYER2+PL_STATE
   beq :+
   lda CAB_POST_MASK
-  ora #2
+  ora #2                        ; bit 1: player 2; bit 0: player 1
   sta CAB_POST_MASK
-  ldx #128
+  ldx #PLAYER_SIZE
   ldy #1
   jsr .loword(native_retain_score)
   jsr .loword(native_restore_score)
@@ -745,44 +778,45 @@ cabinet_ending:
   jsl cabinet_save_scores
   jsl cabinet_clear_play
   phx
-  rep #$20
-  ldx #6
+  a16
+  ldx #SCORE_DIGITS-2
 @restore_scores:
   lda CAB_ENDING_SCORES,x
-  sta PLAYER+$38,x
-  lda CAB_ENDING_SCORES+8,x
-  sta PLAYER+$b8,x
+  sta PLAYER+PL_SCORE,x
+  lda CAB_ENDING_SCORES+SCORE_DIGITS,x
+  sta PLAYER2+PL_SCORE,x
   dex
   dex
   bpl @restore_scores
-  sep #$20
+  a8
   plx
   jsl cabinet_actors_init
-  lda #1
+  lda #ENDING_PAGES
   sta CAB_ENDING
   stz CAB_ENDING_STEP
   stz CAB_ENDING_TEXT
-  stz CAB_ENDING_RATE
-  lda #17
+  lda #PAGE_ENDING_FIRST
   jsl cabinet_select
-  lda #17
+  lda #PAGE_ENDING_FIRST
   jsl cabinet_text_select
-  lda #0                      ; stop the stage cue before the ending opens
+  lda #SND_STOP_ALL             ; the stage music stops before the ending
   jsl game_sound_request
   rtl
 
+; cabinet_ending_tick: one update of the ending: the actors and the typed
+; text of the page; a finished page goes to the next (cabinet_ending_pages,
+; its sound); after the last one, the initials (cabinet_post) when the live
+; initials are done. ENDING_POST runs cabinet_post_tick. JSL.
 cabinet_ending_tick:
   lda CAB_ENDING
-  cmp #2
+  cmp #ENDING_POST
   bne :+
   jml cabinet_post_tick
 :
   lda CAB_PAGE
   cmp CAB_LOADED
   bne @done
- .ifdef AUDIO_FM
   jsl fm_ending_hint
- .endif
   jsl cabinet_actors_tick
   jsl cabinet_text_tick
   lda CAB_TEXT_DONE
@@ -793,14 +827,14 @@ cabinet_ending_tick:
   lda CAB_ENDING_STEP
   cmp #CAB_ENDING_PAGES
   bcs @rank
-  rep #$20
+  a16
   and #255
   tax
-  sep #$20
+  a8
   lda f:cabinet_ending_pages,x
   jsl cabinet_select
   lda f:cabinet_ending_sounds,x
-  cmp #255
+  cmp #NO_SOUND
   beq :+
   jsl game_sound_request
 :
@@ -812,14 +846,16 @@ cabinet_ending_tick:
   lda CAB_LIVE_STATE
   ora CAB_LIVE_STATE+1
   beq :+
-  dec CAB_ENDING_STEP          ; finish active initials before this handoff
+  dec CAB_ENDING_STEP           ; the live initials finish first
   rtl
 :
- .ifdef AUDIO_FM
   jsl fm_ending_hint_clear
- .endif
   jml cabinet_post_begin
-; Return X after the appended, word-swapped upload batch, M=16.
+
+; cabinet_append: the next upload of the page picture (CABINET_PAGES: a long
+; pointer to its upload list for each page) in the packet, words
+; byte-swapped; LAYOUT_LOADING keeps the old picture while it loads. Then
+; X = the packet end. JSL; A16.
 cabinet_append:
   lda CAB_PAGE
   sta CAB_PACKET_MODE
@@ -827,34 +863,34 @@ cabinet_append:
   bne @upload
   jmp .loword(world_no_upload)
 @upload:
-  ora #$80                      ; retain the old complete picture while loading
+  ora #LAYOUT_LOADING
   sta CAB_PACKET_MODE
   lda CAB_LOADING
   bne @entry
   lda #1
   sta CAB_LOADING
-  rep #$20
+  a16
   lda CAB_PAGE
   and #255
   asl
-  asl
+  asl                           ; a long pointer for each page
   tax
   lda f:CABINET_PAGES,x
   sta CAB_LIST
   lda f:CABINET_PAGES+2,x
   sta CAB_LIST+2
   stz CAB_OFFSET
-  sep #$20
+  a8
 @entry:
-  rep #$20
+  a16
   lda CAB_LIST
-  sta $d0
+  sta CAB_POINTER
   lda CAB_LIST+2
-  sta $d2
+  sta CAB_POINTER+2
   ldy CAB_OFFSET
-  lda [$d0],y
+  lda [CAB_POINTER],y
   bne @copy
-  sep #$20
+  a8                            ; the list end: the page is loaded
   lda CAB_PAGE
   sta CAB_LOADED
   sta CAB_PACKET_MODE
@@ -864,20 +900,20 @@ cabinet_append:
   sta CAB_LENGTH
   iny
   iny
-  lda [$d0],y
-  sta $d4
+  lda [CAB_POINTER],y
+  sta CAB_SOURCE
   iny
   iny
-  lda [$d0],y
-  sta $d6
+  lda [CAB_POINTER],y
+  sta CAB_SOURCE+2
   iny
-  iny
+  iny                           ; UPLOAD_SIZE
   sty CAB_OFFSET
   jsl d500_stage_layout
   ldx WORLD_OUTPUT
   ldy #0
 @word:
-  lda [$d4],y
+  lda [CAB_SOURCE],y
   xba
   sta a:0,x
   inx
@@ -888,8 +924,11 @@ cabinet_append:
   bcc @word
   stx WORLD_OUTPUT
   rtl
+.assert UPLOAD_SIZE = 6, error
 
-cabinet_demo_cached: .word 0
+cabinet_demo_cached: .word 0    ; the cabinet_demo_dictionary pair now held
+; game_flow_tick: the coins for one credit and the credits for one coin, for
+; each coin setting.
 cabinet_coin_required: .byte 4,3,2,1,1,1,1,1
 cabinet_coin_awarded: .byte 1,1,1,5,4,3,2,1
 
@@ -897,60 +936,62 @@ cabinet_coin_awarded: .byte 1,1,1,5,4,3,2,1
 .include "cabinet_text.s"
 .include "cabinet_actors.s"
 
-; Prepared text list, sent only on a page change. This uses the same bounded
-; SRAM upload format as the world data, with no VRAM allocation or decoding
-; of the arcade text format at runtime. Carry set means this packet is done.
+; cabinet_layout_append: the text list of the layout (CABINET_LAYOUTS), only
+; when the layout changes: an upload of the same bounded form as the world
+; data (no VRAM and no arcade text decode at run time). The rankings get
+; their score fields (cabinet_rank_packet). Carry 1: the packet has it; X =
+; the packet end. JSL; A8 in, A16 out.
 cabinet_layout_append:
 .a8
   jsl cabinet_wire_mode
-  and #127
-  cmp #4
+  and #<~LAYOUT_LOADING
+  cmp #PAGE_TITLE
   bne :+
   lda CAB_BLINK
-  cmp #30
-  lda #4
+  cmp #BLINK_ON
+  lda #PAGE_TITLE
   bcs :+
-  lda #86
+  lda #LAYOUT_TITLE_PROMPT
 :
   cmp #0
   beq @none
-  cmp #5
+  cmp #PAGE_POWER_ON
   beq @none
-  cmp #85                     ; resident initials never defer a world upload
+  cmp #LAYOUT_LIVE              ; the live initials never hold back a world upload
   beq @none
   pha
   lda CAB_ENDING
-  cmp #2
+  cmp #ENDING_POST
   bne :+
   pla
   jml cabinet_post_append
 :
   pla
-  cmp #2
+  cmp #LAYOUT_DEMO_BLINK        ; both demo layouts use the LAYOUT_DEMO list
   bne :+
   dec
 :
   cmp CAB_LAYOUT_LOADED
   beq @none
   sta CAB_LAYOUT_LOADED
-  rep #$20
-  and #127
+  a16
+  and #<~LAYOUT_LOADING
   asl
-  sta $d4
+  sta CAB_SOURCE                ; the layout times 2, then times LAYOUT_SIZE
   asl
-  adc $d4
+  adc CAB_SOURCE
   tax
   lda f:CABINET_LAYOUTS,x
   sta CAB_LENGTH
   lda f:CABINET_LAYOUTS+2,x
-  sta $d4
+  sta CAB_SOURCE
   lda f:CABINET_LAYOUTS+4,x
-  sta $d6
+  sta CAB_SOURCE+2
   jsl d500_stage_layout
   ldx WORLD_OUTPUT
   ldy #0
 @copy:
-  lda [$d4],y
+  lda [CAB_SOURCE],y
   xba
   sta a:0,x
   inx
@@ -959,16 +1000,16 @@ cabinet_layout_append:
   iny
   cpy CAB_LENGTH
   bcc @copy
-  sep #$20
+  a8
   lda CAB_LAYOUT_LOADED
-  cmp #3
+  cmp #PAGE_RANKING_FIRST
   beq @rank_fields
-  cmp #16
+  cmp #PAGE_RANKING
   bne @copied
 @rank_fields:
   jsl cabinet_rank_packet
 @copied:
-  rep #$20
+  a16
   lda WORLD_OUTPUT
   clc
   adc CAB_LENGTH
@@ -976,7 +1017,8 @@ cabinet_layout_append:
   sec
   rtl
 @none:
-  rep #$20
+  a16
   ldx WORLD_OUTPUT
   clc
   rtl
+.assert LAYOUT_SIZE = 6, error

@@ -5,9 +5,9 @@ palettes of a pair, which differ only in pens 7 and 8 (the propeller greys).
 The game shows every second arcade frame, so those flips mostly land on one
 colour. Instead, propeller art draws pens 7 and 8 with two private DAC
 entries (game_palette), and the card swaps their greys every picture
-(palette_commit, src/card/water.s). A video RAM table holds the pair mask
+(palette_commit, src/secondsight/water.s). A video RAM table holds the pair mask
 of every code (game_art); a cache miss of propeller art reads a propeller
-row of the pair table (cache_propeller_rows, src/card/sprite_cache.s).
+row of the pair table (cache_propeller_rows, src/secondsight/sprite_cache.s).
 
 The (code, pair) keys come from the ROM:
 - the players: every code below 0x100 in pairs 0 and 1 (player 1 and

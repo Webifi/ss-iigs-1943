@@ -1,117 +1,120 @@
-; Original US $6079-$6132. Enemy-bullet interception precedes body contact.
-; Carry set means an intercepted bullet; the caller plays INTERCEPT_SOUND.
+; bullet_intercept: a player shot stops the bullet D (US arcade
+; $6079-$6132), before its player contact. A bullet with OF_SHOT is stopped
+; by the shots of each live player; another bullet only by the shots of a
+; player with the SHOT GUN. Returns carry 1 when a shot stopped it: the shot
+; ends or goes on with its damage left, the bullet ends, INTERCEPT_SOUND. JSR.
 .a8
 .i16
-INTERCEPT_SOUND = $17cf
 
 bullet_intercept:
   stz INTERCEPT_SOUND
   ldx #0
-  ldy #9*32
-  lda PLAYER+8
-  cmp #2
+  ldy #SHOTS_PER_PLAYER*SHOT_SIZE
+  lda PLAYER+PL_STATE
+  cmp #PS_LIVE
   beq @p1
-  lda PLAYER+$88
-  cmp #2
+  lda PLAYER2+PL_STATE
+  cmp #PS_LIVE
   beq :+
   clc
   rts
 :
-  ldx #9*32
-  ldy #18*32
+  ldx #SHOTS_PER_PLAYER*SHOT_SIZE
+  ldy #SHOT_COUNT*SHOT_SIZE
   bra @eligible
 @p1:
-  lda PLAYER+$88
-  cmp #2
+  lda PLAYER2+PL_STATE
+  cmp #PS_LIVE
   bne @eligible
-  ldy #18*32
+  ldy #SHOT_COUNT*SHOT_SIZE
 @eligible:
-  lda ENEMY+9
-  and #2
+  lda z:OBJ_FLAGS
+  and #OF_SHOT
   bne @start
-  lda PLAYER+$51
-  and #2
+  lda PLAYER+PL_WEAPON
+  and #WEAPON_SHOTGUN
   beq @p2_weapon
   ldx #0
-  ldy #9*32
-  lda PLAYER+$d1
-  and #2
+  ldy #SHOTS_PER_PLAYER*SHOT_SIZE
+  lda PLAYER2+PL_WEAPON
+  and #WEAPON_SHOTGUN
   beq @start
-  ldy #18*32
+  ldy #SHOT_COUNT*SHOT_SIZE
   bra @start
 @p2_weapon:
-  lda PLAYER+$d1
-  and #2
+  lda PLAYER2+PL_WEAPON
+  and #WEAPON_SHOTGUN
   beq @miss
-  ldx #9*32
-  ldy #18*32
+  ldx #SHOTS_PER_PLAYER*SHOT_SIZE
+  ldy #SHOT_COUNT*SHOT_SIZE
 @start:
-  sty $dc
+  sty a:SHOT_SCAN_END
 @shot:
-  lda SHOTS+8,x
-  cmp #2
+  ; A hit: the distances are within the sums of the radii.
+  lda SHOTS+SHOT_STATE,x
+  cmp #SHOT_FLYING
   bne @next
-  lda SHOTS+3,x
+  lda SHOTS+SPR_ALONG,x
   sec
-  sbc ENEMY+3
+  sbc z:SPR_ALONG
   bcs :+
-  eor #255
+  eor #$ff
   inc
 :
-  sta $de
-  lda SHOTS+7,x
+  sta a:SHOT_DISTANCE
+  lda SHOTS+SHOT_ALONG_RADIUS,x
   clc
-  adc ENEMY+$0d
-  cmp $de
+  adc z:OBJ_ALONG_RADIUS
+  cmp a:SHOT_DISTANCE
   bcc @next
-  lda SHOTS+2,x
+  lda SHOTS+SPR_CROSS,x
   sec
-  sbc ENEMY+2
+  sbc z:SPR_CROSS
   bcs :+
-  eor #255
+  eor #$ff
   inc
 :
-  sta $de
-  lda SHOTS+6,x
+  sta a:SHOT_DISTANCE
+  lda SHOTS+SHOT_CROSS_RADIUS,x
   clc
-  adc ENEMY+$0c
-  cmp $de
+  adc z:OBJ_CROSS_RADIUS
+  cmp a:SHOT_DISTANCE
   bcs @hit
 @next:
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #SHOT_SIZE
   tax
-  sep #$20
-  cpx $dc
+  a8
+  cpx a:SHOT_SCAN_END
   bne @shot
 @miss:
   clc
   rts
 @hit:
-  lda ENEMY+$0b
-  cmp SHOTS+$0d,x
+  lda z:OBJ_HP
+  cmp SHOTS+SHOT_DAMAGE,x
   bcc @penetrates
-  lda #4
-  sta SHOTS+8,x
+  lda #SHOT_IMPACT
+  sta SHOTS+SHOT_STATE,x
   bra @erase
 @penetrates:
-  ; Z80 LD (IX+$0B),0 leaves the old HP in A before SUB/NEG.
-  sta $de
-  lda SHOTS+$0d,x
+  ; The shot goes on with its damage less the old HP.
+  sta a:SHOT_DISTANCE
+  lda SHOTS+SHOT_DAMAGE,x
   sec
-  sbc $de
-  sta SHOTS+$0d,x
+  sbc a:SHOT_DISTANCE
+  sta SHOTS+SHOT_DAMAGE,x
 @erase:
-  stz ENEMY+$0b
-  stz ENEMY+9
-  stz ENEMY+4
-  rep #$20
-  lda ENEMY+$1c
-  sta ENEMY+$1e
-  sep #$20
-  lda #$0f
+  stz z:OBJ_HP
+  stz z:OBJ_FLAGS
+  stz z:OBJ_DURATION
+  a16
+  lda z:OBJ_PREDECESSOR
+  sta z:OBJ_MOTION
+  a8
+  lda #SND_BULLET_HIT
   sta INTERCEPT_SOUND
   sec
   rts

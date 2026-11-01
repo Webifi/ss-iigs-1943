@@ -127,7 +127,7 @@ def fit(F):
         copies = ((r_x == r_x[nx]) & (lag <= 6)).sum()
         return wave + WST * st + CP * copies, wave, st
 
-    cur, cw, cs = loss(R, r_x, s_x)
+    cur, cw, _ = loss(R, r_x, s_x)
     best = (cur, R.copy(), r_x.copy(), s_x.copy())
     T0 = 0.01
     for it in range(ITERS):
@@ -150,9 +150,9 @@ def fit(F):
             else:
                 r2[x] = rng.integers(K)
                 s2[x] = rng.integers(P)
-        new, nw, ns = loss(R2, r2, s2)
+        new, nw, _ = loss(R2, r2, s2)
         if new < cur or rng.random() < np.exp((cur - new) / temp):
-            R, r_x, s_x, cur, cw, cs = R2, r2, s2, new, nw, ns
+            R, r_x, s_x, cur, cw = R2, r2, s2, new, nw
             if cur < best[0]:
                 best = (cur, R.copy(), r_x.copy(), s_x.copy())
         if it % 50000 == 0:

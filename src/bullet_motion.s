@@ -1,62 +1,60 @@
-; Original-US enemy bullet motion, $5FFF-$6068 and $61DE-$61E8.
-; Same fixed-point representation as enemies, with the bullet-specific limits.
+; The move of an enemy bullet (US arcade $5FFF-$6068 and $61DE-$61E8): as
+; enemy_motion, with the bullet limits and no camera follow. D = the record.
 .a8
 .i16
-.ifndef ENEMY
-ENEMY = $1100
-.endif
-.ifndef ENEMY_RETIRED
-ENEMY_RETIRED = $1132
-.endif
+BULLET_CROSS_END = $f5       ; at this cross the bullet retires
+BULLET_ALONG_OUT = $e8       ; with SPR_ALONG_HIGH: along 1..BULLET_ALONG_OUT-1 retires
 
+; bullet_motion: one move; off the field ENEMY_RETIRED = 1. JSR.
 bullet_motion:
   stz ENEMY_RETIRED
   clc
-  lda ENEMY+5
-  adc ENEMY+$19
-  sta $d2
-  lda ENEMY+2
-  adc ENEMY+$18
-  cmp #$f5
+  lda z:OBJ_CROSS_FRACTION
+  adc z:OBJ_CROSS_DELTA+1
+  sta a:MOTION_FRACTION
+  lda z:SPR_CROSS
+  adc z:OBJ_CROSS_DELTA
+  cmp #BULLET_CROSS_END
   bcc @x_inside
   jmp bullet_retire
 @x_inside:
-  sta ENEMY+2
-  lda $d2
-  sta ENEMY+5
+  sta z:SPR_CROSS
+  lda a:MOTION_FRACTION
+  sta z:OBJ_CROSS_FRACTION
   clc
-  lda ENEMY+6
-  adc ENEMY+$1b
-  sta ENEMY+6
-  lda ENEMY+3
-  adc ENEMY+$1a
-  sta ENEMY+3
+  lda z:OBJ_ALONG_FRACTION
+  adc z:OBJ_ALONG_DELTA+1
+  sta z:OBJ_ALONG_FRACTION
+  lda z:SPR_ALONG
+  adc z:OBJ_ALONG_DELTA
+  sta z:SPR_ALONG
   bcc @no_carry
-  lda ENEMY+$1a
-  bmi @wrapped
+  lda z:OBJ_ALONG_DELTA
+  bmi @wrapped                  ; a negative move with a carry: no wrap
   bra @toggle
 @no_carry:
-  lda ENEMY+$1a
+  lda z:OBJ_ALONG_DELTA
   bpl @wrapped
 @toggle:
-  lda ENEMY+1
-  eor #$10
-  sta ENEMY+1
+  lda z:SPR_ATTR
+  eor #SPR_ALONG_HIGH
+  sta z:SPR_ATTR
 @wrapped:
-  lda ENEMY+1
-  and #$10
+  lda z:SPR_ATTR
+  and #SPR_ALONG_HIGH
   beq @inside
-  lda ENEMY+3
+  lda z:SPR_ALONG
   beq @inside
-  cmp #$e8
+  cmp #BULLET_ALONG_OUT
   bcc bullet_retire
 @inside:
-  dec ENEMY+4
+  dec z:OBJ_DURATION
   rts
+; bullet_retire: the bullet goes; ENEMY_RETIRED = 1.
 bullet_retire:
-  stz ENEMY
-  stz ENEMY+8
-  stz ENEMY+2
+  stz z:SPR_CODE
+  stz z:OBJ_TYPE
+  stz z:SPR_CROSS
   lda #1
   sta ENEMY_RETIRED
   rts

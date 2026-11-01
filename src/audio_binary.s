@@ -1,15 +1,12 @@
-; Expand shared two-state SSG tables once, before sound IRQ installation.
-; Input: D=0, A8/X16, $30 source24, X page count, DOC RAM address already
-; selected in auto-increment mode. A page is low, high, 32 packed bit bytes.
-; No expanded host copy and no playback-time decompression.
+; audio_binary_upload: expand X packed pages of a shared SSG table into DOC
+; RAM (audio_bank_init, before the sound interrupt). The GLU must address
+; DOC RAM with auto-increment. A packed page: the low level, the high level,
+; then BINARY_BYTES bytes of bits, bit 0 first: each bit gives one sample,
+; 0 the low level and 1 the high level. With AUDIO_BINARY_AM the levels go
+; through AUDIO_VOLUME_MAP. In: AUDIO_BINARY_SOURCE. JSL; A8, X16; D = 0.
 .a8
 .i16
-AUDIO_BINARY_SOURCE = $30
-AUDIO_BINARY_LOW = $33
-AUDIO_BINARY_HIGH = $34
-AUDIO_BINARY_BITS = $35
-AUDIO_BINARY_COUNT = $36
-AUDIO_BINARY_AM = $37
+BINARY_BYTES = 32            ; 256 samples of one bit
 
 audio_binary_upload:
   ldy #0
@@ -22,7 +19,7 @@ audio_binary_upload:
   jsr .loword(audio_binary_level)
   sta AUDIO_BINARY_HIGH
   iny
-  lda #32
+  lda #BINARY_BYTES
   sta AUDIO_BINARY_COUNT
 @packed:
   lda [AUDIO_BINARY_SOURCE],y
@@ -31,14 +28,14 @@ audio_binary_upload:
   phx
   ldx #8
 @pixel:
-  lda f:$e0c03c
+  lda f:SOUNDCTL
   bmi @pixel
   lsr AUDIO_BINARY_BITS
   lda AUDIO_BINARY_LOW
   bcc :+
   lda AUDIO_BINARY_HIGH
 :
-  sta f:$e0c03d
+  sta f:SOUNDDATA
   dex
   bne @pixel
   plx
@@ -48,18 +45,20 @@ audio_binary_upload:
   bne @page
   rtl
 
-; Mapping is build-prepared for the selected output law. It changes the
-; hardware register convention, never the source's relative amplitude.
+; audio_binary_level: A = the DOC value of the level A. An AM table (the
+; gate) gives DOC volumes: the build's AUDIO_VOLUME_MAP sets the output law;
+; it keeps the relative amplitudes. Other tables give samples as they are.
+; JSR; X kept.
 audio_binary_level:
   pha
   lda AUDIO_BINARY_AM
   beq @raw
   pla
   phx
-  rep #$20
+  a16
   and #255
   tax
-  sep #$20
+  a8
   lda f:AUDIO_VOLUME_MAP,x
   plx
   rts

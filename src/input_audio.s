@@ -1,121 +1,134 @@
-; Mix changes run only at settings load or in the paused menu. The players
-; retain their original ticks, instruments, envelope and frequency events.
-; FM uses its existing register lookup. SSG uses AM, so change its two-level
-; wave amplitudes; ordinary oscillator volume has no effect in AM mode.
+; The sound mix (the music and effects levels, 0 to MIX_LEVEL_MAX) changes
+; only at the settings load and in the pause menu; the players keep their
+; ticks, instruments and events. The FM voices get a new register table;
+; the SSG voices use AM, so their two-level waves get new amplitudes (the
+; oscillator volume does nothing in AM mode).
 .include "input_audio.inc"
 .a16
 .i16
+MIX_LEVEL_MAX = 10
+MIX_LEVELS = MIX_LEVEL_MAX+1 ; MIX_WAVE_GAINS: a row for each wave amplitude
+MIX_CHUNK = 32               ; DOC bytes written with interrupts off
+WAVE_LOW = 1                 ; the amplitudes of the packed SSG waves:
+WAVE_MID = 128               ; low, middle, else high
+
+; mix_settings: the mix fields: the defaults when not valid, the levels
+; limited to MIX_LEVEL_MAX; then mix_apply. JSR.
 mix_settings:
-  lda a:.loword(settings+14)
+  lda a:.loword(settings+SET_MIX_FLAGS)
   and #$ff00
-  cmp #$a500
+  cmp #MIX_MARK_DEFAULT&$ff00
   beq @valid
-  lda #$0a0a
-  sta a:.loword(settings+12)
-  lda #$a501
-  sta a:.loword(settings+14)
+  lda #MIX_LEVELS_DEFAULT
+  sta a:.loword(settings+SET_MUSIC_LEVEL)
+  lda #MIX_MARK_DEFAULT
+  sta a:.loword(settings+SET_MIX_FLAGS)
 @valid:
-  sep #$20
-  lda a:.loword(settings+12)
-  cmp #11
+  a8
+  lda a:.loword(settings+SET_MUSIC_LEVEL)
+  cmp #MIX_LEVEL_MAX+1
   bcc :+
-  lda #10
-  sta a:.loword(settings+12)
+  lda #MIX_LEVEL_MAX
+  sta a:.loword(settings+SET_MUSIC_LEVEL)
 :
-  lda a:.loword(settings+13)
-  cmp #11
+  lda a:.loword(settings+SET_EFFECTS_LEVEL)
+  cmp #MIX_LEVEL_MAX+1
   bcc :+
-  lda #10
-  sta a:.loword(settings+13)
+  lda #MIX_LEVEL_MAX
+  sta a:.loword(settings+SET_EFFECTS_LEVEL)
 :
-  lda a:.loword(settings+14)
-  and #1
-  sta a:.loword(settings+14)
-  rep #$20
+  lda a:.loword(settings+SET_MIX_FLAGS)
+  and #MIX_DEMO_SOUND           ; the only flag
+  sta a:.loword(settings+SET_MIX_FLAGS)
+  a16
   jsr .loword(mix_apply)
   rts
 
+; mix_apply: a new music level: MIX_FM_REGISTERS from its MIX_FM_GAINS row
+; (each FM volume is written again at its next visit); a new effects level:
+; the shared SSG wave tables again with the MIX_WAVE_GAINS amplitudes. JSR.
 mix_apply:
-  sep #$20
-  lda a:.loword(settings+12)
+  a8
+  lda a:.loword(settings+SET_MUSIC_LEVEL)
   cmp a:.loword(mixMusic)
   beq mix_apply_effects
   sta a:.loword(mixMusic)
-  rep #$20
+  a16
   and #255
-  xba
+  xba                           ; a 256-byte row for each level
   clc
   adc #.loword(MIX_FM_GAINS)
   sta f:mix_fm_gain+1
-  sep #$20
+  a8
   lda #.bankbyte(MIX_FM_GAINS)
   adc #0
   sta f:mix_fm_gain+3
-  rep #$20
+  a16
   ldy #0
 mix_apply_register:
   tyx
-  sep #$20
+  a8
   lda f:MIX_FM_ORIGINAL,x
-  rep #$20
+  a16
   and #255
   tax
-  sep #$20
+  a8
 mix_fm_gain:
-  lda f:$000000,x
+  lda f:0,x                   ; the address is patched
   tyx
   sta f:MIX_FM_REGISTERS,x
-  rep #$20
+  a16
   iny
   cpy #MIX_FM_BYTES
   bcc mix_apply_register
-  ; The next normal part visit publishes the new value on its exact tick.
+  ; The next visit of each part writes its volumes again on its tick.
   ldx #0
 mix_apply_invalidate:
-  lda #$ffff
-  sta f:$018628,x
-  sta f:$01862a,x
+  lda #FM_PRI_UNKNOWN
+  sta f:FM_STATES+S_PRIA,x
+  sta f:FM_STATES+S_PRIB,x
   txa
   clc
-  adc #64
+  adc #FM_PART_SIZE
   tax
-  cpx #384
+  cpx #FM_PARTS*FM_PART_SIZE
   bcc mix_apply_invalidate
-  sep #$20
+  a8
 mix_apply_effects:
-  lda a:.loword(settings+13)
+  lda a:.loword(settings+SET_EFFECTS_LEVEL)
   cmp a:.loword(mixEffects)
   bne :+
   jmp .loword(mix_apply_done8)
 :
   sta a:.loword(mixEffects)
-  rep #$20
+  a16
   and #255
   clc
   adc #.loword(MIX_WAVE_GAINS)
-  sta f:mix_wave_one+1
+  sta f:mix_wave_one+1          ; the three loads of mix_sample
   clc
-  adc #11
+  adc #MIX_LEVELS
   sta f:mix_wave_mid+1
   clc
-  adc #11
+  adc #MIX_LEVELS
   sta f:mix_wave_high+1
-  rep #$20
+  a16
   stz a:.loword(mixEntry)
 mix_apply_table:
+  ; Each table of audio_tables (AT_* records), not the AM gate.
   ldx a:.loword(mixEntry)
-  sep #$20
-  lda f:MIX_SSG_TABLES+4,x
-  bne mix_apply_next                   ; keep the AM envelope and its diode-law map
-  rep #$20
-  lda f:MIX_SSG_TABLES,x
+  a8
+  lda f:MIX_SSG_TABLES+AT_AM,x
+  bne mix_apply_next            ; the gate keeps its levels
+  a16
+  lda f:MIX_SSG_TABLES+AT_SOURCE,x
   sta f:mix_read+1
-  sep #$20
-  lda f:MIX_SSG_TABLES+2,x
+  a8
+  lda f:MIX_SSG_TABLES+AT_SOURCE+2,x
   sta f:mix_read+3
-  lda f:MIX_SSG_TABLES+3,x
+  lda f:MIX_SSG_TABLES+AT_PAGE,x
   sta a:.loword(mixDocPage)
-  lda f:MIX_SSG_TABLES+5,x
+  lda f:MIX_SSG_TABLES+AT_PAGES,x
   sta a:.loword(mixPages)
   ldx #0
 mix_apply_page:
@@ -127,6 +140,8 @@ mix_apply_page:
   sta a:.loword(mixHigh)
   ldy #0
 mix_apply_packed:
+  ; A page: the low and high samples, then a bit for each of 256 samples
+  ; (as audio_binary_upload).
   jsr .loword(mix_read)
   sta a:.loword(mixBits)
   lda #8
@@ -144,18 +159,18 @@ mix_apply_pixel:
   cpy #256
   bcc mix_apply_packed
   phx
-  rep #$20
+  a16
   jsr .loword(mix_upload_page)
   plx
-  sep #$20
+  a8
   inc a:.loword(mixDocPage)
   dec a:.loword(mixPages)
   bne mix_apply_page
 mix_apply_next:
-  rep #$20
+  a16
   lda a:.loword(mixEntry)
   clc
-  adc #6
+  adc #AT_SIZE
   sta a:.loword(mixEntry)
   cmp #MIX_SSG_TABLE_BYTES
   bcs :+
@@ -163,99 +178,87 @@ mix_apply_next:
 :
   bra mix_apply_done
 mix_apply_done8:
-  rep #$20
+  a16
 mix_apply_done:
   rts
 
 .a8
+; mix_read: A = the next byte of the table (the address is patched). JSR.
 mix_read:
-  lda f:$000000,x
+  lda f:0,x                   ; the address is patched
   inx
   rts
+; mix_sample: A = the sample of the amplitude A at the effects level (the
+; loads are patched to its MIX_WAVE_GAINS column). The build checks that
+; each packed table uses only these three amplitudes. JSR; X kept.
 mix_sample:
-  ; Build verifies that every packed, non-envelope page uses only these
-  ; three amplitudes. The selected-volume loads preserve the source index.
-  cmp #1
+  cmp #WAVE_LOW
   beq mix_wave_one
-  cmp #128
+  cmp #WAVE_MID
   beq mix_wave_mid
 mix_wave_high:
-  lda f:MIX_WAVE_GAINS+22
+  lda f:MIX_WAVE_GAINS+2*MIX_LEVELS
   rts
 mix_wave_one:
   lda f:MIX_WAVE_GAINS
   rts
 mix_wave_mid:
-  lda f:MIX_WAVE_GAINS+11
+  lda f:MIX_WAVE_GAINS+MIX_LEVELS
   rts
 
-; At most 32 bytes with IRQs masked. Restore the GLU address and mode before
-; allowing the DOC/input IRQ, which itself preserves the caller's GLU state.
+; mix_upload_page: write mixBuffer to the DOC page mixDocPage, MIX_CHUNK
+; bytes at a time with interrupts off; the GLU mode and address of the main
+; loop come back before each interrupt. JSR; A16.
 .a16
 mix_upload_page:
   ldy #0
 @chunk:
   php
   sei
-  sep #$20
+  a8
 @ready:
-  lda f:$e0c03c
+  lda f:SOUNDCTL
   bmi @ready
-  and #$60
+  and #SOUNDCTL_RAM|SOUNDCTL_INC
   ora f:DOC_MASTER
   sta a:.loword(mixControl)
-  lda f:$e0c03e
+  lda f:SOUNDADRL
   sta a:.loword(mixAddress)
-  lda f:$e0c03f
+  lda f:SOUNDADRH
   sta a:.loword(mixAddress+1)
   lda f:DOC_MASTER
-  ora #$60
-  sta f:$e0c03c
+  ora #SOUNDCTL_RAM|SOUNDCTL_INC
+  sta f:SOUNDCTL
   tya
-  sta f:$e0c03e
+  sta f:SOUNDADRL
   lda a:.loword(mixDocPage)
-  sta f:$e0c03f
-  ldx #32
+  sta f:SOUNDADRH
+  ldx #MIX_CHUNK
 @byte:
-  lda f:$e0c03c
+  lda f:SOUNDCTL
   bmi @byte
   lda a:mixBuffer&$ffff,y
-  sta f:$e0c03d
+  sta f:SOUNDDATA
   iny
   dex
   bne @byte
 @restore:
-  lda f:$e0c03c
+  lda f:SOUNDCTL
   bmi @restore
   lda a:.loword(mixAddress)
-  sta f:$e0c03e
+  sta f:SOUNDADRL
   lda a:.loword(mixAddress+1)
-  sta f:$e0c03f
+  sta f:SOUNDADRH
   lda a:.loword(mixControl)
-  sta f:$e0c03c
+  sta f:SOUNDCTL
   plp
   cpy #256
   bcc @chunk
   rts
 
-; Called after game_flow_init sets the ordinary DIP defaults.
-.a8
-mix_demo:
-  lda f:settings+14
-  and #1
-  beq @off
-  lda f:GAME_DIP_B
-  ora #128
-  bra @store
-@off:
-  lda f:GAME_DIP_B
-  and #127
-@store:
-  sta f:GAME_DIP_B
-  rtl
-
-mixMusic: .byte 10
-mixEffects: .byte 10
+; The levels in use, and the work of mix_apply.
+mixMusic: .byte MIX_LEVEL_MAX
+mixEffects: .byte MIX_LEVEL_MAX
 mixDocPage: .byte 0
 mixPages: .byte 0
 mixLow: .byte 0

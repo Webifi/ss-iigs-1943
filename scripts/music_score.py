@@ -1,9 +1,8 @@
 """Final native score compiler. Runtime never sees the arcade bytecode.
 
-Tokens: top three bits NOTE/OFF/LOOP/END/FREQ/VOL/TABLE; low five bits are
-the resolved tick delay (31 escapes to u16). NOTE carries sample, FC16, volume.
-FREQ and VOL carry ready DOC values. TABLE changes a captured timbre stage.
-LOOP carries repetitions (zero = forever), then a part-relative u16 target.
+Tokens: top three bits NOTE/OFF/LOOP/END (SHARED after fm_native.pack_notes);
+low five bits are the resolved tick delay (DELAY_LONG escapes to u16). NOTE
+carries sample, FC16, volume. LOOP carries repetitions (zero = forever), then a part-relative u16 target.
 Finite repeats are flat and use one counter; independent part loops remain
 independent. Duplicate part streams share storage, including both IRQ phases.
 """
@@ -12,14 +11,16 @@ from collections import defaultdict
 import json, math, struct
 from audio_config import DOC_RATE
 
-NOTE, OFF, LOOP, END, FREQ, VOL, TABLE = range(7)
+NOTE, OFF, LOOP, END = range(4)
+SHARED = 7  # a NOTE whose body is one byte: its index in the note dictionary
+DELAY_LONG = 31  # the delay is in the next word
 
 
 def token(kind, delay, body=b""):
     assert 0 <= delay < 65536
     return (
-        bytes([(kind << 5) | min(31, delay)])
-        + (struct.pack("<H", delay) if delay >= 31 else b"")
+        bytes([(kind << 5) | min(DELAY_LONG, delay)])
+        + (struct.pack("<H", delay) if delay >= DELAY_LONG else b"")
         + body
     )
 
@@ -170,8 +171,8 @@ def read_event(data, pc):
     code = data[pc]
     pc += 1
     kind = code >> 5
-    delay = code & 31
-    if delay == 31:
+    delay = code & DELAY_LONG
+    if delay == DELAY_LONG:
         delay = struct.unpack_from("<H", data, pc)[0]
         pc += 2
     if kind == NOTE:

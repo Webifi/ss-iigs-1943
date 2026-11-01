@@ -1,104 +1,111 @@
+; The game clock. GAME_CLOCK counts the DOC timer interrupts (src/music_irq.s).
+; GAME_DUE is the GAME_CLOCK time of the next update; each update (two game
+; ticks) moves it on by the update length of the display timing: 8 DOC ticks
+; at the arcade timing, or a fraction (game_clock_fraction_step) for the
+; other timings (src/display_control.s patches game_clock_deadline_step).
+; GAME_PICTURE and the packet token advance only when a packet goes.
 .a8
 .i16
+UPDATE_TICKS = 8             ; DOC ticks of one update at the arcade timing
+PUMP_TICKS = 3               ; the world decoder runs only with this many ticks to spare
+PICTURE_SKIP_MAX = 4         ; updates without a picture before one goes late
+
+; flight_clock_init: start the clock now and apply the display timing
+; (flight_loop). A8.
 flight_clock_init:
-  rep #$20
+  a16
   stz GAME_PICTURE
-  stz GAME_SKIPPED
   stz GAME_SENT_LOGIC
   lda GAME_CLOCK
   sta GAME_DUE
-  sta GAME_CLOCK_ORIGIN
-  sep #$20
- .ifdef CONTINUOUS_GAME
+  a8
   jsl display_boot_apply
- .endif
   rts
 
+; flight_clock_wait: wait until GAME_DUE, then set the next GAME_DUE.
+; While it waits it runs the sound uploads, the input and, with time to
+; spare, the world decoder. A late update starts at once: no tick is lost.
+; The signed subtraction also handles the 16-bit wrap of the clock. A8.
 flight_clock_wait:
-  ; Signed subtraction also handles the 16-bit timer wrapping. No elapsed
-  ; ticks are discarded: if late, the next logic update starts immediately.
-  rep #$20
+  a16
 @wait:
   lda GAME_CLOCK
   sec
   sbc GAME_DUE
   bpl @due
-  sep #$20
+  a8
   jsl audio_game_upload
   jsr input_poll
-  rep #$20
-.ifdef WORLD_LZ
+  a16
   lda GAME_DUE
   sec
   sbc GAME_CLOCK
   bmi :+
-  cmp #3
+  cmp #PUMP_TICKS
   bcc :+
   jsl world_inflate_pump
 :
-.endif
   bra @wait
 @due:
   lda GAME_DUE
   clc
 game_clock_deadline_step:
-  ; Selected timing patches this to ADC #ticks or JSR for a fractional
-  ; deadline. No per-update display-mode check or division.
-  adc #8
+  ; src/display_control.s patches these three bytes to ADC #ticks or to a
+  ; JSR game_clock_fraction_bridge for a fractional update length. No
+  ; display check and no division run in each update.
+  adc #UPDATE_TICKS
   sta GAME_DUE
-.ifdef WORLD_LZ
   jsl world_inflate_force
-.endif
-  sep #$20
+  a8
   rts
 
+; flight_picture_ready: decide whether this update sends a picture.
+; Returns carry 1 when the card is ready for the next packet token (that
+; token is then in STREAM_TOKEN), carry 0 to skip the picture. A8.
 flight_picture_ready:
   lda GAME_PICTURE
-  and #1
+  and #1                        ; bit 0 selects the card buffer
   clc
-  adc #$40
-  sta $60
+  adc #PACKET_TOKEN
+  sta STREAM_TOKEN
 @wait:
-  rep #$20
+  a16
   lda GAME_CLOCK
   sec
   sbc GAME_DUE
   bmi @check_card_16
-  ; Sustained overload can otherwise leave GAME_DUE permanently behind the
-  ; clock, suppressing every picture while logic continues. Once four logic
-  ; updates have elapsed since a picture, send one if the card is ready and
-  ; rebase the next deadline to now. Game logic is never discarded.
-  lda $68
+  ; The next update is due. Without the rule below, a lasting overload keeps
+  ; GAME_DUE behind the clock and no picture ever goes while the game runs.
+  ; After PICTURE_SKIP_MAX updates without a picture, send one if the card is
+  ; ready, and start the next deadline now. No game logic is lost.
+  lda GAME_UPDATES
   sec
   sbc GAME_SENT_LOGIC
-  cmp #4
+  cmp #PICTURE_SKIP_MAX
   bcc @skip_16
-  sep #$20
-  lda f:$e0c0b8
-  cmp $60
+  a8
+  lda f:SS_HANDSHAKE
+  cmp STREAM_TOKEN
   bne @skip
-  rep #$20
+  a16
   lda GAME_CLOCK
   sta GAME_DUE
-  sep #$20
+  a8
   sec
   rts
 @skip_16:
-  sep #$20
+  a8
 @skip:
-  rep #$20
-  inc GAME_SKIPPED
-  sep #$20
   clc
   rts
 @check_card_16:
-  sep #$20
+  a8
 @check_card:
-  lda f:$e0c0b8
-  cmp $60
+  lda f:SS_HANDSHAKE
+  cmp STREAM_TOKEN
   beq @ready
-  ; A late card does not own the CPU. Service uploads/input only until the
-  ; next logic deadline, then return to logic without building a stale packet.
+  ; The card is still busy. Do not wait for it past the next deadline: run
+  ; the uploads and the input until then, and skip the picture if it is late.
   jsl audio_game_upload
   jsr input_poll
   bra @wait
@@ -106,10 +113,9 @@ flight_picture_ready:
   sec
   rts
 
-.ifdef CONTINUOUS_GAME
+; game_clock_fraction_bridge: the bank-zero target of the patched JSR above;
+; the fraction code is far (src/display_game_clock.s). A16.
 .a16
-; Same-bank entry for the three-byte ADC/JSR patch site above.
 game_clock_fraction_bridge:
   jsl game_clock_fraction_step
   rts
-.endif

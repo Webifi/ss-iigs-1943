@@ -15,7 +15,8 @@ You need:
 
 - Python 3.12 or newer, as `python3`
 - cc65 (`ca65` and `ld65`; macOS: `brew install cc65`)
-- GNU binutils for the `z80-elf` target (`z80-elf-as` and `z80-elf-ld`)
+- GNU binutils for the `z80-elf` target (`z80-elf-as`, `z80-elf-ld`, `z80-elf-objcopy`
+  and `z80-elf-nm`)
 - make, a C++17 compiler and SoX (macOS: `xcode-select --install`, `brew install sox`)
 - a network connection for the first build, which installs the Python packages
   into `.venv/`
@@ -29,13 +30,15 @@ The disk images are in `build/game-disk/`:
   SmartPort hard disk, a MicroDrive/Turbo, a BOOTI or an emulator
 - `1943-scsi.hda`: the same volume with an Apple partition map, for an Apple
   SCSI card with a BlueSCSI, ZuluSCSI or SCSI2SD
+- `debug.sym`: the debug symbols of this build, every IIgs and Second Sight
+  address, for emulator debug runs (format in `scripts/debug_symbols.py`)
 
 ## Folders
 
 | Folder | Contents |
 |---|---|
 | `src/` | 65816 source for the IIgs side |
-| `src/card/` | Z180 source for the Second Sight card |
+| `src/secondsight/` | Z180 source for the Second Sight card |
 | `bootloader/` | The boot block and file reader that replace ProDOS (see its README) |
 | `scripts/` | The build: ROM reading, art, sound, card data, disk image |
 | `third_party/` | ymfm (YM2203 sound chip model), used by the build |

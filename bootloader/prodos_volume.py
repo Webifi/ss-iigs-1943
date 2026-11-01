@@ -1,38 +1,17 @@
 """ProDOS volumes that boot with boot0.s, and device images for SCSI cards.
 
-    volume = Volume("NAME", blocks, boot_block(ca65, ld65, work))
+    volume = Volume("NAME", blocks, boot0)   # boot0: the 512 bytes of block 0
     volume.install("GAME.SYSTEM", code, 0xFF, 0x2000)
     volume.boot("GAME.SYSTEM")
     image = bytes(volume.data)            # .po / .hdv / 800K disk
     scsi = apm(image, "NAME")             # an Apple SCSI card (BlueSCSI)
 """
 
-from pathlib import Path
 import hashlib
 import struct
-import subprocess
 
-HERE = Path(__file__).resolve().parent
 BLOCK = 512
 NAME_OFFSET = 4  # boot0.s: the boot file name, a length byte and 15 bytes
-
-
-def boot_block(ca65, ld65, work):
-    """Assemble boot0.s in WORK; the 512 bytes of block 0."""
-    work = Path(work)
-    work.mkdir(parents=True, exist_ok=True)
-    cfg = work / "boot0.cfg"
-    cfg.write_text(
-        "MEMORY { B: start=$0800, size=$200, file=%O, fill=yes; }\n"
-        "SEGMENTS { CODE: load=B, type=ro; }\n"
-    )
-    subprocess.run([ca65, "-o", str(work / "boot0.o"), str(HERE / "boot0.s")], check=True)
-    subprocess.run(
-        [ld65, "-C", str(cfg), "-o", str(work / "boot0.bin"), str(work / "boot0.o")], check=True
-    )
-    data = (work / "boot0.bin").read_bytes()
-    assert len(data) == BLOCK
-    return data
 
 
 class Volume:

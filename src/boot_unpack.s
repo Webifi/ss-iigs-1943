@@ -1,49 +1,58 @@
-; Boot DATA blocks: source $00:0800, destination $01:8000, $26 output length.
+; Unpack one card startup record (scripts/startup_pack.py) from DATA_BUFFER
+; to STARTUP_UNPACK_OUTPUT. In: unpack_end = the unpacked size.
 ; MVN copies forward, including overlapping matches; interrupts are masked.
+; MVN sets the data bank to the output bank, so the variables are in page zero.
+; A token below TOKEN_MATCH: token + 1 literal bytes follow; from it: a
+; match of (token - TOKEN_MATCH) + MATCH_MIN bytes at the word distance that
+; follows. MVN copies C + 1 bytes.
+UNPACK_SOURCE = DATA_BUFFER & $FF0000   ; X holds the full source address
+TOKEN_MATCH = $80
+MATCH_MIN = 3
 .a8
 .i16
+; startup_unpack: unpack the record. JSR; A8, X16.
 startup_unpack:
   phb
-  ldx #$0800
-  ldy #$8000
-  rep #$20
-  lda $26
+  ldx #.loword(DATA_BUFFER)
+  ldy #.loword(STARTUP_UNPACK_OUTPUT)
+  a16
+  lda unpack_end
   clc
-  adc #$8000
-  sta $26
-  sep #$20
+  adc #.loword(STARTUP_UNPACK_OUTPUT)
+  sta unpack_end
+  a8
 @token:
-  lda f:$000000,x
-  bmi @match
+  lda f:UNPACK_SOURCE,x
+  bmi @match                    ; TOKEN_MATCH
   inx
-  rep #$20
-  and #$00ff
-  mvn #$00,#$01
-  sep #$20
+  a16
+  and #$00ff                    ; the count - 1
+  mvn #^DATA_BUFFER,#^STARTUP_UNPACK_OUTPUT
+  a8
   bra @next
 @match:
   inx
-  and #$7f
+  and #<~TOKEN_MATCH
   clc
-  adc #2
-  rep #$20
+  adc #MATCH_MIN-1              ; the count - 1
+  a16
   and #$00ff
-  sta $24
-  lda f:$000000,x
-  sta $28
+  sta unpack_length
+  lda f:UNPACK_SOURCE,x
+  sta unpack_distance
   inx
   inx
   phx
   tya
   sec
-  sbc $28
+  sbc unpack_distance
   tax
-  lda $24
-  mvn #$01,#$01
+  lda unpack_length
+  mvn #^STARTUP_UNPACK_OUTPUT,#^STARTUP_UNPACK_OUTPUT
   plx
-  sep #$20
+  a8
 @next:
-  cpy $26
+  cpy unpack_end
   bcc @token
   plb
   rts

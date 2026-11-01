@@ -1,52 +1,57 @@
-; Configuration has one preallocated disk block. Only the explicit paused
-; Save action reaches the firmware; no ProDOS code remains in the game path.
+; The settings on the disk: one block that the build keeps for them. Only
+; the Save of the pause menu calls the firmware; the game has no ProDOS code.
 .a16
 .i16
+
+; settings_check: settings with a wrong magic or checksum become the
+; defaults (the default bindings, DEAD_ZONE_DEFAULT). JSR.
 settings_check:
   lda a:.loword(settings)
-  cmp #$3931
+  cmp #SETTINGS_MAGIC0
   bne @reset
-  lda a:.loword(settings+2)
-  cmp #$3334
+  lda a:.loword(settings+SET_MAGIC+2)
+  cmp #SETTINGS_MAGIC1
   bne @reset
-  lda a:.loword(settings+4)
-  cmp #$454b
+  lda a:.loword(settings+SET_MAGIC+4)
+  cmp #SETTINGS_MAGIC2
   bne @reset
-  lda a:.loword(settings+6)
-  cmp #$0159
+  lda a:.loword(settings+SET_MAGIC+6)
+  cmp #SETTINGS_MAGIC3
   bne @reset
   jsr .loword(settings_sum)
-  cmp a:.loword(settings+510)
+  cmp a:.loword(settings+SETTINGS_CHECKSUM)
   beq @valid
 @reset:
-  ldx #508
+  ldx #SETTINGS_CHECKSUM-2
   lda #0
 @clear:
   sta a:.loword(settings),x
   dex
   dex
   bpl @clear
-  lda #$3931
+  lda #SETTINGS_MAGIC0
   sta a:.loword(settings)
-  lda #$3334
-  sta a:.loword(settings+2)
-  lda #$454b
-  sta a:.loword(settings+4)
-  lda #$0159
-  sta a:.loword(settings+6)
-  lda #9
-  sta a:.loword(settings+10)
-  ldx #254
+  lda #SETTINGS_MAGIC1
+  sta a:.loword(settings+SET_MAGIC+2)
+  lda #SETTINGS_MAGIC2
+  sta a:.loword(settings+SET_MAGIC+4)
+  lda #SETTINGS_MAGIC3
+  sta a:.loword(settings+SET_MAGIC+6)
+  lda #DEAD_ZONE_DEFAULT
+  sta a:.loword(settings+SET_DEAD_ZONE)
+  ldx #SET_DISPLAY_MARK-SET_BINDINGS-2
 @copy:
   lda a:.loword(menu_default_bindings),x
-  sta a:.loword(settings+32),x
+  sta a:.loword(settings+SET_BINDINGS+BIND_KEY),x
   dex
   dex
   bpl @copy
 @valid:
   rts
+; settings_sum: A = the checksum of the settings before SETTINGS_CHECKSUM: a
+; rotate left and an EOR for each word, from SETTINGS_SEED. JSR.
 settings_sum:
-  lda #$1943
+  lda #SETTINGS_SEED
   ldx #0
 @word:
   asl
@@ -54,97 +59,103 @@ settings_sum:
   eor a:.loword(settings),x
   inx
   inx
-  cpx #510
+  cpx #SETTINGS_CHECKSUM
   bcc @word
   rts
 
+; settings_save: write the settings block: the J13 settings, the checksum;
+; the block is read first and must hold settings (the magic), then written
+; and read back to check. menuMessage: MSG_SAVED or MSG_SAVE_ERROR. JSR.
 settings_save:
   jsl J13SettingsStore
   jsr .loword(settings_sum)
-  sta a:.loword(settings+510)
+  sta a:.loword(settings+SETTINGS_CHECKSUM)
   lda f:input_save_driver
-  cmp #$c100                  ; reject RAM drivers overwritten by game data
+  cmp #SLOT1_ROM              ; reject RAM drivers overwritten by game data
   bcc @error
-  sep #$20
-  lda #1
+  a8
+  lda #DRV_READ
   sta f:input_save_command
   jsl input_disk_call
-  rep #$20
+  a16
   bcs @error
-  ldx #6
+  ldx #SET_J13-2                ; the magic
 @identity:
-  lda f:$000800,x
+  lda f:SAVE_BLOCK_BUFFER,x
   cmp a:.loword(settings),x
   bne @error
   dex
   dex
   bpl @identity
-  ldx #510
+  ldx #SETTINGS_SIZE-2
 @copy:
   lda a:.loword(settings),x
-  sta f:$000800,x
+  sta f:SAVE_BLOCK_BUFFER,x
   dex
   dex
   bpl @copy
-  sep #$20
-  lda #2
+  a8
+  lda #DRV_WRITE
   sta f:input_save_command
   jsl input_disk_call
-  rep #$20
+  a16
   bcs @error
-  sep #$20
-  lda #1
+  a8
+  lda #DRV_READ
   sta f:input_save_command
   jsl input_disk_call
-  rep #$20
+  a16
   bcs @error
-  ldx #510
+  ldx #SETTINGS_SIZE-2
 @verify:
-  lda f:$000800,x
+  lda f:SAVE_BLOCK_BUFFER,x
   cmp a:.loword(settings),x
   bne @error
   dex
   dex
   bpl @verify
-  lda #1
+  lda #MSG_SAVED
   sta a:.loword(menuMessage)
   rts
 @error:
-  lda #3
+  lda #MSG_SAVE_ERROR
   sta a:.loword(menuMessage)
   rts
 
-; Wolf's firmware-state guard: the game never allocates these E1 ranges,
-; but retain their disk-firmware state across every firmware call anyway.
+; settings_fw_keep, settings_fw_restore: keep the disk firmware work areas
+; of bank $E1 (FW_E1_WORK0, FW_E1_WORK1) around a firmware call (as the
+; Wolf3D port); the game does not use them. JSL.
 settings_fw_keep:
   php
-  rep #$30
+  ax16
   phb
-  ldx #0
+  ldx #.loword(FW_E1_WORK0)
   ldy #.loword(firmwareState)
-  lda #1023
-  .byte $54,.bankbyte(firmwareState),$e1
-  ldx #$0c00
-  ldy #.loword(firmwareState+1024)
-  lda #1023
-  .byte $54,.bankbyte(firmwareState),$e1
+  lda #FW_E1_WORK_SIZE-1
+  mvn #^FW_E1_WORK0,#^firmwareState
+  ldx #.loword(FW_E1_WORK1)
+  ldy #.loword(firmwareState+FW_E1_WORK_SIZE)
+  lda #FW_E1_WORK_SIZE-1
+  mvn #^FW_E1_WORK1,#^firmwareState
   plb
   plp
   rtl
 settings_fw_restore:
   php
-  rep #$30
+  ax16
   phb
   ldx #.loword(firmwareState)
-  ldy #0
-  lda #1023
-  .byte $54,$e1,.bankbyte(firmwareState)
-  ldx #.loword(firmwareState+1024)
-  ldy #$0c00
-  lda #1023
-  .byte $54,$e1,.bankbyte(firmwareState)
+  ldy #.loword(FW_E1_WORK0)
+  lda #FW_E1_WORK_SIZE-1
+  mvn #^firmwareState,#^FW_E1_WORK0
+  ldx #.loword(firmwareState+FW_E1_WORK_SIZE)
+  ldy #.loword(FW_E1_WORK1)
+  lda #FW_E1_WORK_SIZE-1
+  mvn #^firmwareState,#^FW_E1_WORK1
   plb
   plp
   rtl
-firmwareState: .res 2048
-firmwareZero: .res 256
+; The kept firmware work areas, and the kept zero page of a disk call.
+firmwareState: .res 2*::FW_E1_WORK_SIZE
+firmwareZero: .res ::ZERO_PAGE_SIZE
+.assert SET_MAGIC = 0 .and SET_J13 = 8, error

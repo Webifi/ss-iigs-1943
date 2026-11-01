@@ -1,26 +1,23 @@
-; Live cabinet controls and continue state. No recorded player state.
+; The cabinet flow: the coins and credits, the game over, the stage scenes
+; (banners, intro, result) and the stage changes and departures.
 .a8
 .i16
-GAME_BG2_DISABLED = $17fd     ; trailer $7BCE bit 0; no other flags
-GAME_DIVE_ACTIVE = $17fe      ; number of players with transient dive pieces
 .assert GAME_DIVE_ACTIVE = GAME_BG2_DISABLED+1, error, "dive counter layout"
-GAME_FLOW = $1490
-GAME_CREDITS = $1491
-GAME_INPUT_OLD = $1492
-GAME_SECONDS = $1493
-GAME_SECOND_WAIT = $1494
-GAME_TWO_PLAYERS = $14e2
-GAME_DIP_A = $14e3
-GAME_DIP_B = $14e4
-GAME_COIN_A = $14e5
-GAME_COIN_B = $14e6
+COIN_SLOTS = 2
+CREDITS_MAX = 9
+BANNER_TICKS = 180           ; GAME_SEQUENCE_TICKS of a banner
+BOSS_RESULT_TICKS = 2100          ; GAME_SEQUENCE_TICKS of the boss result and its raid
+CAMERA_ARCADE_SIZE = 34      ; the arcade camera block; CAMERA_STAGE follows it
+ENTRY_ALONG = $30            ; the players' along at the start of a stage
+DEPART_STEP = 2              ; game_depart_players: the along step of a leaving player
+DEPART_END = $f0             ; a leaving player is gone at this along
 
+.assert DIP_B_COIN_B_SHIFT = 3 .and DIP_B_COIN_B = DIP_B_COIN_A<<3, error
+
+; game_flow_init: the power-on cabinet state: the DIP switches of the
+; settings, no coins or credits, the difficulty, then the cabinet. JSL.
 game_flow_init:
-  lda #$f8
-  sta GAME_DIP_A
-  lda #$ff
-  sta GAME_DIP_B
-  jsl native_input_demo_sound
+  jsl native_input_dips
   stz GAME_TWO_PLAYERS
   stz GAME_COIN_A
   stz GAME_COIN_B
@@ -28,44 +25,48 @@ game_flow_init:
   stz GAME_SECONDS
   stz GAME_SEQUENCE
   stz GAME_STAGE_EXIT
-  rep #$20
+  a16
   stz GAME_SEQUENCE_TICKS
-  sep #$20
-  lda #255
+  a8
+  lda #INPUT_NONE
   sta GAME_INPUT_OLD
   jsr .loword(game_difficulty_init)
   jsl cabinet_init
   rtl
 
+; game_flow_tick: one update of the cabinet (cabinet_frame): new coins give
+; credits by the coin DIP switches (up to CREDITS_MAX) with SND_COIN; on a
+; cabinet page the cabinet runs; when both players are out and done, the
+; scores are kept and the title shows. JSL.
 game_flow_tick:
   lda INPUT_SYSTEM
-  eor #255
+  eor #$ff                      ; the system inputs pressed now (active low)
   and GAME_INPUT_OLD
-  sta $d0
+  sta SYSTEM_PRESSED
   lda INPUT_SYSTEM
   sta GAME_INPUT_OLD
   ldx #0
 @coins:
-  lda $d0
-  and #$40
+  lda SYSTEM_PRESSED
+  and #SYSTEM_COIN1
   cpx #0
   beq :+
-  lda $d0
-  and #$80
+  lda SYSTEM_PRESSED
+  and #SYSTEM_COIN2
 :
-  ora #0
+  ora #0                        ; test A again after the CPX
   beq @coin_next
   lda GAME_DIP_B
   cpx #0
   beq :+
   lsr
   lsr
-  lsr
+  lsr                           ; coin slot B: DIP_B_COIN_B_SHIFT
 :
-  rep #$20
-  and #7                       ; zero-extend the DIP index; B is caller scratch
+  a16
+  and #DIP_B_COIN_A             ; and B = 0
   tay
-  sep #$20
+  a8
   inc GAME_COIN_A,x
   lda GAME_COIN_A,x
   phx
@@ -75,22 +76,22 @@ game_flow_tick:
   bcc @coin_next
   stz GAME_COIN_A,x
   lda GAME_CREDITS
-  cmp #9
-  bcs @coin_next               ; the arcade gives no cue at the credit cap
+  cmp #CREDITS_MAX
+  bcs @coin_next                ; the arcade gives no sound at the cap
   clc
   phx
   tyx
   adc f:cabinet_coin_awarded,x
   plx
-  cmp #10
+  cmp #CREDITS_MAX+1
   bcc :+
-  lda #9
+  lda #CREDITS_MAX
 :
   sta GAME_CREDITS
-  lda #$12
+  lda #SND_COIN
   jsl game_sound_request
   lda GAME_FLOW
-  cmp #3
+  cmp #CAB_PAGE_FIRST
   bcs @title_preload
   lda CAB_DEMO
   beq @coin_next
@@ -98,34 +99,33 @@ game_flow_tick:
   jsl audio_title_preload_request
 @coin_next:
   inx
-  cpx #2
+  cpx #COIN_SLOTS
   bne @coins
 @state:
   lda GAME_FLOW
-  cmp #3
+  cmp #CAB_PAGE_FIRST
   bcc @playing
   jmp .loword(cabinet_tick)
 @playing:
   lda GAME_OUT
-  cmp #3
+  cmp #OUT_P1|OUT_P2
   bne @done
   lda CAB_LIVE_STATE
   ora CAB_LIVE_STATE+1
   bne @done                   ; each player's initials finish independently
-  lda PLAYER+8
-  ora PLAYER+$88
+  lda PLAYER+PL_STATE
+  ora PLAYER2+PL_STATE
   bne @done
   jsl cabinet_save_scores
-  lda #4
+  lda #PAGE_TITLE
   jsl cabinet_select
 @done:
   rtl
 
-; Native presentation tasks advance in the game's 59.637 Hz logic ticks.
-GAME_SEQUENCE = $1496
-GAME_SEQUENCE_TICKS = $1498
-GAME_STAGE_EXIT = $149a
-
+; game_scene_tick: the scene of this update (59.637 Hz): the stage exit (the
+; retry, the ending or the result), the departure of the players, then the
+; banner task (GAME_SEQUENCE = STAGE_BANNER_TASK): a banner of BANNER_TICKS,
+; the intro, or the boss result with its raid for BOSS_RESULT_TICKS. JSL.
 game_scene_tick:
 .a8
   lda CAB_RESULT_ACTIVE
@@ -134,12 +134,12 @@ game_scene_tick:
 :
   lda GAME_STAGE_EXIT
   beq :+
-  cmp #3
+  cmp #EXIT_RETRY
   bne @not_retry
   jsl game_stage_retry
   rtl
 @not_retry:
-  cmp #4
+  cmp #EXIT_ENDING
   bne @stage_result
   jsl cabinet_ending
   rtl
@@ -147,10 +147,10 @@ game_scene_tick:
   jsl game_stage_result
   rtl
 :
-  lda STAGE_FLAGS+9
-  cmp #8
+  lda STAGE_PLAYER_REQUEST
+  cmp #PS_DIVE
   beq @depart
-  cmp #12
+  cmp #PS_LEAVE
   bne @banner
 @depart:
   jsr .loword(game_depart_players)
@@ -159,29 +159,29 @@ game_scene_tick:
   cmp GAME_SEQUENCE
   beq @same
   sta GAME_SEQUENCE
-  rep #$20
+  a16
   stz GAME_SEQUENCE_TICKS
-  sep #$20
-  stz STAGE_FLAGS+$23
+  a8
+  stz STAGE_RAID_WAIT
 @same:
   lda GAME_SEQUENCE
   bne :+
   rtl
 :
-  cmp #1
+  cmp #SEQ_REPLAY
   bne :+
   stz STAGE_BANNER_TASK
   rtl
 :
-  cmp #4
+  cmp #SEQ_INTRO
   beq @intro
-  cmp #2
+  cmp #SEQ_RESULT
   beq @result
-  rep #$20
+  a16                           ; SEQ_BANNER
   inc GAME_SEQUENCE_TICKS
   lda GAME_SEQUENCE_TICKS
-  cmp #180
-  sep #$20
+  cmp #BANNER_TICKS
+  a8
   bcc @done
   stz STAGE_BANNER_TASK
 @done:
@@ -190,22 +190,24 @@ game_scene_tick:
   jmp .loword(native_intro_tick)
 @result:
   jsl game_raid_tick
-  rep #$20
+  a16
   inc GAME_SEQUENCE_TICKS
   lda GAME_SEQUENCE_TICKS
-  cmp #2100
+  cmp #BOSS_RESULT_TICKS
   bcc @wait16
-  stz CAMERA+$15
-  sep #$20
+  stz CAMERA_BG1_GATE
+  a8
   stz STAGE_BANNER_TASK
-  stz STAGE_FLAGS+$24
+  stz STAGE_BOSS_HOLD
   rtl
 @wait16:
-  sep #$20
+  a8
   rtl
 
-; Stage transitions start from native state and the next ROM event table.
-; Score, credits, the current weapon and player energy survive the flight.
+; game_next_stage: the next stage: the stage state, the camera and the
+; objects are cleared; the players in the game start at ENTRY_ALONG. After
+; the last stage the ending starts. Score, credits, weapon and energy stay.
+; JSL.
 game_next_stage:
 .a8
   jsl special_reset_stage
@@ -218,143 +220,114 @@ game_next_stage:
   stz GAME_STAGE_EXIT
   inc CAMERA_STAGE
   lda CAMERA_STAGE
-  cmp #16
+  cmp #STAGES
   bcc @next
   jsl cabinet_ending
   rtl
 @next:
-  rep #$20
-  ldx #32
+  a16
+  ldx #CAMERA_ARCADE_SIZE-2
 @camera:
   stz CAMERA,x
   dex
   dex
   bpl @camera
-  lda #$d500
-  sta CAMERA+$0f
-  ldx #$9fe
+  lda #DECK_SCROLL
+  sta CAMERA_BG1_SCROLL
+  ldx #EXTENDED_POOL-ENEMY_POOL-2 ; with BULLETS and LARGE_POOL
 @objects:
   stz ENEMY_POOL,x
   dex
   dex
   bpl @objects
-  ldx #18*32-2
+  ldx #SHOT_COUNT*SHOT_SIZE-2
 @shots:
   stz SHOTS,x
   dex
   dex
   bpl @shots
-  ldx #17*32-2
+  ldx #EXTENDED_COUNT*OBJECT_SIZE-2
 @extended:
   stz EXTENDED_POOL,x
   dex
   dex
   bpl @extended
-  ldx #$3e
+  ldx #STAGE_FLAGS_SIZE-2
 @flags:
   stz STAGE_FLAGS,x
   dex
   dex
   bpl @flags
-  sep #$20
+  a8
   stz CAMERA_PAN_ON
   stz CAMERA_EVENT_READY
-  stz STAGE_EVENTS
   stz STAGE_BOSS_COUNT
   stz GAME_SEQUENCE
   lda #1
-  sta CAMERA+2
+  sta CAMERA_BG2_DIVISOR
   stz GAME_DEPART_MODE
   stz GAME_DEPART_DONE
   ldx #0
 @player_entry:
-  lda PLAYER+8,x
+  lda PLAYER+PL_STATE,x
   beq @next_player
-  cmp #4
+  cmp #PS_DEATH
   beq @next_player
-  lda #$30
-  sta PLAYER+3,x
-  sta PLAYER+$23,x
-  lda #2
-  sta PLAYER+8,x
-  stz PLAYER+$55,x
+  lda #ENTRY_ALONG
+  sta PLAYER+SPR_ALONG,x
+  sta PLAYER+PL_BODY2+SPR_ALONG,x
+  lda #PS_LIVE
+  sta PLAYER+PL_STATE,x
+  stz PLAYER+PL_WEAPON_GATE,x
 @next_player:
-  cpx #128
+  cpx #PLAYER_SIZE
   beq :+
-  ldx #128
+  ldx #PLAYER_SIZE
   bra @player_entry
 :
   jsl stage_flow_init
   jsl large_loop_init
   rtl
 
-.ifdef GAME_TEST_STAGE
-; Off in the normal game. Keep the development-only selector with cold flow
-; code, rather than consuming the native renderer/input loop's tight segment.
-game_test_stage_dispatch:
-.a8
-  rep #$20
-  lda STAGE_CALLBACK
-  cmp #$46da
-  sep #$20
-  bne @ordinary
-  lda CAMERA_STAGE
-  bne @ordinary
-  jsl game_test_stage_start
-  sec
-  rtl
-@ordinary:
-  clc
-  rtl
-
-; No saved state and no injected event/camera fields.
-game_test_stage_start:
-.a8
-  lda #GAME_TEST_STAGE-2
-  sta CAMERA_STAGE
-  jsl game_next_stage
-  rtl
-.endif
-
-; Both pilots complete departure independently. An out/dead pilot does not
-; block the survivor, and the next stage never grants an unpaid revival.
-GAME_DEPART_DONE = $149b
-GAME_DEPART_MODE = $149c
+; game_depart_players: the departure STAGE_PLAYER_REQUEST (A): PS_DIVE puts
+; each live player into the dive (one that enters or dies later joins);
+; else each player in the game moves along DEPART_STEP each update until
+; DEPART_END. When both are done: PS_LEAVE ends the stage (EXIT_RESULT),
+; else the players come back to ENTRY_ALONG. A player out or dead does not
+; hold the other. JSR.
 game_depart_players:
 .a8
-  cmp #8
+  cmp #PS_DIVE
   bne @ordinary_departure
   sta GAME_DEPART_MODE
-  ; Apply a pending scene request when a player becomes active. A pilot may
-  ; still be entering or finishing a death when the request first arrives.
-  lda PLAYER+8
-  cmp #2
+  lda PLAYER+PL_STATE
+  cmp #PS_LIVE
   bne @dive_second
-  lda PLAYER+$88
+  lda PLAYER2+PL_STATE
   beq @dive_first
-  cmp #2
+  cmp #PS_LIVE
   beq @dive_both
-  lda STAGE_FLAGS+$10
+  lda STAGE_FINISH
   beq @dive_second
 @dive_first:
-  lda #8
-  sta PLAYER+8
+  lda #PS_DIVE
+  sta PLAYER+PL_STATE
 @dive_second:
-  lda PLAYER+$88
-  cmp #2
+  lda PLAYER2+PL_STATE
+  cmp #PS_LIVE
   bne @dive_started
-  lda PLAYER+8
+  lda PLAYER+PL_STATE
   beq @dive_second_apply
-  lda STAGE_FLAGS+$10
+  lda STAGE_FINISH
   beq @dive_started
 @dive_second_apply:
-  lda #8
-  sta PLAYER+$88
+  lda #PS_DIVE
+  sta PLAYER2+PL_STATE
   bra @dive_started
 @dive_both:
-  lda #8
-  sta PLAYER+8
-  sta PLAYER+$88
+  lda #PS_DIVE
+  sta PLAYER+PL_STATE
+  sta PLAYER2+PL_STATE
 @dive_started:
   rts
 @ordinary_departure:
@@ -365,113 +338,116 @@ game_depart_players:
 :
   ldx #0
   lda #1
-  sta $d4
+  sta DEPART_BIT
 @player:
   lda GAME_DEPART_DONE
-  and $d4
+  and DEPART_BIT
   bne @next
-  lda PLAYER+8,x
+  lda PLAYER+PL_STATE,x
   beq @finished
-  cmp #4
+  cmp #PS_DEATH
   beq @finished
   lda GAME_DEPART_MODE
-  sta PLAYER+8,x
-  lda PLAYER+3,x
+  sta PLAYER+PL_STATE,x
+  lda PLAYER+SPR_ALONG,x
   clc
-  adc #2
-  sta PLAYER+3,x
-  sta PLAYER+$23,x
-  cmp #$f0
+  adc #DEPART_STEP
+  sta PLAYER+SPR_ALONG,x
+  sta PLAYER+PL_BODY2+SPR_ALONG,x
+  cmp #DEPART_END
   bcc @next
 @finished:
   lda GAME_DEPART_DONE
-  ora $d4
+  ora DEPART_BIT
   sta GAME_DEPART_DONE
 @next:
-  cpx #128
+  cpx #PLAYER_SIZE
   beq @both
-  ldx #128
-  asl $d4
+  ldx #PLAYER_SIZE
+  asl DEPART_BIT
   bra @player
 @both:
   lda GAME_DEPART_DONE
-  cmp #3
+  cmp #%11                      ; both players
   bne @done
   lda GAME_DEPART_MODE
-  cmp #12
+  cmp #PS_LEAVE
   bne @return_to_flight
-  lda #1
+  lda #EXIT_RESULT
   sta GAME_STAGE_EXIT
   rts
 @return_to_flight:
-  stz STAGE_FLAGS+9
+  stz STAGE_PLAYER_REQUEST
   stz GAME_DEPART_MODE
-  stz CAMERA+$15
-  stz CAMERA+$16
+  stz CAMERA_BG1_GATE
+  stz CAMERA_BG1_GATE+1
   ldx #0
 @restore:
-  lda PLAYER+8,x
-  cmp #8
+  lda PLAYER+PL_STATE,x
+  cmp #PS_DIVE
   bne @restore_next
-  lda #$30
-  sta PLAYER+3,x
-  sta PLAYER+$23,x
-  lda #2
-  sta PLAYER+8,x
+  lda #ENTRY_ALONG
+  sta PLAYER+SPR_ALONG,x
+  sta PLAYER+PL_BODY2+SPR_ALONG,x
+  lda #PS_LIVE
+  sta PLAYER+PL_STATE,x
 @restore_next:
-  cpx #128
+  cpx #PLAYER_SIZE
   beq @done
-  ldx #128
+  ldx #PLAYER_SIZE
   bra @restore
 @done:
   rts
 
 .include "stage_result.s"
 
-; The rules have already selected the outcome and the awards. Only their
-; presentation is deferred; no second gameplay calculation is performed.
+; game_present_result: show the stage result (cabinet_stage_result) from
+; the result the rules chose already. CAB_RESULT_DATA: the stage, AIR_RESULT,
+; AIR_PERCENT, the band (1 for each 10 above 60 percent; 6 more for a
+; replay), the refill, RESULT_REMAIN, GAME_CONTINUE_LEVEL, 1 for a retry.
+; JSL.
 game_present_result:
 .a8
   lda CAMERA_STAGE
-  sta CAB_RESULT_DATA
+  sta CAB_RESULT_DATA+CRD_STAGE
   lda AIR_RESULT
-  sta CAB_RESULT_DATA+1
+  sta CAB_RESULT_DATA+CRD_RESULT
   lda AIR_PERCENT
-  sta CAB_RESULT_DATA+2
+  sta CAB_RESULT_DATA+CRD_PERCENT
   ldx #0
   lda AIR_RESULT
   bne @band_done
   lda AIR_PERCENT
   sec
-  sbc #60
+  sbc #PASS_BAND_FIRST
   bcc @band_done
 @band:
   inx
   sec
-  sbc #10
+  sbc #PASS_BAND_STEP
   bcs @band
 @band_done:
   txa
-  sta CAB_RESULT_DATA+3
+  sta CAB_RESULT_DATA+CRD_BAND
   lda STAGE_BOSS_PHASE
   beq :+
-  lda CAB_RESULT_DATA+3
+  lda CAB_RESULT_DATA+CRD_BAND
   clc
-  adc #6
-  sta CAB_RESULT_DATA+3
+  adc #REPLAY_BANDS
+  sta CAB_RESULT_DATA+CRD_BAND
 :
   jsr .loword(game_refill_index)
   lda f:game_refill,x
-  sta CAB_RESULT_DATA+4
+  sta CAB_RESULT_DATA+CRD_ENERGY
   lda RESULT_REMAIN
-  sta CAB_RESULT_DATA+5
+  sta CAB_RESULT_DATA+CRD_REFILL
   lda GAME_CONTINUE_LEVEL
-  sta CAB_RESULT_DATA+6
-  stz CAB_RESULT_DATA+7
+  sta CAB_RESULT_DATA+CRD_LEVEL
+  stz CAB_RESULT_DATA+CRD_FLAGS
   lda GAME_STAGE_EXIT
-  cmp #3
+  cmp #EXIT_RETRY
   bne :+
-  inc CAB_RESULT_DATA+7
+  inc CAB_RESULT_DATA+CRD_FLAGS
 :
   ldx #CAB_RESULT_DATA
   jsl cabinet_stage_result

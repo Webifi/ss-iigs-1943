@@ -23,6 +23,20 @@ PTR     = $48                   ; the directory entry
 DIR     = $0A00                 ; a directory block
 INDEX   = $0C00                 ; the index block of the file
 LOAD    = $2000
+TEXT    = $0400                 ; the text page
+SLOT_ROM = $C0                  ; + the slot: the page of the slot ROM
+DRIVER_OFFSET = $FF             ; $CnFF: the offset of the block driver
+READ_BLOCK = 1                  ; the block driver command
+DIR_BLOCK = 2                   ; the volume directory starts at this block
+DIR_NEXT = 2                    ; a directory block: the next block (2 bytes),
+DIR_ENTRY = 4                   ;   the first entry,
+DIR_ENTRIES = 13                ;   the entries,
+ENTRY_SIZE = 39                 ;   of this size
+NAME_BITS = $0F                 ; an entry: byte 0: the storage type and the name length
+SEEDLING = $10                  ; storage types (byte 0, high nibble)
+SAPLING = $20
+TREE = $30
+KEY_POINTER = 17                ; an entry: the key block (2 bytes)
 
         .segment "CODE"
         .byte   $01
@@ -35,26 +49,26 @@ boot:   stx     UNIT
         lsr     a
         lsr     a
         lsr     a
-        ora     #$C0
+        ora     #SLOT_ROM
         sta     driver+1
         sta     PTR+1
-        lda     #$FF
+        lda     #DRIVER_OFFSET
         sta     PTR
         ldy     #0
         lda     (PTR),y
         sta     driver
-        lda     #2              ; the volume directory starts at block 2
+        lda     #DIR_BLOCK
         ldx     #0
 dirblk: ldy     #>DIR
         jsr     read
-        lda     #<(DIR + 4)
+        lda     #<(DIR + DIR_ENTRY)
         sta     PTR
-        lda     #>(DIR + 4)
+        lda     #>(DIR + DIR_ENTRY)
         sta     PTR+1
-        ldx     #13             ; entries in a block
+        ldx     #DIR_ENTRIES
 entry:  ldy     #0
         lda     (PTR),y
-        and     #$0F
+        and     #NAME_BITS
         cmp     name
         bne     skip
         tay
@@ -64,27 +78,27 @@ same:   lda     (PTR),y
         dey
         bne     same
         lda     (PTR),y
-        cmp     #$30
+        cmp     #TREE
         bcs     skip
-        cmp     #$10
-        bcs     found           ; a seedling ($1n) or a sapling ($2n)
+        cmp     #SEEDLING
+        bcs     found           ; a seedling or a sapling
 skip:   lda     PTR
         clc
-        adc     #39
+        adc     #ENTRY_SIZE
         sta     PTR
         bcc     :+
         inc     PTR+1
 :       dex
         bne     entry
-        lda     DIR+2           ; the next directory block
-        ldx     DIR+3
+        lda     DIR+DIR_NEXT    ; the next directory block
+        ldx     DIR+DIR_NEXT+1
         bne     dirblk
         tay
         bne     dirblk
         beq     fail
 
-found:  cmp     #$20
-        ldy     #18
+found:  cmp     #SAPLING
+        ldy     #KEY_POINTER+1
         lda     (PTR),y
         tax
         dey
@@ -118,22 +132,23 @@ read:   sta     BLK
         sty     BUF+1
         lda     #0
         sta     BUF
-        lda     #1
+        lda     #READ_BLOCK
         sta     CMD
         jsr     call
         bcs     fail
         rts
 call:   jmp     (driver)
 
-fail:   ldy     #9
+fail:   ldy     #message_end-message-1
 :       lda     message,y
-        ora     #$80
-        sta     $0400,y
+        ora     #$80            ; normal text
+        sta     TEXT,y
         dey
         bpl     :-
 hang:   jmp     hang
 
 message: .byte  "BOOT ERROR"
+message_end:
 index:  .byte   0
 page:   .byte   0
 driver: .word   0

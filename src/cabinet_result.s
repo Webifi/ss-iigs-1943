@@ -1,15 +1,11 @@
-; Presentation only. The gameplay owner supplies values after applying rules.
-; JSL, M=8/X=16, DBR=0, X -> eight bytes in bank 0:
-; stage (0..15), outcome (0 success / nonzero failure), destruction percent,
-; bonus text index (0..11), energy percent, charged energy, surplus rounds,
-; flags (bit 0: show the arcade retry line). A/X/Y are preserved; C undefined.
-; Returns immediately. CAB_RESULT_ACTIVE stays 1 until the presentation ends.
-CAB_RESULT_ACTIVE = $152c
-CAB_RESULT_PHASE = $152d
-CAB_RESULT_TICKS = $152e
-CAB_RESULT_DATA = $1530
-CAB_RESULT_DIGITS = $1538
+; The stage result report: only its presentation; the rules chose the
+; values. CAB_RESULT_ACTIVE stays 1 until the report ends.
+DIGIT_BLANK = 10             ; CAB_RESULT_DIGITS: no digit
+; CAB_RESULT_DIGITS: 0-1 the stage, then three digits each from 2: the
+; percent, from 5: the energy, from 8: the refill; 11 the level.
 
+; cabinet_stage_result: show the result of the CRD_SIZE bytes at X in bank 0
+; (CRD_* layout). JSL; A8, X16; A, X, Y kept.
 cabinet_stage_result:
 .a8
 .i16
@@ -22,30 +18,29 @@ cabinet_stage_result:
   sta CAB_RESULT_DATA,y
   inx
   iny
-  cpy #8
+  cpy #CRD_SIZE
   bne @copy
   lda #1
   sta CAB_RESULT_ACTIVE
   stz CAB_RESULT_PHASE
-  rep #$20
-  stz CAB_RESULT_TICKS
-  lda CAB_RESULT_DATA
-  and #15
+  a16
+  lda CAB_RESULT_DATA+CRD_STAGE
+  and #STAGES-1
   asl
   tax
   lda f:cabinet_stage_digits,x
   sta CAB_RESULT_DIGITS
-  sep #$20
-  lda CAB_RESULT_DATA+2
+  a8
+  lda CAB_RESULT_DATA+CRD_PERCENT
   ldy #2
   jsr .loword(cabinet_result_number)
-  lda CAB_RESULT_DATA+4
+  lda CAB_RESULT_DATA+CRD_ENERGY
   ldy #5
   jsr .loword(cabinet_result_number)
-  lda CAB_RESULT_DATA+5
+  lda CAB_RESULT_DATA+CRD_REFILL
   ldy #8
   jsr .loword(cabinet_result_number)
-  lda CAB_RESULT_DATA+6
+  lda CAB_RESULT_DATA+CRD_LEVEL
   sta CAB_RESULT_DIGITS+11
   jsl cabinet_wire_mode
   jsl cabinet_text_select
@@ -54,13 +49,15 @@ cabinet_stage_result:
   pla
   rtl
 
+; cabinet_result_number: the three digits of A (0-255) at CAB_RESULT_DIGITS
+; + Y; leading zeros are DIGIT_BLANK. JSR.
 cabinet_result_number:
-  rep #$20
+  a16
   and #255
   tax
-  sep #$20
+  a8
   lda f:cabinet_percent_bcd,x
-  sta $d4
+  sta RESULT_BCD                ; the tens and ones in BCD
   txa
   cmp #200
   bcc :+
@@ -72,10 +69,10 @@ cabinet_result_number:
   lda #1
   bra @hundreds
 :
-  lda #10
+  lda #DIGIT_BLANK
 @hundreds:
   sta CAB_RESULT_DIGITS,y
-  lda $d4
+  lda RESULT_BCD
   lsr
   lsr
   lsr
@@ -84,17 +81,20 @@ cabinet_result_number:
   txa
   cmp #10
   bcs :+
-  lda #10
+  lda #DIGIT_BLANK
   bra @tens
 :
   lda #0
 @tens:
   sta CAB_RESULT_DIGITS+1,y
-  lda $d4
+  lda RESULT_BCD
   and #15
   sta CAB_RESULT_DIGITS+2,y
   rts
 
+; cabinet_result_tick: one update of the report (cabinet_frame): the text
+; types; then, except after a retry or the last stage, the deck and the
+; statistics page; then the report ends. JSL.
 cabinet_result_tick:
 .a8
   lda CAB_RESULT_ACTIVE
@@ -104,11 +104,11 @@ cabinet_result_tick:
   beq @done
   lda CAB_RESULT_PHASE
   bne @finish
-  lda CAB_RESULT_DATA+7
+  lda CAB_RESULT_DATA+CRD_FLAGS
   and #1
   bne @finish
-  lda CAB_RESULT_DATA
-  cmp #15                     ; Yamato goes directly to the ending
+  lda CAB_RESULT_DATA+CRD_STAGE
+  cmp #LAST_STAGE               ; the Yamato: the ending comes next
   beq @finish
   jsl game_result_deck
   inc CAB_RESULT_PHASE

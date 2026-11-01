@@ -1,182 +1,134 @@
-.include "profile.inc"
-; Native enemy-bullet pool. Movement records are build data shared with the
-; enemy decoder; no original opcode is interpreted.
+; The enemy bullets (BULLETS, BULLET_COUNT records): each update runs the
+; motion script of each bullet (the same step records as the enemies), its
+; move, and on odd updates its contacts: a SHOT GUN shot can stop it
+; (bullet_intercept), or it hits a player (bullet_contact).
 .a8
 .i16
-BULLET_SLOT = $11d4
-BULLET_SPAWNS = $11d6
-BULLET_RETIREMENTS = $11d7
-BULLET_MAX_ACTIVE = $11d8
 
+; bullet_init: no bullet; all BULLET_COUNT slots in use. JSR.
 bullet_init:
-  rep #$20
-  ldx #510
+  a16
+  ldx #BULLET_COUNT*OBJECT_SIZE-2
 @clear:
   stz BULLETS,x
   dex
   dex
   bpl @clear
-  stz BULLET_CONTEXT
-  lda #16
-  sta BULLET_CONTEXT+2
+  stz BULLET_ANGLE             ; and BULLET_SUPPRESS
+  lda #BULLET_COUNT
+  sta BULLET_SLOTS              ; and BULLET_SPEED = 0
   stz BULLET_SLOT
-  stz BULLET_SPAWNS
-  stz BULLET_MAX_ACTIVE
-  sep #$20
+  a8
   rts
 
+; bullet_tick: one update of the enemy bullets (flight_weapons). JSR; D = 0
+; after it.
 bullet_tick:
-  rep #$20
+  a16
   stz BULLET_SLOT
-  stz $e8
-.ifdef POOL_MOTION
-  stz $ec
-.endif
+  a8
+  ; INTERCEPT_WEAPON: a SHOT GUN of either player can stop bullets.
+  lda PLAYER+PL_WEAPON
+  ora PLAYER2+PL_WEAPON
+  and #WEAPON_SHOTGUN
+  sta a:INTERCEPT_WEAPON
+  a16
 @slot:
   ldx BULLET_SLOT
-  sep #$20
-  lda BULLETS+8,x
+  a8
+  lda BULLETS+OBJ_TYPE,x
   bne @active
-  jmp @next
+  jmp @next_zero
 @active:
-  inc $e8
-.ifdef POOL_MOTION
-  lda BULLETS+4,x
-  beq @copied
-.if FLIGHT_CONTACT
-  lda COMBAT_PHASE
-  and #1
-  bne @copied
-.endif
-  stx $ee
-  inc $ec
-  stz ENEMY_SCRIPT_KIND
-  rep #$20
-  stz ENEMY_CALLBACK
-  sep #$20
-  routine_call bullet_motion_pool, 24
-  lda ENEMY_RETIRED
-  beq :+
-  inc BULLET_RETIREMENTS
-:
-  jmp @next
-@copied:
-  stz $ec
-.endif
-  rep #$20
-  .repeat 16,I
-    lda BULLETS+I*2,x
-    sta ENEMY+I*2
-  .endrepeat
-  sep #$20
+  ; D = the bullet record (POOL_RECORD) while it runs.
+  a16
+  txa
+  clc
+  adc #BULLETS
+  sta POOL_RECORD
+  tcd
+  a8
 @script:
-  routine_call enemy_script, 20
+  lda z:OBJ_DURATION
+  bne @move
+@script_decode:
+  jsr enemy_script
   lda ENEMY_SCRIPT_KIND
-  beq @move
-  cmp #1
-.ifdef ROUTINE_PROFILE
+  beq @move                     ; SCRIPT_MOVE
+  cmp #SCRIPT_RETIRE
   bne :+
   jmp @retired
 :
-.else
-  beq @retired
-.endif
- .ifdef EXTENDED_STAGE_ENEMIES
-  rep #$20
+  a16
   lda ENEMY_CALLBACK
-  sta AI_CONTEXT+2
-  sep #$20
-  jsr ground_bullet_ai
-  bcc @unknown_callback
-  rep #$20
+  sta AI_TAIL
+  a8
+  jsl ground_bullet_ai
+  bcc @save
+  a16
   lda AI_NEXT
   sec
-  sbc #7
-  sta ENEMY+$1e
-  sep #$20
+  sbc #STEP_SIZE                ; the script reads OBJ_MOTION + STEP_SIZE
+  sta z:OBJ_MOTION
+  a8
   jmp @script
-@unknown_callback:
- .endif
-  ; Unsupported callback remains an explicit error.
-  lda #$e8
-  sta f:$050301
-.ifdef ROUTINE_PROFILE
-  jmp @save
-.else
-  bra @save
-.endif
 @move:
-  routine_call bullet_motion, 24
+  jsr bullet_motion
   lda ENEMY_RETIRED
   bne @retired
-.if FLIGHT_CONTACT
   lda COMBAT_PHASE
   and #1
-  beq @save
-  lda ENEMY+1
-  and #16
-  bne @save
- .if FLIGHT_PLAYER_AUX
+  beq @save                     ; even update: no bullet contacts
+  lda z:SPR_ATTR
+  and #SPR_ALONG_HIGH
+  bne @save                     ; off the field
+  ; Without the shot flag and a SHOT GUN no shot can stop the bullet.
+  lda z:OBJ_FLAGS
+  and #OF_SHOT
+  ora a:INTERCEPT_WEAPON
+  bne :+
+  stz INTERCEPT_SOUND
+  ; The original miss leaves Y at the upper player-slot boundary.
+  ldy #SHOTS_PER_PLAYER*SHOT_SIZE
+  lda PLAYER2+PL_STATE
+  cmp #PS_LIVE
+  bne @body_contact
+  ldy #SHOT_COUNT*SHOT_SIZE
+  bra @body_contact
+:
   jsr bullet_intercept
   bcc @body_contact
   lda INTERCEPT_SOUND
-  sta PLAYER_EVENT_SOUND
+  jsl game_sound_request        ; arcade $612D
   bra @save
 @body_contact:
- .endif
-  routine_call bullet_contact, 25
-  lda CONTACT_CONTEXT+2
+  jsr bullet_contact
+  lda BULLET_HIT_SOUND          ; SND_BULLET_STRIKE or SND_PLAYER_DOWN, or 0
   beq @save
-  inc CONTACT_HITS
-  lda CONTACT_CONTEXT+1
-  sta CONTACT_LAST_SOUND
-  cmp #2
-  bne :+
-  routine_call doc_play_player_hurt, 28
-  bra @save
-:
-  cmp #5
-  bne @save
-  inc CONTACT_DEATH_REQUESTS
-.if FLIGHT_DEATH
-  jsr doc_play_player_death
-.endif
-.endif
-  bra @save
+  jsl game_sound_request
 @retired:
-  inc BULLET_RETIREMENTS
 @save:
-  rep #$20
-  ldx BULLET_SLOT
-  .repeat 16,I
-    lda ENEMY+I*2
-    sta BULLETS+I*2,x
-  .endrepeat
-@next:
-  rep #$20
+@next_zero:
+  a16
   lda BULLET_SLOT
   clc
-  adc #32
+  adc #OBJECT_SIZE
   sta BULLET_SLOT
-  cmp #512
+  cmp #BULLET_COUNT*OBJECT_SIZE
   beq @done
-  sep #$20
+  a8
   jmp @slot
 @done:
-.ifdef POOL_MOTION
-  lda $ec
+  a16
+.a16
+  ; D still identifies the last live record; zero means no record selected.
+  ; On an empty pass leave X at the last slot, as the original loop did.
+  tdc
   beq :+
-  ldx $ee
-  .repeat 16,I
-    lda BULLETS+I*2,x
-    sta ENEMY+I*2
-  .endrepeat
+  tax
+  lda #0
+  tcd
 :
-.endif
-  sep #$20
-  lda $e8
-  cmp BULLET_MAX_ACTIVE
-  bcc :+
-  sta BULLET_MAX_ACTIVE
-:
+  a8
+  stz INTERCEPT_WEAPON
   rts

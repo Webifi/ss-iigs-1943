@@ -22,7 +22,6 @@ SETUP=1.0
 KEY=1.05
 MINIMUM_HOLD=.25
 RELEASE_LIMIT=8.0
-FLOOR=1/32768
 
 def stages(row):
     """The EG ticks of the snapshot captures of a note."""

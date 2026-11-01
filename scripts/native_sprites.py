@@ -6,10 +6,6 @@ priority with foreground or plan background restoration.
 """
 
 
-def swap(v):
-    return (v >> 8) | ((v & 255) << 8)
-
-
 def glyph_descriptor(art, scene=None):
     """Fixed, group-aligned HUD glyph: one mask pair per occupied source row.
     Returns the bytes and words of the record."""
@@ -32,14 +28,12 @@ def object_packets(pool, scene):
     """Prepared object commands in otherwise unused card SRAM, never VRAM."""
     pointers = {}
 
-    prepared = dict(data=bytes(32768), band_table=None)
-    scene.prepared_background = prepared
     from asset_source import Records
 
     descriptors = Records("object_glyph", "object glyph descriptors (scripts/native_sprites.py)")
 
     from asset_source import Pool
-    from card_link import asset_later
+    from secondsight_link import asset_later
 
     scene.masks = Pool("glyph_mask", "glyph mask lists (scripts/native_sprites.py)")
     asset_later("glyph_masks", scene.masks.source)
@@ -47,10 +41,9 @@ def object_packets(pool, scene):
         art.phase = key[-1]
         values = glyph_descriptor(art, scene)
         pointers[key] = descriptors.pointer(values, lambda source, v=values: record(source, v))
-    from card_link import asset
+    from secondsight_link import asset
 
     asset("object_glyphs", descriptors.source)
-    scene.compiled_object_programs = 0
     return pointers
 
 
@@ -63,7 +56,6 @@ def compile_hud(
     energy=None,
     pool=None,
     scene=None,
-    static_pairs=False,
 ):
     """Fixed glyph positions are build data; only the eight score glyphs vary."""
     from pattern_hud import compile
@@ -76,7 +68,7 @@ def compile_hud(
     )
     fixed, stats = compile(chars, variable, pool, scene)
     from asset_source import Source, derived
-    from card_link import alias, asset, define
+    from secondsight_link import alias, asset, define
 
     # One record in banked SRAM: the planner copies it to its stream scratch.
     stream = Source("fixed HUD stream (scripts/native_sprites.py)").section(".desc.state_hud_fixed")

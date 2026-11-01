@@ -1,8 +1,10 @@
 """Region-resident exact 16-pixel row sharing."""
 
-import hashlib
 import struct
 from world_stream import INTRO, replace
+
+# src/secondsight/world_rows.s: the row addresses of a scatter job in the upload buffer.
+BUFFER_ROW_ADDRESSES = 0x80
 
 
 def prepare(scene, pool, world, prepared, pairs, units):
@@ -63,7 +65,6 @@ def prepare(scene, pool, world, prepared, pairs, units):
         (scene.row_table_base + (slot // 4) * 64) | ((slot % 4) << 18)
         for slot in range(scene.world_slots)
     ]
-    scene.row_palette_hash = hashlib.sha256(pixels).hexdigest()
     print(
         "Shared pixel rows",
         len(row_ids),
@@ -120,9 +121,12 @@ def tile_packets(scene, tile):
     palette = bytes(sorted(set(pixels))).ljust(16, b"\0")
     assert len(palette) == 16
     indices = {v: i for i, v in enumerate(palette)}
+    from secondsight_link import fixed
     from world_stream import sram_jobs
 
-    yield from sram_jobs(0x3480, addresses + distinct)
+    # The upload buffer starts the scratch page (src/secondsight/fixed.ld), in
+    # common SRAM: its logical address is its physical one.
+    yield from sram_jobs(fixed("scratch__run") + BUFFER_ROW_ADDRESSES, addresses + distinct)
     slot = scene.world_colors[tile]
     table_address = scene.row_table_base + (slot // 4) * 64
     for plane in range(4):

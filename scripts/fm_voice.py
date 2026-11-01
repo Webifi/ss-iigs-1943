@@ -19,7 +19,6 @@ ATTACK_LIMIT = 64
 # rate) and its crossfade levels recomputed each visit. In listening
 # comparisons of all songs and effects this sounds the same as once per frame.
 VISIT = 8
-WEIGHT_VISITS = 1
 
 
 def _register(att):
@@ -30,7 +29,6 @@ def _register(att):
 # Shared native tables: attenuation to knee-board volume register, crossfade
 # weight to attenuation, and the crossfade compensation shape.
 REGISTER = [_register(a) for a in range(SILENT + 1)]
-LINEAR = [round(255 * 10 ** (-a * UNIT / 20)) if a < SILENT else 0 for a in range(SILENT + 1)]
 WEIGHT = [SILENT] + [round(-20 * math.log10(i / 256) / UNIT) for i in range(1, 257)]
 SHAPE = [round(256 * 4 * (i / 256) * (1 - i / 256)) for i in range(257)]
 # Crossfade boost by stage boost (0..31) and alpha>>10 (64 steps): one read.
@@ -168,7 +166,7 @@ class Part:
             self.write(t, voice, register, value)
             self.held[voice, register] = value
 
-    def start(self, t, native, places, fc, previous_level):
+    def start(self, t, native, places, fc):
         n = dict(
             native=native,
             places=places,
@@ -255,7 +253,7 @@ def hold_volumes(native, length):
     A, voice B) per time: what a visit writes depends only on that time, so
     the native player reads them instead of stepping (scripts/fm_native.py)."""
     p = Part(lambda *a: None)
-    p.start(0, native, {s["table"]: 0 for s in native["stages"]}, 0, SILENT)
+    p.start(0, native, {s["table"]: 0 for s in native["stages"]}, 0)
     n = p.note
     out = bytearray()
     for et in range(length + 1):

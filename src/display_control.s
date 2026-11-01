@@ -1,45 +1,105 @@
-; The editor and inactive timing tables occupy the checked alignment hole.
-; Editable preset records are in the unused tail of the 512-byte settings block.
+; The display pages of the menu: the preset and the timing of the monitor
+; that the start found (VGA or AppleColor RGB). The timing records
+; (DISPLAY_RECORD_SIZE, DR_* fields) are in the settings block: VGA_PRESETS
+; for VGA, then RGB_PRESETS for RGB. display_apply writes a record into the
+; mode table of the card (the VGA CRTC registers). The editor and the timing
+; tables of the other monitor are in a checked alignment hole of the code.
 .a16
 .i16
 DSET = input_native::settings
 DPAGE = input_native::menuPage
 DACTION = input_native::menuAction
-DCHOICE = input_native::menuChoice
-DRECORD = DSET+294
-DFLAGS = DSET+292
+DRECORD = DSET+SET_DISPLAY_RECORDS
+DFLAGS = DSET+SET_DISPLAY_PRESET    ; byte 0: the VGA preset; byte 1: the RGB preset
+MP_MONITOR = input_native::MP_MONITOR
+MP_HORIZONTAL = input_native::MP_HORIZONTAL
+MP_VERTICAL = input_native::MP_VERTICAL
+MP_EDIT = input_native::MP_EDIT
+MP_PRESET = input_native::MP_PRESET
+MENU_LIST = input_native::MENU_LIST  ; the row of the first choice
+MENU_MARK = input_native::MENU_MARK
+MONITOR_VGA = 0              ; display_monitor
+MONITOR_RGB = 1
+VGA_PRESETS = 4              ; the presets (and the records) of each monitor
+RGB_PRESETS = 5
+V1_RECORDS = 8               ; DISPLAY_MARK_V1: the records of version 1
+; The choices of the pages (DACTION).
+MON_HORIZONTAL = 1           ; MP_MONITOR: 0 the preset
+MON_VERTICAL = 2
+MON_SYNC = 3                 ; VGA only
+MON_VGA_RESET = 4            ; MON_SYNC, MON_VGA_RESET, MON_VGA_BACK on VGA;
+MON_VGA_BACK = 5             ; on RGB the reset and back are one choice earlier
+MON_RGB_RESET = 3
+MON_RGB_BACK = 4
+H_BACK = 6                   ; MP_HORIZONTAL: 0 the clock, 1-5 the fields
+V_BACK = 5                   ; MP_VERTICAL: 0-4 the fields
+EDIT_APPLY = 4               ; MP_EDIT: 0-3 the steps (display_steps)
+EDIT_CANCEL = 5              ; also the cancel of the clock choices (0-4)
+EDIT_CHOICES = 6
+EDIT_MAX = VTOTAL_END-1      ; MP_EDIT: the greatest value
+; The limits of a record (display_validate), from the CRTC registers.
+HTOTAL_MIN = 61              ; characters
+HTOTAL_END = 261
+HBLANK_MIN = 56
+CHAR_END = 256               ; a character register has 8 bits
+HBLANK_WIDTH_END = 64        ; the end registers keep 6 bits (blanking)
+HSYNC_WIDTH_END = 32         ; and 5 bits (sync)
+VTOTAL_END = 1026            ; lines (CRTC 6 and its overflow: the total - 2)
+LINE_END = 1024              ; a line register has 10 bits
+VBLANK_WIDTH_END = 256       ; the end registers keep 8 bits (blanking)
+VSYNC_WIDTH_END = 16         ; and 4 bits (sync)
+VGA_LINES = 512              ; the lines of the picture: blanking starts after them
+RGB_LINES = 256
+POLARITIES = 4               ; DR_POLARITY: bit 0 H negative, bit 1 V negative
+RGB_POLARITY = 3             ; the RGB TTL sync: both negative, fixed
+; The CRTC register bits that display_apply writes.
+HTOTAL_BIAS = 5              ; CRTC 0: the total - 5
+VTOTAL_BIAS = 2              ; CRTC 6: the total - 2
+END_LOW_BITS = $1f           ; CRTC 3 and 5: the end bits 0-4
+CRTC3_FIXED = $80            ; CRTC 3: bit 7 set
+OVERFLOW_KEEP = $52          ; CRTC 7: the fixed visible height and line compare bits
+MAX_SCAN_KEEP = $df          ; CRTC 9: all but bit 5 (the blanking start bit 9)
+VSYNC_END_BITS = $0f         ; CRTC 11: the end bits
+VSYNC_IRQ_OFF = $30          ; CRTC 11: the vertical interrupt cleared and off
+MISC_FIXED = $23             ; MISC: colour I/O, RAM on, the high page
+MODE_ENTRY = 4               ; DISPLAY_MODE: an entry of the card's mode table;
+MODE_DATA = 3                ; its data byte
+NO_THRESHOLD = $ffff         ; DISPLAY_FIRST: a custom record has no threshold
+VALUE_COLUMN = 19            ; the values on the pages
+DIGITS = 4                   ; display_number
 
-; Version 2 adds one record in the last 24 bytes before the checksum.
-; Upgrade factory records only: every explicitly edited record stays intact.
+; display_init: the timing records as the current version: a version 1
+; block gets the new record, other records keep their edits; no mark: all
+; factory. Then the presets inside their counts. JSR; A16.
 display_init:
-  lda f:DSET+288
-  cmp #$4452
+  lda f:DSET+SET_DISPLAY_MARK
+  cmp #DISPLAY_MARK
   beq @clamp
-  cmp #$4451
+  cmp #DISPLAY_MARK_V1
   beq @upgrade
   lda #0
   sta f:DFLAGS
-  sta f:DSET+290
+  sta f:DSET+SET_DISPLAY_EDITED
 @upgrade:
-  lda #$4452
-  sta f:DSET+288
-  lda f:DSET+290
-  and #$00ff
-  sta f:DSET+290
+  lda #DISPLAY_MARK
+  sta f:DSET+SET_DISPLAY_MARK
+  lda f:DSET+SET_DISPLAY_EDITED
+  and #(1<<V1_RECORDS)-1        ; the edits of the version 1 records
+  sta f:DSET+SET_DISPLAY_EDITED
   lda #1
   sta a:.loword(display_tmp)
   ldx #0
 @record:
   lda a:.loword(display_tmp)
-  and f:DSET+290
+  and f:DSET+SET_DISPLAY_EDITED
   beq @factory
   txa
   clc
-  adc #24
+  adc #DISPLAY_RECORD_SIZE
   tax
   bra @next
 @factory:
-  ldy #12
+  ldy #DISPLAY_RECORD_SIZE/2
 @copy:
   lda a:.loword(display_defaults),x
   sta f:DRECORD,x
@@ -49,41 +109,42 @@ display_init:
   bne @copy
 @next:
   asl a:.loword(display_tmp)
-  cpx #216
+  cpx #DISPLAY_RECORDS*DISPLAY_RECORD_SIZE
   bcc @record
 @clamp:
-  sep #$20
+  a8
   lda f:DFLAGS
-  cmp #4
+  cmp #VGA_PRESETS
   bcc :+
   lda #0
   sta f:DFLAGS
 :
   lda f:DFLAGS+1
-  cmp #5
+  cmp #RGB_PRESETS
   bcc :+
   lda #0
   sta f:DFLAGS+1
 :
-  rep #$20
+  a16
   rts
 
-; Return to the immediate parent and abandon an uncommitted numeric edit.
+; display_back: ESC on a display page: the page before (an edit is not
+; kept); from MP_MONITOR the main page. JSL.
 display_back:
   php
-  rep #$30
+  ax16
   phb
   phk
   plb
   lda f:DPAGE
-  cmp #11
+  cmp #MP_EDIT
   bne :+
   lda a:.loword(display_parent)
   bra @set
 :
-  cmp #9
+  cmp #MP_HORIZONTAL
   bcc :+
-  lda #8
+  lda #MP_MONITOR
   bra @set
 :
   lda #0
@@ -95,9 +156,8 @@ display_back:
   plp
   rtl
 
-; Key actions. Pages: 8 monitor (the one detected at startup, display_apply),
-; 9/10 horizontal/vertical, 11 numeric editor, 12 preset selection. ESC is
-; handled by display_back.
+; display_key: the key A (an ADB code) on a display page: UP and DOWN move
+; the choice; RETURN (and RIGHT) takes it. ESC is display_back. JSL.
 display_key:
   phb
   phk
@@ -105,28 +165,28 @@ display_key:
   sta a:.loword(display_keycode)
   jsr .loword(display_init)
   lda f:DPAGE
-  cmp #11
+  cmp #MP_EDIT
   bne :+
   jmp .loword(display_edit_key)
 :
-  cmp #12
+  cmp #MP_PRESET
   bne :+
   jmp .loword(display_preset_key)
 :
   lda a:.loword(display_keycode)
-  cmp #$3e
+  cmp #KEY_UP
   beq @up
-  cmp #$7e
+  cmp #KEY_MAC_UP
   beq @up
-  cmp #$3d
+  cmp #KEY_DOWN
   beq @down
-  cmp #$7d
+  cmp #KEY_MAC_DOWN
   beq @down
-  cmp #$24
+  cmp #KEY_RETURN
   beq @enter
-  cmp #$3c
+  cmp #KEY_RIGHT
   beq @enter
-  cmp #$7c
+  cmp #KEY_MAC_RIGHT
   beq @enter
   jmp .loword(display_key_done)
 @up:
@@ -139,22 +199,22 @@ display_key:
   jmp .loword(display_key_done)
 @down:
   lda f:DPAGE
-  cmp #8
+  cmp #MP_MONITOR
   beq @limit5
-  cmp #9
+  cmp #MP_HORIZONTAL
   beq @limit6
-  lda #5
+  lda #V_BACK
   bra @limit
 @limit5:
   lda a:.loword(display_monitor)
   beq :+
-  lda #4
+  lda #MON_RGB_BACK
   bra @limit
 :
-  lda #5
+  lda #MON_VGA_BACK
   bra @limit
 @limit6:
-  lda #6
+  lda #H_BACK
 @limit:
   cmp f:DACTION
   bne :+
@@ -166,42 +226,42 @@ display_key:
   jmp .loword(display_key_done)
 @enter:
   lda f:DPAGE
-  cmp #8
+  cmp #MP_MONITOR
   beq @monitor
   jmp .loword(display_field_enter)
 @monitor:
   lda a:.loword(display_monitor)
   beq @vga_monitor
   lda f:DACTION
-  cmp #3
+  cmp #MON_RGB_RESET
   bne :+
   jmp .loword(display_reset)
 :
-  cmp #4
+  cmp #MON_RGB_BACK
   beq @monitor_back
 @vga_monitor:
   lda f:DACTION
   beq display_preset
-  cmp #1
+  cmp #MON_HORIZONTAL
   beq @horizontal
-  cmp #2
+  cmp #MON_VERTICAL
   beq @vertical
-  cmp #3
+  cmp #MON_SYNC
   bne :+
   jmp .loword(display_polarity)
 :
-  cmp #4
+  cmp #MON_VGA_RESET
   bne :+
   jmp .loword(display_reset)
 :
 @monitor_back:
-  lda #0
+  lda #0                        ; MP_MAIN
   bra @page
 @horizontal:
-  lda #9
+  lda #MP_HORIZONTAL
   bra @page
 @vertical:
-  lda #10
+  lda #MP_VERTICAL
 @page:
   sta f:DPAGE
   lda #0
@@ -209,28 +269,30 @@ display_key:
 display_key_done:
   plb
   rtl
+; display_preset: the preset list, at the current preset.
 display_preset:
   jsr .loword(display_get_preset)
   sta f:DACTION
-  lda #12
+  lda #MP_PRESET
   sta f:DPAGE
   jmp .loword(display_key_done)
 
+; display_preset_key: MP_PRESET: RETURN selects the preset.
 display_preset_key:
   lda a:.loword(display_keycode)
-  cmp #$3e
+  cmp #KEY_UP
   beq @up
-  cmp #$7e
+  cmp #KEY_MAC_UP
   beq @up
-  cmp #$3d
+  cmp #KEY_DOWN
   beq @down
-  cmp #$7d
+  cmp #KEY_MAC_DOWN
   beq @down
-  cmp #$24
+  cmp #KEY_RETURN
   bne @done
   lda f:DACTION
   jsr .loword(display_set_preset)
-  lda #8
+  lda #MP_MONITOR
   sta f:DPAGE
   lda #0
   sta f:DACTION
@@ -244,9 +306,9 @@ display_preset_key:
 @down:
   lda f:DACTION
   ldx a:.loword(display_monitor)
-  cpx #1
-  ; Compare against the connector-specific last preset (VGA3, RGB4).
-  lda #3
+  cpx #MONITOR_RGB
+  ; The last preset of the monitor (carry 1 for RGB).
+  lda #VGA_PRESETS-1
   adc #0
   cmp f:DACTION
   beq @done
@@ -255,16 +317,17 @@ display_preset_key:
   sta f:DACTION
 @done:
   jmp .loword(display_key_done)
+; display_polarity: MON_SYNC: the VGA sync polarities, as a choice of the
+; four (the RGB TTL polarity is fixed).
 display_polarity:
-  ; RGB composite TTL polarity is fixed. VGA H/V invert are two bits and
-  ; selected in a dedicated numeric edit rather than an unbounded toggle.
   lda a:.loword(display_monitor)
   bne display_key_done
-  lda #22
+  lda #DR_POLARITY
   sta a:.loword(display_field)
-  lda #8
+  lda #MP_MONITOR
   sta a:.loword(display_parent)
   jmp .loword(display_begin_edit)
+; display_reset: the record of the preset as in the factory, not edited.
 display_reset:
   jsr .loword(display_record_offset)
   ldy #0
@@ -275,36 +338,40 @@ display_reset:
   inx
   iny
   iny
-  cpy #24
+  cpy #DISPLAY_RECORD_SIZE
   bcc @reset_loop
   jsr .loword(display_dirty_mask)
   eor #$ffff
-  and f:DSET+290
-  sta f:DSET+290
+  and f:DSET+SET_DISPLAY_EDITED
+  sta f:DSET+SET_DISPLAY_EDITED
   jmp .loword(display_key_done)
 
+; display_get_preset: A = the preset of the monitor. display_set_preset:
+; the preset of the monitor = A. JSR; A16.
 display_get_preset:
   ldx a:.loword(display_monitor)
-  sep #$20
+  a8
   lda f:DFLAGS,x
-  rep #$20
+  a16
   and #255
   rts
 display_set_preset:
   ldx a:.loword(display_monitor)
-  sep #$20
+  a8
   sta f:DFLAGS,x
-  rep #$20
+  a16
   rts
+; display_record_offset: display_slot = the record of the preset (RGB after
+; the VGA_PRESETS records); X = its offset. JSR; A16.
 display_record_offset:
   jsr .loword(display_get_preset)
   ldx a:.loword(display_monitor)
   beq :+
   clc
-  adc #4
+  adc #VGA_PRESETS
 :
   sta a:.loword(display_slot)
-  ; slot * 24 = (slot * 3) * 8
+  ; slot * DISPLAY_RECORD_SIZE = (slot * 3) * 8
   asl
   clc
   adc a:.loword(display_slot)
@@ -314,6 +381,8 @@ display_record_offset:
   tax
   rts
 
+; display_dirty_mask: A = the SET_DISPLAY_EDITED bit of the record of the
+; preset. JSR; A16.
 display_dirty_mask:
   jsr .loword(display_record_offset)
   lda a:.loword(display_slot)
@@ -322,54 +391,59 @@ display_dirty_mask:
   lda a:.loword(display_dirty_bits),x
   rts
 
+; display_field_enter: RETURN on MP_HORIZONTAL or MP_VERTICAL: edit the
+; field of the choice (the clock, then the H fields from DR_HTOTAL; the V
+; fields from DR_VTOTAL), or back.
 display_field_enter:
   lda f:DACTION
   pha
   lda f:DPAGE
   tax
   pla
-  cpx #9
+  cpx #MP_HORIZONTAL
   bne @vfield
-  cmp #6
+  cmp #H_BACK
   beq @field_back
-  ; CLOCK, H TOTAL, H BLANK START/END, H SYNC START/END
   cmp #0
   beq @clock
   dec
   asl
   bra @field
 @clock:
-  lda #20
+  lda #DR_CLOCK
   bra @field
 @vfield:
-  cmp #5
+  cmp #V_BACK
   beq @field_back
   asl
   clc
-  adc #10
+  adc #DR_VTOTAL
 @field:
   sta a:.loword(display_field)
   lda f:DPAGE
   sta a:.loword(display_parent)
   bra display_begin_edit
 @field_back:
-  lda #8
+  lda #MP_MONITOR
   sta f:DPAGE
   lda #0
   sta f:DACTION
   jmp .loword(display_key_done)
+.assert DR_HTOTAL = 0, error
 
+; display_begin_edit: open MP_EDIT for display_field: its name as the
+; heading, its value; the clock and the polarity start at their choice.
 display_begin_edit:
   lda f:DACTION
   asl
   tax
   lda a:.loword(display_parent)
-  cmp #9
+  cmp #MP_HORIZONTAL
   bne :+
   lda a:.loword(display_h_items),x
   bra :++
 :
-  cmp #10
+  cmp #MP_VERTICAL
   bne :+
   lda a:.loword(display_v_items),x
   bra :++
@@ -388,7 +462,7 @@ display_begin_edit:
   sta a:.loword(display_invalid)
   sta f:DACTION
   lda a:.loword(display_field)
-  cmp #20
+  cmp #DR_CLOCK
   bne @not_clock
   ldx #0
 @find_clock:
@@ -397,7 +471,7 @@ display_begin_edit:
   beq @clock_found
   inx
   inx
-  cpx #10
+  cpx #2*DISPLAY_CLOCKS
   bcc @find_clock
   ldx #0
 @clock_found:
@@ -406,28 +480,30 @@ display_begin_edit:
   sta f:DACTION
   bra @open_edit
 @not_clock:
-  cmp #22
+  cmp #DR_POLARITY
   bne @open_edit
   lda a:.loword(display_edit)
-  and #3
+  and #POLARITIES-1
   sta f:DACTION
 @open_edit:
-  lda #11
+  lda #MP_EDIT
   sta f:DPAGE
   jmp .loword(display_key_done)
 
-; Numeric editor has -10, -1, +1, +10, APPLY and CANCEL.
+; display_edit_key: MP_EDIT: -10, -1, +1, +10 (inside 0..EDIT_MAX), APPLY
+; (display_validate: a bad record keeps the old value and shows INVALID
+; TIMING) and CANCEL; the clock and the polarity are choices.
 display_edit_key:
   lda a:.loword(display_keycode)
-  cmp #$3e
+  cmp #KEY_UP
   beq @up
-  cmp #$7e
+  cmp #KEY_MAC_UP
   beq @up
-  cmp #$3d
+  cmp #KEY_DOWN
   beq @down
-  cmp #$7d
+  cmp #KEY_MAC_DOWN
   beq @down
-  cmp #$24
+  cmp #KEY_RETURN
   beq @enter
   jmp .loword(display_key_done)
 @up:
@@ -439,21 +515,21 @@ display_edit_key:
   jmp .loword(display_key_done)
 @down:
   lda f:DACTION
-  cmp #5
+  cmp #EDIT_CHOICES-1
   beq @done
   inc
   sta f:DACTION
   bra @done
 @enter:
   lda a:.loword(display_field)
-  cmp #20
+  cmp #DR_CLOCK
   beq @clock_choice
-  cmp #22
+  cmp #DR_POLARITY
   beq @sync_choice
   lda f:DACTION
-  cmp #4
+  cmp #EDIT_APPLY
   beq @apply
-  cmp #5
+  cmp #EDIT_CANCEL
   beq @cancel
   asl
   tax
@@ -463,16 +539,16 @@ display_edit_key:
   bpl :+
   lda #0
 :
-  cmp #1026
+  cmp #EDIT_MAX+1
   bcc :+
-  lda #1025
+  lda #EDIT_MAX
 :
   sta a:.loword(display_edit)
   stz a:.loword(display_invalid)
   bra @done
 @clock_choice:
   lda f:DACTION
-  cmp #5
+  cmp #EDIT_CANCEL
   beq @cancel
   asl
   tax
@@ -481,7 +557,7 @@ display_edit_key:
   bra @apply
 @sync_choice:
   lda f:DACTION
-  cmp #4
+  cmp #POLARITIES
   bcs @cancel
   sta a:.loword(display_edit)
   bra @apply
@@ -505,8 +581,8 @@ display_edit_key:
   bcs @invalid
   pla
   jsr .loword(display_dirty_mask)
-  ora f:DSET+290
-  sta f:DSET+290
+  ora f:DSET+SET_DISPLAY_EDITED
+  sta f:DSET+SET_DISPLAY_EDITED
   bra @cancel
 @invalid:
   pla
@@ -522,95 +598,97 @@ display_edit_key:
   sta a:.loword(display_invalid)
   jmp .loword(@done)
 
-; Strict absolute-coordinate validation before committing any edit.
-; Carry set means invalid. Each endpoint remains inside blanking; widths fit
-; the modulo end registers. VGA and RGB records are checked independently.
+; display_validate: check the record of the preset before an edit stays.
+; Carry 1: bad. Each sync is inside its blanking; each width fits its end
+; register (CHAR_END and LINE_END registers, the widths below the
+; *_WIDTH_END); the picture has VGA_LINES or RGB_LINES lines; the clock is
+; one of display_clock_words; the RGB polarity is RGB_POLARITY. JSR; A16.
 display_validate:
   jsr .loword(display_record_offset)
-  lda f:DRECORD,x
-  cmp #61
+  lda f:DRECORD+DR_HTOTAL,x
+  cmp #HTOTAL_MIN
   bcs :+
   jmp .loword(@bad)
 :
-  cmp #261
+  cmp #HTOTAL_END
   bcc :+
   jmp .loword(@bad)
 :
   sta a:.loword(display_bound)
-  lda f:DRECORD+2,x
-  cmp #256
+  lda f:DRECORD+DR_HBLANK_START,x
+  cmp #CHAR_END
   bcc :+
   jmp .loword(@bad)
 :
-  cmp #56
+  cmp #HBLANK_MIN
   bcs :+
   jmp .loword(@bad)
 :
-  cmp f:DRECORD+4,x
+  cmp f:DRECORD+DR_HBLANK_END,x
   bcc :+
   jmp .loword(@bad)
 :
-  lda f:DRECORD+4,x
+  lda f:DRECORD+DR_HBLANK_END,x
   cmp a:.loword(display_bound)
   beq :+
   bcc :+
   jmp .loword(@bad)
 :
   sec
-  sbc f:DRECORD+2,x
-  cmp #64
+  sbc f:DRECORD+DR_HBLANK_START,x
+  cmp #HBLANK_WIDTH_END
   bcc :+
   jmp .loword(@bad)
 :
-  lda f:DRECORD+6,x
-  cmp #256
+  lda f:DRECORD+DR_HSYNC_START,x
+  cmp #CHAR_END
   bcc :+
   jmp .loword(@bad)
 :
-  cmp f:DRECORD+2,x
+  cmp f:DRECORD+DR_HBLANK_START,x
   bcs :+
   jmp .loword(@bad)
 :
-  cmp f:DRECORD+8,x
+  cmp f:DRECORD+DR_HSYNC_END,x
   bcc :+
   jmp .loword(@bad)
 :
-  lda f:DRECORD+8,x
-  cmp f:DRECORD+4,x
+  lda f:DRECORD+DR_HSYNC_END,x
+  cmp f:DRECORD+DR_HBLANK_END,x
   beq :+
   bcc :+
   jmp .loword(@bad)
 :
   sec
-  sbc f:DRECORD+6,x
-  cmp #32
+  sbc f:DRECORD+DR_HSYNC_START,x
+  cmp #HSYNC_WIDTH_END
   bcc :+
   jmp .loword(@bad)
 :
   lda a:.loword(display_monitor)
   beq :+
-  lda #256
+  lda #RGB_LINES
   bra :++
 :
-  lda #512
+  lda #VGA_LINES
 :
   sta a:.loword(display_bound)
-  lda f:DRECORD+10,x
-  cmp #1026
+  lda f:DRECORD+DR_VTOTAL,x
+  cmp #VTOTAL_END
   bcc :+
   jmp .loword(@bad)
 :
   sec
-  sbc #2
+  sbc #VTOTAL_BIAS
   cmp a:.loword(display_bound)
   bcs :+
   jmp .loword(@bad)
 :
   clc
-  adc #2
+  adc #VTOTAL_BIAS
   sta a:.loword(display_total)
-  lda f:DRECORD+12,x
-  cmp #1024
+  lda f:DRECORD+DR_VBLANK_START,x
+  cmp #LINE_END
   bcc :+
   jmp .loword(@bad)
 :
@@ -618,48 +696,48 @@ display_validate:
   bcs :+
   jmp .loword(@bad)
 :
-  cmp f:DRECORD+14,x
+  cmp f:DRECORD+DR_VBLANK_END,x
   bcc :+
   jmp .loword(@bad)
 :
-  lda f:DRECORD+14,x
+  lda f:DRECORD+DR_VBLANK_END,x
   cmp a:.loword(display_total)
   beq :+
   bcc :+
   jmp .loword(@bad)
 :
   sec
-  sbc f:DRECORD+12,x
-  cmp #256
+  sbc f:DRECORD+DR_VBLANK_START,x
+  cmp #VBLANK_WIDTH_END
   bcc :+
   jmp .loword(@bad)
 :
-  lda f:DRECORD+16,x
-  cmp #1024
+  lda f:DRECORD+DR_VSYNC_START,x
+  cmp #LINE_END
   bcc :+
   jmp .loword(@bad)
 :
-  cmp f:DRECORD+12,x
+  cmp f:DRECORD+DR_VBLANK_START,x
   bcs :+
   jmp .loword(@bad)
 :
-  cmp f:DRECORD+18,x
+  cmp f:DRECORD+DR_VSYNC_END,x
   bcc :+
   jmp .loword(@bad)
 :
-  lda f:DRECORD+18,x
-  cmp f:DRECORD+14,x
+  lda f:DRECORD+DR_VSYNC_END,x
+  cmp f:DRECORD+DR_VBLANK_END,x
   beq :+
   bcc :+
   jmp .loword(@bad)
 :
   sec
-  sbc f:DRECORD+16,x
-  cmp #16
+  sbc f:DRECORD+DR_VSYNC_START,x
+  cmp #VSYNC_WIDTH_END
   bcc :+
   jmp .loword(@bad)
 :
-  lda f:DRECORD+20,x
+  lda f:DRECORD+DR_CLOCK,x
   cmp #0
   beq @clock_ok
   cmp #1
@@ -673,14 +751,14 @@ display_validate:
   jmp .loword(@bad)
 :
 @clock_ok:
-  lda f:DRECORD+22,x
-  cmp #4
+  lda f:DRECORD+DR_POLARITY,x
+  cmp #POLARITIES
   bcc :+
   jmp .loword(@bad)
 :
   ldy a:.loword(display_monitor)
   beq @good
-  cmp #3
+  cmp #RGB_POLARITY
   beq :+
   jmp .loword(@bad)
 :
@@ -691,19 +769,22 @@ display_validate:
   sec
   rts
 
+; display_draw: draw the display page in MENU_TEXT: the title, the choices
+; with the marker, and the values (the preset name, the field values, the
+; clock). MP_EDIT: display_draw_edit. JSL.
 display_draw:
   phb
   phk
   plb
   jsr .loword(display_init)
   lda f:DPAGE
-  cmp #8
+  cmp #MP_MONITOR
   beq @monitor
-  cmp #9
+  cmp #MP_HORIZONTAL
   beq @horizontal
-  cmp #10
+  cmp #MP_VERTICAL
   beq @vertical
-  cmp #12
+  cmp #MP_PRESET
   beq @preset_list
   jmp .loword(display_draw_edit)
 @preset_list:
@@ -716,8 +797,8 @@ display_draw:
   ldy #.loword(display_rgb_names)
 :
   ldx a:.loword(display_monitor)
-  cpx #1
-  lda #4
+  cpx #MONITOR_RGB
+  lda #VGA_PRESETS              ; RGB: carry 1, RGB_PRESETS
   adc #0
   jmp .loword(@list)
 @monitor:
@@ -729,11 +810,11 @@ display_draw:
   ldx #0
   jsr .loword(display_put)
   ldy #.loword(display_monitor_items)
-  lda #6
+  lda #MON_VGA_BACK+1
   ldx a:.loword(display_monitor)
   beq :+
   ldy #.loword(display_monitor_items_rgb)
-  lda #5
+  lda #MON_RGB_BACK+1
 :
   bra @list
 @horizontal:
@@ -741,14 +822,14 @@ display_draw:
   ldx #0
   jsr .loword(display_put)
   ldy #.loword(display_h_items)
-  lda #7
+  lda #H_BACK+1
   bra @list
 @vertical:
   ldy #.loword(display_title_v)
   ldx #0
   jsr .loword(display_put)
   ldy #.loword(display_v_items)
-  lda #6
+  lda #V_BACK+1
 @list:
   sta a:.loword(display_count)
   sty a:.loword(display_item_table)
@@ -759,7 +840,7 @@ display_draw:
   clc
   adc a:.loword(display_item_table)
   tay
-  lda a:$0000,y
+  lda a:0,y
   tay
   lda a:.loword(display_index)
   jsr .loword(display_row)
@@ -770,13 +851,13 @@ display_draw:
   cmp f:DACTION
   bne :+
   jsr .loword(display_row)
-  sep #$20
-  lda #input_native::MENU_MARK
-  sta f:$000800,x
-  rep #$20
+  a8
+  lda #MENU_MARK
+  sta f:MENU_TEXT,x
+  a16
 :
   lda f:DPAGE
-  cmp #8
+  cmp #MP_MONITOR
   bne @advanced
   lda a:.loword(display_index)
   beq :+
@@ -797,34 +878,34 @@ display_draw:
   jsr .loword(display_row)
   txa
   clc
-  adc #28+2
+  adc #MENU_COLUMNS+2
   tax
   jsr .loword(display_put)
   lda a:.loword(display_monitor)
   beq :+
   jsr .loword(display_get_preset)
-  cmp #1
+  cmp #1                        ; the RGB preset "NEAR ARCADE"
   bne :+
   ldy #.loword(d_tight)
-  ldx #532
+  ldx #19*MENU_COLUMNS          ; row 19
   jsr .loword(display_put)
 :
   jmp .loword(@next)
 @advanced:
-  cmp #9
+  cmp #MP_HORIZONTAL
   beq @hvalue
-  cmp #10
+  cmp #MP_VERTICAL
   bne @next
   lda a:.loword(display_index)
-  cmp #5
+  cmp #V_BACK
   bcs @next
   asl
   clc
-  adc #10
+  adc #DR_VTOTAL
   bra @loadvalue
 @hvalue:
   lda a:.loword(display_index)
-  cmp #6
+  cmp #H_BACK
   bcs @next
   cmp #0
   beq @clockvalue
@@ -832,7 +913,7 @@ display_draw:
   asl
   bra @loadvalue
 @clockvalue:
-  lda #20
+  lda #DR_CLOCK
 @loadvalue:
   sta a:.loword(display_field_draw)
   jsr .loword(display_record_offset)
@@ -846,10 +927,10 @@ display_draw:
   jsr .loword(display_row)
   txa
   clc
-  adc #19
+  adc #VALUE_COLUMN
   tax
   lda a:.loword(display_field_draw)
-  cmp #20
+  cmp #DR_CLOCK
   bne @numeric_value
   lda a:.loword(display_value)
   ldy #.loword(d_c25s)
@@ -881,23 +962,25 @@ display_draw:
   plb
   rtl
 
+; display_draw_edit: MP_EDIT: the heading and the value (not for a choice),
+; INVALID TIMING after a bad APPLY, and the EDIT_CHOICES choices. JSL tail.
 display_draw_edit:
   ldy a:.loword(display_heading)
   ldx #0
   jsr .loword(display_put)
   lda a:.loword(display_field)
-  cmp #20
+  cmp #DR_CLOCK
   beq @value_done
-  cmp #22
+  cmp #DR_POLARITY
   beq @value_done
   lda a:.loword(display_edit)
-  ldx #19
+  ldx #VALUE_COLUMN
   jsr .loword(display_number)
 @value_done:
   lda a:.loword(display_invalid)
   beq :+
   ldy #.loword(display_invalid_text)
-  ldx #28
+  ldx #MENU_COLUMNS             ; row 1
   jsr .loword(display_put)
 :
   stz a:.loword(display_index)
@@ -906,9 +989,9 @@ display_draw_edit:
   asl
   tay
   lda a:.loword(display_field)
-  cmp #20
+  cmp #DR_CLOCK
   beq @clock_labels
-  cmp #22
+  cmp #DR_POLARITY
   beq @sync_labels
   lda a:.loword(display_edit_items),y
   bra @have_label
@@ -928,18 +1011,19 @@ display_draw_edit:
   cmp f:DACTION
   bne :+
   jsr .loword(display_row)
-  sep #$20
-  lda #input_native::MENU_MARK
-  sta f:$000800,x
-  rep #$20
+  a8
+  lda #MENU_MARK
+  sta f:MENU_TEXT,x
+  a16
 :
   inc a:.loword(display_index)
   lda a:.loword(display_index)
-  cmp #6
+  cmp #EDIT_CHOICES
   bcc @row
   plb
   rtl
 
+; display_row: X = the MENU_TEXT offset of the row of the choice A. JSR.
 display_row:
   sta a:.loword(display_tmp)
   asl
@@ -949,24 +1033,26 @@ display_row:
   sbc a:.loword(display_tmp)
   asl
   asl
-  asl
+  asl                           ; times MENU_PITCH
   clc
-  adc #84
+  adc #MENU_LIST
   tax
   rts
+; display_put: the zero-ended text at Y to MENU_TEXT+X. JSR.
 display_put:
-  sep #$20
+  a8
 @char:
-  lda a:$0000,y
+  lda a:0,y
   beq @done
-  sta f:$000800,x
+  sta f:MENU_TEXT,x
   iny
   inx
   bra @char
 @done:
-  rep #$20
+  a16
   rts
-; Four decimal digits, zero padded. Inputs are bounded before acceptance.
+; display_number: A as DIGITS decimal digits with leading zeros at
+; MENU_TEXT+X (the values are below 10000). JSR.
 display_number:
   sta a:.loword(display_value)
   ldy #0
@@ -986,21 +1072,23 @@ display_number:
   lda a:.loword(display_digit)
   clc
   adc #'0'
-  sep #$20
-  sta f:$000800,x
-  rep #$20
+  a8
+  sta f:MENU_TEXT,x
+  a16
   inx
   iny
   iny
-  cpy #8
+  cpy #2*DIGITS
   bcc @digit
   rts
 
-; Apply one validated monitor record only to suspended card SRAM.
-; Invalid persisted records fall back to the selected monitor's default.
+; display_apply: write the timing of the monitor into the mode table of the
+; card while it is stopped (mirror_open): the factory profile of the
+; monitor and its thresholds, then an edited or selected record when it is
+; good (else the profile stays). Then the game clock rate. JSL.
 display_apply:
   php
-  rep #$30
+  ax16
   phx
   phy
   phb
@@ -1008,12 +1096,12 @@ display_apply:
   plb
   jsr .loword(display_init)
   stz a:.loword(display_monitor)
-  sep #$20
-  lda f:DISPLAY_MODE+1
-  cmp #$a9
-  rep #$20
+  a8
+  lda f:DISPLAY_MODE+DISPLAY_PIXEL_CLOCK
+  cmp #PIXEL_CLOCK_RGB
+  a16
   bne :+
-  lda #1
+  lda #MONITOR_RGB
   sta a:.loword(display_monitor)
 :
   lda a:.loword(display_monitor)
@@ -1023,8 +1111,8 @@ display_apply:
 :
   ldy #0
 :
-  ldx #3
-  sep #$20
+  ldx #MODE_DATA
+  a8
 @copy:
   lda a:.loword(display_profiles),y
   sta f:DISPLAY_MODE,x
@@ -1032,13 +1120,13 @@ display_apply:
   inx
   inx
   inx
-  inx
-  cpx #(DISPLAY_N*4+3)
+  inx                           ; MODE_ENTRY
+  cpx #DISPLAY_N*MODE_ENTRY+MODE_DATA
   bne @copy
-  rep #$20
+  a16
   lda a:.loword(display_monitor)
   asl
-  asl
+  asl                           ; two words for each monitor
   tax
   lda a:.loword(display_thresholds),x
   sta f:DISPLAY_FIRST
@@ -1047,7 +1135,7 @@ display_apply:
   jsr .loword(display_get_preset)
   bne @selected_record
   jsr .loword(display_dirty_mask)
-  and f:DSET+290
+  and f:DSET+SET_DISPLAY_EDITED
   bne @selected_record
   jmp .loword(@default_done)
 @selected_record:
@@ -1064,53 +1152,55 @@ display_apply:
   inx
   iny
   iny
-  cpy #24
+  cpy #DISPLAY_RECORD_SIZE
   bcc @custom_loop
 @work_ready:
   ldx #0
-  ; H total, blank start/end, sync start/end.
+  ; The H total, the blanking start and end, the sync start and end.
   lda a:.loword(display_work),x
   sec
-  sbc #5
-  sep #$20
+  sbc #HTOTAL_BIAS
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_00
-  rep #$20
-  lda a:.loword(display_work)+2,x
-  sep #$20
+  a16
+  lda a:.loword(display_work)+DR_HBLANK_START,x
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_02
-  rep #$20
-  lda a:.loword(display_work)+4,x
-  and #31
-  ora #$80
-  sep #$20
+  a16
+  lda a:.loword(display_work)+DR_HBLANK_END,x
+  and #END_LOW_BITS
+  ora #CRTC3_FIXED
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_03
-  rep #$20
-  lda a:.loword(display_work)+6,x
-  sep #$20
+  a16
+  lda a:.loword(display_work)+DR_HSYNC_START,x
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_04
-  rep #$20
-  lda a:.loword(display_work)+4,x
-  and #32
+  a16
+  lda a:.loword(display_work)+DR_HBLANK_END,x
+  and #END_LOW_BITS+1           ; the blanking end bit 5 goes to CRTC 5 bit 7
   asl
   asl
   sta a:.loword(display_tmp)
-  lda a:.loword(display_work)+8,x
-  and #31
+  lda a:.loword(display_work)+DR_HSYNC_END,x
+  and #END_LOW_BITS
   ora a:.loword(display_tmp)
-  sep #$20
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_05
-  rep #$20
-  ; Vertical overflow: preserve the fixed visible-height bits.
-  lda a:.loword(display_work)+10,x
+  a16
+  ; CRTC 6 and the overflow bits of CRTC 7 (bit 0 and 5: the total bits 8
+  ; and 9; bit 2 and 7: the sync start; bit 3: the blanking start bit 8);
+  ; the fixed visible height bits stay.
+  lda a:.loword(display_work)+DR_VTOTAL,x
   sec
-  sbc #2
+  sbc #VTOTAL_BIAS
   sta a:.loword(display_total)
-  sep #$20
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_06
   lda f:DISPLAY_MODE+DISPLAY_CRTC_07
-  and #$52
+  and #OVERFLOW_KEEP
   sta a:.loword(display_bits)
-  rep #$20
+  a16
   lda a:.loword(display_total)
   xba
   and #3
@@ -1126,7 +1216,7 @@ display_apply:
   asl
   ora a:.loword(display_bits)
   sta a:.loword(display_bits)
-  lda a:.loword(display_work)+16,x
+  lda a:.loword(display_work)+DR_VSYNC_START,x
   xba
   and #3
   sta a:.loword(display_tmp)
@@ -1145,20 +1235,20 @@ display_apply:
   asl
   ora a:.loword(display_bits)
   sta a:.loword(display_bits)
-  lda a:.loword(display_work)+12,x
+  lda a:.loword(display_work)+DR_VBLANK_START,x
   xba
   and #1
   asl
   asl
   asl
   ora a:.loword(display_bits)
-  sep #$20
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_07
   lda f:DISPLAY_MODE+DISPLAY_CRTC_09
-  and #$df
+  and #MAX_SCAN_KEEP
   sta a:.loword(display_bits)
-  rep #$20
-  lda a:.loword(display_work)+12,x
+  a16
+  lda a:.loword(display_work)+DR_VBLANK_START,x
   xba
   and #2
   asl
@@ -1166,39 +1256,39 @@ display_apply:
   asl
   asl
   ora a:.loword(display_bits)
-  sep #$20
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_09
-  rep #$20
-  lda a:.loword(display_work)+16,x
-  sep #$20
+  a16
+  lda a:.loword(display_work)+DR_VSYNC_START,x
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_10
-  rep #$20
-  lda a:.loword(display_work)+18,x
-  and #15
-  ora #$30
-  sep #$20
+  a16
+  lda a:.loword(display_work)+DR_VSYNC_END,x
+  and #VSYNC_END_BITS
+  ora #VSYNC_IRQ_OFF
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_11
-  rep #$20
-  lda a:.loword(display_work)+12,x
-  sep #$20
+  a16
+  lda a:.loword(display_work)+DR_VBLANK_START,x
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_15
-  rep #$20
-  lda a:.loword(display_work)+14,x
+  a16
+  lda a:.loword(display_work)+DR_VBLANK_END,x
   dec
-  sep #$20
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CRTC_16
-  rep #$20
-  lda a:.loword(display_work)+20,x
-  sep #$20
+  a16
+  lda a:.loword(display_work)+DR_CLOCK,x
+  a8
   sta f:DISPLAY_MODE+DISPLAY_CLOCK
-  rep #$20
-  and #3
+  a16
+  and #3                        ; MISC bits 2-3: the clock select
   asl
   asl
-  ora #$23
+  ora #MISC_FIXED
   sta a:.loword(display_bits)
-  lda a:.loword(display_work)+22,x
-  and #3
+  lda a:.loword(display_work)+DR_POLARITY,x
+  and #POLARITIES-1             ; MISC bits 6-7: the sync polarities
   asl
   asl
   asl
@@ -1206,12 +1296,12 @@ display_apply:
   asl
   asl
   ora a:.loword(display_bits)
-  sep #$20
+  a8
   sta f:DISPLAY_MODE+DISPLAY_MISC
-  rep #$20
-  ; Custom modes submit completed pictures immediately and still latch at
-  ; retrace, so no division or per-picture host work is introduced.
-  lda #$ffff
+  a16
+  ; A custom record sends each finished picture at once; it still latches
+  ; at the retrace: no division and no host work for each picture.
+  lda #NO_THRESHOLD
   sta f:DISPLAY_FIRST
 @default_done:
 @done:
@@ -1222,9 +1312,12 @@ display_apply:
   plp
   rtl
 
+; display_boot_apply: at the start, display_apply with the card stopped, also
+; for the factory timing, so that the game clock has its rate; the next
+; update is due now. JSL.
 display_boot_apply:
   php
-  rep #$30
+  ax16
   phb
   phk
   plb
@@ -1233,9 +1326,8 @@ display_boot_apply:
   jsl mirror_open
   jsl display_apply
   jsl mirror_close
-  rep #$20
+  a16
   lda f:GAME_CLOCK
-  sta f:GAME_CLOCK_ORIGIN
   jsl game_clock_fraction_step
   sta f:GAME_DUE
 @done:
@@ -1247,7 +1339,6 @@ display_title_vga: .asciiz "VGA"
 display_title_rgb: .asciiz "APPLECOLOR RGB"
 display_title_h: .asciiz "H TIMING (8 DOTS)"
 display_title_v: .asciiz "V TIMING (LINES)"
-display_title_edit: .asciiz "VALUE"
 display_invalid_text: .asciiz "INVALID TIMING"
 display_vga_names: .word .loword(d_arcade),.loword(d_near),.loword(d_standard),.loword(d_custom)
 display_rgb_names: .word .loword(d_safe),.loword(d_rgbnear),.loword(d_50),.loword(d_custom),.loword(d_nominal)
@@ -1266,7 +1357,7 @@ display_monitor_items_rgb: .word .loword(d_preset),.loword(d_horizontal),.loword
 display_h_items: .word .loword(d_clock),.loword(d_total),.loword(d_blank_start),.loword(d_blank_end),.loword(d_sync_start),.loword(d_sync_end),.loword(d_back)
 display_v_items: .word .loword(d_total),.loword(d_blank_start),.loword(d_blank_end),.loword(d_sync_start),.loword(d_sync_end),.loword(d_back)
 display_clock_items: .word .loword(d_c25),.loword(d_c28),.loword(d_c36),.loword(d_c40),.loword(d_c63),.loword(d_cancel)
-display_clock_words: .word 0,1,5,6,12
+display_clock_words: .word 0,1,5,6,12  ; the DR_CLOCK values (display_clock_select)
 display_sync_items: .word .loword(d_pp),.loword(d_np),.loword(d_pn),.loword(d_nn),.loword(d_cancel),.loword(d_cancel)
 d_c25s: .asciiz "25.175"
 d_c28s: .asciiz "28.322"
@@ -1301,27 +1392,28 @@ d_plus1: .asciiz "+1"
 d_plus10: .asciiz "+10"
 d_apply: .asciiz "APPLY"
 d_cancel: .asciiz "CANCEL"
-display_dirty_bits: .word 1,2,4,8,16,32,64,128,256
-display_steps: .word $fff6,$ffff,1,10
+display_dirty_bits: .word 1,2,4,8,16,32,64,128,256  ; the SET_DISPLAY_EDITED bit of each record
+display_steps: .word .loword(-10),.loword(-1),1,10  ; the steps of the MP_EDIT choices
 display_divisors: .word 1000,100,10,1
-display_work: .res 24
-display_heading: .word 0
-display_slot: .word 0
-display_keycode: .word 0
-display_monitor: .word 0
-display_parent: .word 0
-display_field: .word 0
-display_field_draw: .word 0
-display_edit: .word 0
-display_old: .word 0
-display_invalid: .word 0
-display_index: .word 0
-display_count: .word 0
-display_item_table: .word 0
+; The display state.
+display_work: .res DISPLAY_RECORD_SIZE  ; display_apply: the record
+display_heading: .word 0        ; MP_EDIT: the name of the field
+display_slot: .word 0           ; the record of the preset
+display_keycode: .word 0        ; display_key: the key
+display_monitor: .word 0        ; MONITOR_VGA or MONITOR_RGB (display_apply)
+display_parent: .word 0         ; MP_EDIT: the page that it came from
+display_field: .word 0          ; MP_EDIT: the DR_* field
+display_field_draw: .word 0     ; display_draw: the DR_* field
+display_edit: .word 0           ; MP_EDIT: the value
+display_old: .word 0            ; display_edit_key: the value before
+display_invalid: .word 0        ; 1: show INVALID TIMING
+display_index: .word 0          ; display_draw: the row
+display_count: .word 0          ; display_draw: the rows
+display_item_table: .word 0     ; display_draw: the names of the rows
 display_tmp: .word 0
-display_bound: .word 0
-display_total: .word 0
-display_bits: .word 0
-display_value: .word 0
-display_digit: .word 0
+display_bound: .word 0          ; display_validate: a limit
+display_total: .word 0          ; display_validate, display_apply: a total
+display_bits: .word 0           ; display_apply: a register
+display_value: .word 0          ; display_number: the rest
+display_digit: .word 0          ; display_number: the digit
 .include "display-control.inc"

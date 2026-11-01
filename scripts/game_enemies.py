@@ -70,11 +70,7 @@ def prepare(out):
     _, stages = event_tables()
     text += [
         "game_retry_events:",
-        ".ifdef STAGE_COMPACT",
         "  .word " + ",".join(str((row["first_end_offset"] // 6 + 1) * 4) for row in stages),
-        ".else",
-        "  .word " + ",".join(str(row["first_end_offset"] + 6) for row in stages),
-        ".endif",
     ]
     # The arcade converts each nibble of its 8-bit damage ratio separately.
     nibble = read(1, 0x923B, 16)

@@ -1,0 +1,82 @@
+; The default bindings: default_bindings writes BIND_COUNT binding records
+; (BINDING_SIZE bytes), the free ones last. The settings image
+; (src/input_settings.s) starts with them, and RESTORE DEFAULT BINDINGS
+; copies them again (menu_default_bindings). Both keyboards share the keys
+; (SOURCE_KEYBOARDS); the menu can split a binding.
+.macro bind key, source, action
+  .byte key, source, action, 0
+  BIND_RECORDS .set BIND_RECORDS+1
+.endmacro
+.macro default_bindings
+  BIND_RECORDS .set 0
+; Player 1 on the keyboard: W A S D, the arrows (also as Mac codes), the
+; keypad (the corners give two directions).
+  bind KEY_W, SOURCE_KEYBOARDS, ACT_UP
+  bind KEY_A, SOURCE_KEYBOARDS, ACT_LEFT
+  bind KEY_S, SOURCE_KEYBOARDS, ACT_DOWN
+  bind KEY_D, SOURCE_KEYBOARDS, ACT_RIGHT
+  bind KEY_LEFT, SOURCE_KEYBOARDS, ACT_LEFT
+  bind KEY_RIGHT, SOURCE_KEYBOARDS, ACT_RIGHT
+  bind KEY_DOWN, SOURCE_KEYBOARDS, ACT_DOWN
+  bind KEY_UP, SOURCE_KEYBOARDS, ACT_UP
+  bind KEY_MAC_LEFT, SOURCE_KEYBOARDS, ACT_LEFT
+  bind KEY_MAC_RIGHT, SOURCE_KEYBOARDS, ACT_RIGHT
+  bind KEY_MAC_DOWN, SOURCE_KEYBOARDS, ACT_DOWN
+  bind KEY_MAC_UP, SOURCE_KEYBOARDS, ACT_UP
+  bind KEY_PAD_8, SOURCE_KEYBOARDS, ACT_UP
+  bind KEY_PAD_2, SOURCE_KEYBOARDS, ACT_DOWN
+  bind KEY_PAD_4, SOURCE_KEYBOARDS, ACT_LEFT
+  bind KEY_PAD_6, SOURCE_KEYBOARDS, ACT_RIGHT
+  bind KEY_PAD_7, SOURCE_KEYBOARDS, ACT_UP
+  bind KEY_PAD_7, SOURCE_KEYBOARDS, ACT_LEFT
+  bind KEY_PAD_9, SOURCE_KEYBOARDS, ACT_UP
+  bind KEY_PAD_9, SOURCE_KEYBOARDS, ACT_RIGHT
+  bind KEY_PAD_1, SOURCE_KEYBOARDS, ACT_DOWN
+  bind KEY_PAD_1, SOURCE_KEYBOARDS, ACT_LEFT
+  bind KEY_PAD_3, SOURCE_KEYBOARDS, ACT_DOWN
+  bind KEY_PAD_3, SOURCE_KEYBOARDS, ACT_RIGHT
+  bind KEY_CONTROL, SOURCE_KEYBOARDS, ACT_FIRE
+  bind KEY_OPTION, SOURCE_KEYBOARDS, ACT_SPECIAL
+; Player 2 on the keyboard: only the special (shift, keypad enter).
+  bind KEY_SHIFT, SOURCE_KEYBOARDS, ACTION_P2+ACT_SPECIAL
+  bind KEY_PAD_ENTER, SOURCE_KEYBOARDS, ACTION_P2+ACT_SPECIAL
+; The start and coin keys.
+  bind KEY_1, SOURCE_KEYBOARDS, ACT_START1
+  bind KEY_2, SOURCE_KEYBOARDS, ACT_START2
+  bind KEY_5, SOURCE_KEYBOARDS, ACT_COIN_A
+  bind KEY_6, SOURCE_KEYBOARDS, ACT_COIN_B
+; Player 2 on the mouse and on the joystick (a device key is its action).
+  bind ACT_RIGHT, SOURCE_MOUSE, ACTION_P2+ACT_RIGHT
+  bind ACT_LEFT, SOURCE_MOUSE, ACTION_P2+ACT_LEFT
+  bind ACT_DOWN, SOURCE_MOUSE, ACTION_P2+ACT_DOWN
+  bind ACT_UP, SOURCE_MOUSE, ACTION_P2+ACT_UP
+  bind ACT_FIRE, SOURCE_MOUSE, ACTION_P2+ACT_FIRE
+  bind ACT_RIGHT, SOURCE_JOYSTICK, ACTION_P2+ACT_RIGHT
+  bind ACT_LEFT, SOURCE_JOYSTICK, ACTION_P2+ACT_LEFT
+  bind ACT_DOWN, SOURCE_JOYSTICK, ACTION_P2+ACT_DOWN
+  bind ACT_UP, SOURCE_JOYSTICK, ACTION_P2+ACT_UP
+  bind ACT_FIRE, SOURCE_JOYSTICK, ACTION_P2+ACT_FIRE
+  bind ACT_SPECIAL, SOURCE_JOYSTICK, ACTION_P2+ACT_SPECIAL
+; The SNES MAX pads (the keys in the serial bit order of the adapter: right,
+; left, down, up, start, select, Y, B): pad one player 1, pad two player 2.
+  bind 0, SOURCE_PAD1, ACT_RIGHT
+  bind 1, SOURCE_PAD1, ACT_LEFT
+  bind 2, SOURCE_PAD1, ACT_DOWN
+  bind 3, SOURCE_PAD1, ACT_UP
+  bind 4, SOURCE_PAD1, ACT_START1
+  bind 5, SOURCE_PAD1, ACT_COIN_A
+  bind 6, SOURCE_PAD1, ACT_SPECIAL
+  bind 7, SOURCE_PAD1, ACT_FIRE
+  bind 0, SOURCE_PAD2, ACTION_P2+ACT_RIGHT
+  bind 1, SOURCE_PAD2, ACTION_P2+ACT_LEFT
+  bind 2, SOURCE_PAD2, ACTION_P2+ACT_DOWN
+  bind 3, SOURCE_PAD2, ACTION_P2+ACT_UP
+  bind 4, SOURCE_PAD2, ACT_START2
+  bind 5, SOURCE_PAD2, ACT_COIN_B
+  bind 6, SOURCE_PAD2, ACTION_P2+ACT_SPECIAL
+  bind 7, SOURCE_PAD2, ACTION_P2+ACT_FIRE
+; The free records.
+  .repeat BIND_COUNT-BIND_RECORDS
+    bind BIND_NONE, SOURCE_NONE, BIND_NONE
+  .endrepeat
+.endmacro

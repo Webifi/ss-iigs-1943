@@ -65,7 +65,7 @@ def definitions():
                 callbacks=callbacks,
                 paths=paths,
                 template=template,
-                action=6 if pattern == 0 else 4,
+                action="LA_FINISH_STOP|LA_FINISH_FINAL" if pattern == 0 else "LA_FINISH_FINAL",
                 near=read(base + 0x60, 1)[0],
                 far=read(base + 0x8E, 1)[0],
             )
@@ -88,7 +88,25 @@ def prepare(out):
     for index, item in enumerate(items):
         for phase, callback in enumerate(item["callbacks"]):
             rows.setdefault(callback >> 8, []).append((callback, index * 14, phase * 2))
-    lines = ["ALL_BOSS_CORES = 1", "boss_core_configs:"]
+    lines = [
+        "; A boss_core_configs entry: five motion paths, then four bytes.",
+        "BC_ALIVE = 0",
+        "BC_DYING = 2",
+        "BC_EXPLODE = 4",
+        "BC_FINISH = 6",
+        "BC_RETIRE = 8",
+        "BC_PATTERN = 10",
+        "BC_ACTION = 11",
+        "BC_NEAR = 12",
+        "BC_FAR = 13",
+        "BC_SIZE = 14",
+        "; A boss_core_pages row: the code tail, its config entry, its phase (word index).",
+        "BR_CALLBACK = 0",
+        "BR_CONFIG = 2",
+        "BR_PHASE = 4",
+        "BR_SIZE = 6",
+        "boss_core_configs:",
+    ]
     roots = []
     for item in items:
         lines += [

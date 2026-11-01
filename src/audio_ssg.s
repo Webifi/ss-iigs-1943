@@ -1,183 +1,159 @@
-; Six resident native SSG lists (scripts/ssg_writes.py): per record a delay
-; header, a slot mask and the exact DOC writes resolved at build time, on
-; sound ticks. No YM bytecode, pitch division, waveform synthesis, change
-; tracking, disk read or table upload in the tick.
-; Callers: D=$1E00, DBR=0, A8/X16. Inside, DBR=$01 for the part states.
+; The SSG effects: up to SSG_PARTS effect lists play at once, one on each
+; DOC oscillator pair from DOC_SSG_FIRST (the odd oscillator, then the even
+; one). scripts/ssg_writes.py turns the arcade SSG programs into lists of the
+; exact DOC writes, so a tick only waits and writes. A list (SSG_HEAD bytes of
+; header, then records): each record is a header byte (the delay /
+; SSG_DELAY_UNIT in bits 4-7, a mask code in bits 0-3), the mask byte for
+; SSG_EXPLICIT, then the values of the mask. Code 0: SSG_END_HEADER ends the
+; list; SSG_REPEAT_HEADER, the repetitions and a target repeat records.
+; Callers: D = MUSIC_PAGE, DBR = 0, A8, X16. Inside, DBR = the bank of
+; SSG_STATES.
 .a8
 .i16
-SSG_STATES = $8500             ; bank $01: six parts x 32 bytes
-SSG_PTR = $d0
-SSG_COMMAND_PTR = $d4
-SSG_TEMP = $b0                 ; direct page, D=$1E00
-SSG_SLOT = $b4
-SSG_MASK = $b6
-SSG_ACTIVE_D = $ba             ; SSG_ACTIVE ($1eba)
-SSG_PENDING_D = $b8            ; SSG_PENDING ($1eb8)
-SSG_ODD = $bc
-SSG_EVEN = $bd
-SSG_NEXT = $be                 ; empty ticks before the next pending record
-SSG_TIME = $bf                 ; low byte of the active SSG tick clock
-SSG_ACTIVE = $1eba
-SSG_HEAD = 24                  ; record: type, tone size, table ids
-SSG_FILLER = $40               ; list record that only waits
-
-T_BASE = 0                     ; list start (3)
-T_PC = 3                       ; fields of the pending record
-T_WAIT = 5                     ; ticks to the pending record
-T_MASK = 6                     ; its change mask
-T_REPEAT = 7                   ; repeat record in progress; $ffff none
+; An SSG part record (SSG_STATES, SSG_PART_SIZE bytes; X = part * SSG_PART_SIZE)
+T_BASE = 0                     ; 3 bytes: the first record of the list
+T_PC = 3                       ; 2 bytes: the values of the pending record
+T_WAIT = 5                     ; the SSG_TIME of the pending record
+T_MASK = 6                     ; its mask code
+T_REPEAT = 7                   ; 2 bytes: the repeat record in progress; $ffff none
 T_LEFT = 9                     ; repetitions left
-T_ACTIVE = 10
-T_TONE = 11
-T_NOISE = 13
-T_SEL = 15
-T_FLAGS = 16                   ; noise, ultrasonic, square rotation
-T_TSIZE = 17                   ; tone table size
-T_ODD = 18
-T_EVEN = 19
-T_EVENF = 20                   ; last written even frequency
-T_ODDP = 22                    ; last written odd table,
-T_EVENP = 23                   ; even table,
-T_EVENS = 24                   ; even size
-T_ODDC = 25                    ; and odd control
-T_ALONE = 26                   ; tone alone: the even oscillator plays tone
+T_ACTIVE = 10                  ; nonzero while the list plays
+T_TONE = 11                    ; 2 bytes: the last odd frequency (the part's tone)
+T_TSIZE = 17                   ; the tone table size
+T_ODD = 18                     ; the odd oscillator
+DOC_STOPPED = DOC_HALT|DOC_ONE_SHOT ; a halted oscillator
+.assert SSG_PART_SIZE = 32, error ; ssg_start: X / 16 = part * 2
 
-; A8 = value; register = oscillator (direct page byte) | group.
+; ssg_out: write A8 to the DOC register group + the oscillator in the direct
+; page byte osc. B is changed.
 .macro ssg_out osc, group
   xba
-  lda f:$e0c03c
+  lda f:SOUNDCTL
   bmi *-4
   lda z:osc
   ora #group
-  sta f:$e0c03e
+  sta f:SOUNDADRL
   xba
-  sta f:$e0c03d
+  sta f:SOUNDDATA
 .endmacro
 
-; X = part*32, SSG_PTR = record address. Both voices silent and halted,
-; their sizes, then the start tick's own records and the even run. The
-; first count of the pending record falls on this tick's audio_ssg_tick.
+; ssg_start: start the list at SSG_PTR in the part X. Both oscillators halt
+; with no volume and take their table sizes; then the records of the start
+; tick play. The first count of the pending record falls on this tick's
+; audio_ssg_tick. JSR.
 ssg_start:
   lda SSG_STATES+T_ACTIVE,x
   bne :+
-  inc z:SSG_ACTIVE_D
+  inc z:SSG_ACTIVE
 :
-  ldy #1
+  ldy #SSG_HEAD_TONE_SIZE
   lda [SSG_PTR],y
   sta SSG_STATES+T_TSIZE,x
-  rep #$20
+  a16
   lda #$ffff
   sta SSG_STATES+T_REPEAT,x
-  sta SSG_STATES+T_EVENF,x
-  sta SSG_STATES+T_ODDP,x
   lda z:SSG_PTR
   clc
   adc #SSG_HEAD
   sta SSG_STATES+T_BASE,x
   sta z:SSG_PTR
-  sep #$20
+  a8
   lda z:SSG_PTR+2
   adc #0
   sta SSG_STATES+T_BASE+2,x
   sta z:SSG_PTR+2
-  stz SSG_STATES+T_ALONE,x
   lda #1
   sta SSG_STATES+T_ACTIVE,x
-  rep #$20
+  ; The oscillators of the part: DOC_SSG_FIRST + part * 2, and the next.
+  a16
   txa
   lsr
   lsr
   lsr
   lsr
   clc
-  adc #13
-  sep #$20
+  adc #DOC_SSG_FIRST
+  a8
   sta SSG_STATES+T_ODD,x
   sta z:SSG_ODD
   inc
-  sta SSG_STATES+T_EVEN,x
   sta z:SSG_EVEN
   lda #0
-  ssg_out SSG_ODD, $40
-  lda #3
-  ssg_out SSG_ODD, $a0
+  ssg_out SSG_ODD, DOC_VOLUME
+  lda #DOC_STOPPED
+  ssg_out SSG_ODD, DOC_CONTROL
   lda #0
-  ssg_out SSG_EVEN, $40
-  lda #3
-  ssg_out SSG_EVEN, $a0
+  ssg_out SSG_EVEN, DOC_VOLUME
+  lda #DOC_STOPPED
+  ssg_out SSG_EVEN, DOC_CONTROL
   lda SSG_STATES+T_TSIZE,x
-  ssg_out SSG_ODD, $c0
+  ssg_out SSG_ODD, DOC_TABLE
   lda #SSG_NOISE_SIZE
-  sta SSG_STATES+T_EVENS,x
-  ssg_out SSG_EVEN, $c0
-  lda #3
-  sta SSG_STATES+T_ODDC,x
+  ssg_out SSG_EVEN, DOC_TABLE
   ldy #0
   jsr .loword(ssg_header)
   lda SSG_STATES+T_ACTIVE,x
   beq :+
   lda SSG_STATES+T_WAIT,x
   bne :+
-  jsr .loword(ssg_record)       ; records on the start tick
+  jsr .loword(ssg_record)       ; the records of the start tick
 :
-  lda #0
-  ssg_out SSG_EVEN, $a0
+  lda #0                        ; the even oscillator runs
+  ssg_out SSG_EVEN, DOC_CONTROL
   lda SSG_STATES+T_ACTIVE,x
   beq :+
   inc SSG_STATES+T_WAIT,x
   lda SSG_STATES+T_WAIT,x
   clc
   adc z:SSG_TIME
-  sta SSG_STATES+T_WAIT,x       ; absolute deadline, including start tick
+  sta SSG_STATES+T_WAIT,x       ; the SSG_TIME of the record, with the start tick
 :
   rts
 
-; The pending record and every record after it with no delay. Y = its
-; fields, SSG_PTR = list, SSG_ODD/SSG_EVEN = this part's oscillators.
-; scripts/ssg_writes.py resolved each record to its exact DOC writes at
-; build time. Its mask (the header code's SSG_MASKS entry, or the byte after
-; header code 15) selects them in this order: odd frequency (kept as the
-; part's tone), even frequency, even frequency = tone, odd page, even
-; control 3 then 0, even page, even size, odd control. Of the last five,
-; one page/size/control value is stored inline; two or more come from one
-; SSG_FIELDS entry (odd page, even page, even size, odd control).
+; ssg_record: write the pending record, then each record after it with no
+; delay. Y = its values, SSG_PTR = the list, SSG_ODD/SSG_EVEN = the part's
+; oscillators. The mask (SSG_MASKS entry of the code, or the byte after code
+; SSG_EXPLICIT) selects the writes in this order:
+;   bit 0 odd frequency (a word; also the part's tone), bit 1 even frequency
+;   (a word), bit 2 even frequency = the tone, bit 3 odd wave page, bit 4 even
+;   control DOC_STOPPED then 0, bit 5 even wave page, bit 6 even table size,
+;   bit 7 odd control.
+; Of bits 3, 5, 6 and 7, one gives one value byte (SSG_KINDS 1); two or more
+; give one byte that selects an SSG_FIELDS entry (SSG_KINDS 2: odd page, even
+; page, even size, odd control).
 ssg_record:
   lda SSG_STATES+T_MASK,x
-  cmp #SSG_FILLER
-  bne :+
-  jmp .loword(ssg_header)
-:
-  cmp #15
+  cmp #SSG_EXPLICIT
   bne @coded
   lda [SSG_PTR],y
   iny
   bra @mask
 @coded:
   phx
-  rep #$20
+  a16
   and #$00ff
   tax
-  sep #$20
-  lda f:SSG_MASKS-1,x
+  a8
+  lda f:SSG_MASKS-1,x           ; codes start at 1
   plx
 @mask:
   sta z:SSG_MASK
   lsr z:SSG_MASK
   bcc @even_value
-  rep #$20
+  a16
   lda [SSG_PTR],y
   iny
   iny
   sta SSG_STATES+T_TONE,x
-  sep #$20
-  ssg_out SSG_ODD, $00
+  a8
+  ssg_out SSG_ODD, DOC_FREQ_LOW
   lda SSG_STATES+T_TONE+1,x
-  ssg_out SSG_ODD, $20
+  ssg_out SSG_ODD, DOC_FREQ_HIGH
 @even_value:
   lsr z:SSG_MASK
   bcc @even_tone
   lsr z:SSG_MASK                ; bit 2 is never set with bit 1
-  rep #$20
+  a16
   lda [SSG_PTR],y
   iny
   iny
@@ -185,70 +161,71 @@ ssg_record:
 @even_tone:
   lsr z:SSG_MASK
   bcc @state
-  rep #$20
+  a16
   lda SSG_STATES+T_TONE,x
 @even_write:
   sta z:SSG_TEMP
-  sep #$20
-  ssg_out SSG_EVEN, $00
+  a8
+  ssg_out SSG_EVEN, DOC_FREQ_LOW
   lda z:SSG_TEMP+1
-  ssg_out SSG_EVEN, $20
+  ssg_out SSG_EVEN, DOC_FREQ_HIGH
 @state:
+  ; Bits 3-7 are now bits 0-4 of SSG_MASK.
   lda z:SSG_MASK
   bne :+
   jmp .loword(ssg_header)
 :
   phx
-  rep #$20
+  a16
   and #$001f
   tax
-  sep #$20
+  a8
   lda f:SSG_KINDS,x
   cmp #2
   beq :+
   jmp .loword(@direct)
 :
-  lda [SSG_PTR],y               ; shared entry
+  lda [SSG_PTR],y               ; the SSG_FIELDS entry
   iny
-  rep #$20
+  a16
   and #$00ff
   asl
-  asl
+  asl                           ; four bytes an entry
   tax
-  sep #$20
+  a8
   lsr z:SSG_MASK
   bcc :+
   lda f:SSG_FIELDS,x
-  ssg_out SSG_ODD, $80
+  ssg_out SSG_ODD, DOC_WAVE
 :
   lsr z:SSG_MASK
   bcc :+
-  lda #3
-  ssg_out SSG_EVEN, $a0
+  lda #DOC_STOPPED
+  ssg_out SSG_EVEN, DOC_CONTROL
   lda #0
-  ssg_out SSG_EVEN, $a0
+  ssg_out SSG_EVEN, DOC_CONTROL
 :
   lsr z:SSG_MASK
   bcc :+
   lda f:SSG_FIELDS+1,x
-  ssg_out SSG_EVEN, $80
+  ssg_out SSG_EVEN, DOC_WAVE
 :
   lsr z:SSG_MASK
   bcc :+
   lda f:SSG_FIELDS+2,x
-  ssg_out SSG_EVEN, $c0
+  ssg_out SSG_EVEN, DOC_TABLE
 :
   lsr z:SSG_MASK
   bcc :+
   lda f:SSG_FIELDS+3,x
-  ssg_out SSG_ODD, $a0
+  ssg_out SSG_ODD, DOC_CONTROL
 :
   plx
   jmp .loword(ssg_header)
 @direct:
   cmp #1
   bne @fields_none
-  lda [SSG_PTR],y               ; the one page/size/control value
+  lda [SSG_PTR],y               ; the one page, size or control value
   iny
   sta z:SSG_TEMP
 @fields_none:
@@ -256,36 +233,36 @@ ssg_record:
   lsr z:SSG_MASK
   bcc :+
   lda z:SSG_TEMP
-  ssg_out SSG_ODD, $80
+  ssg_out SSG_ODD, DOC_WAVE
 :
   lsr z:SSG_MASK
   bcc :+
-  lda #3
-  ssg_out SSG_EVEN, $a0
+  lda #DOC_STOPPED
+  ssg_out SSG_EVEN, DOC_CONTROL
   lda #0
-  ssg_out SSG_EVEN, $a0
+  ssg_out SSG_EVEN, DOC_CONTROL
 :
   lsr z:SSG_MASK
   bcc :+
   lda z:SSG_TEMP
-  ssg_out SSG_EVEN, $80
+  ssg_out SSG_EVEN, DOC_WAVE
 :
   lsr z:SSG_MASK
   bcc :+
   lda z:SSG_TEMP
-  ssg_out SSG_EVEN, $c0
+  ssg_out SSG_EVEN, DOC_TABLE
 :
   lsr z:SSG_MASK
   bcc ssg_header
   lda z:SSG_TEMP
-  ssg_out SSG_ODD, $a0
-; The next record: its delay and mask. A zero delay runs it now; repeats
-; jump back; a zero mask ends the list and silences the part.
+  ssg_out SSG_ODD, DOC_CONTROL
+; ssg_header: read the next record header at Y. A delay of 0 plays the
+; record now; a repeat goes back to its target; the end stops the part.
 ssg_header:
   lda [SSG_PTR],y
   iny
   pha
-  and #15
+  and #$0f
   beq @special
   sta SSG_STATES+T_MASK,x
   pla
@@ -293,110 +270,98 @@ ssg_header:
   lsr
   lsr
   lsr
-  cmp #15
-  beq @long_delay
   asl
   asl
-  asl
-  bra @wait
-@long_delay:
-  lda [SSG_PTR],y
-  iny
-@wait:
+  asl                           ; times SSG_DELAY_UNIT
   sta SSG_STATES+T_WAIT,x
-  cmp #0
   bne :+
   jmp .loword(ssg_record)
 :
-  rep #$20
+  a16
   tya
   sta SSG_STATES+T_PC,x
-  sep #$20
+  a8
   rts
 @special:
   pla
-  beq @end
-  cmp #$10
+  cmp #SSG_REPEAT_HEADER
   beq @repeat
-  ; A filler only waits. The compiler emits $20 followed by its delay.
-  lda #SSG_FILLER
-  sta SSG_STATES+T_MASK,x
-  lda [SSG_PTR],y
-  iny
-  bra @wait
-@end:
+  ; SSG_END_HEADER: the part stops silent.
   stz SSG_STATES+T_ACTIVE,x
-  dec z:SSG_ACTIVE_D
+  dec z:SSG_ACTIVE
   jmp .loword(ssg_silence)
 @repeat:
-  ; Packed repeat marker, repetitions, target; Y-1 is this record.
-  rep #$20
+  ; The repetitions and the target follow; Y-1 is this record.
+  a16
   tya
   dec
   cmp SSG_STATES+T_REPEAT,x
   beq @again
   sta SSG_STATES+T_REPEAT,x
-  sep #$20
+  a8
   lda [SSG_PTR],y
   sta SSG_STATES+T_LEFT,x
 @again:
-  sep #$20
+  a8
   lda SSG_STATES+T_LEFT,x
   beq @finished
   dec
   sta SSG_STATES+T_LEFT,x
-  rep #$20
+  a16
   iny
   lda [SSG_PTR],y
   tay
-  sep #$20
+  a8
   bra ssg_header
 @finished:
-  rep #$20
+  a16
   lda #$ffff
   sta SSG_STATES+T_REPEAT,x
   iny
   iny
-  iny
-  sep #$20
+  iny                           ; past the repetitions and the target
+  a8
   bra ssg_header
+.assert SSG_DELAY_UNIT = 8 .and SSG_END_HEADER = 0, error
 
-; The list ends silent: AM off and both levels zero; counters keep running.
+; ssg_silence: the part ends silent: AM off and both volumes 0; the
+; oscillators continue.
 ssg_silence:
   lda #0
-  sta SSG_STATES+T_ODDC,x
-  ssg_out SSG_ODD, $a0
+  ssg_out SSG_ODD, DOC_CONTROL
   lda #0
-  ssg_out SSG_ODD, $40
+  ssg_out SSG_ODD, DOC_VOLUME
   lda #0
-  ssg_out SSG_EVEN, $40
+  ssg_out SSG_EVEN, DOC_VOLUME
   rts
 
-; Pending commands are put here by the game's sound queue. The selected
-; command replaces only the SSG parts its original program owns.
+; audio_ssg_command: start the effect SSG_PENDING (from audio_request_tick).
+; It starts a list on each part that its arcade program uses; the other
+; parts continue. SSG_COMMAND_ENTRIES has SSG_PARTS entries for each command
+; (SSG_ENTRY_SIZE: the list address, its length); address 0: no list. JSL.
 audio_ssg_command:
-  lda z:SSG_PENDING_D
+  lda z:SSG_PENDING
   bne :+
   rtl
 :
-  stz z:SSG_PENDING_D
+  stz z:SSG_PENDING
   stz z:SSG_NEXT
   phb
   pha
-  lda #$01
+  lda #^SSG_STATES
   pha
   plb
   pla
-  rep #$20
+  a16
   and #255
-  cmp #64
+  cmp #SSG_COMMANDS
   bcs @return16
   tax
-  sep #$20
+  a8
   lda f:SSG_COMMAND_INDEX,x
-  cmp #255
+  cmp #SSG_NO_COMMAND
   beq @return
-  rep #$20
+  a16
   and #255
   sta z:SSG_TEMP
   asl
@@ -404,21 +369,21 @@ audio_ssg_command:
   asl
   asl
   sec
-  sbc z:SSG_TEMP                ; entry*15, then *2 = six five-byte records
-  asl
+  sbc z:SSG_TEMP                ; entry * 15
+  asl                           ; * 30: SSG_PARTS * SSG_ENTRY_SIZE
   tay
   lda #.loword(SSG_COMMAND_ENTRIES)
   sta z:SSG_COMMAND_PTR
-  sep #$20
+  a8
   lda #^SSG_COMMAND_ENTRIES
   sta z:SSG_COMMAND_PTR+2
-  rep #$20
+  a16
   ldx #0
 @part:
   stx z:SSG_SLOT
   lda [SSG_COMMAND_PTR],y
   sta z:SSG_PTR
-  sep #$20
+  a8
   iny
   iny
   lda [SSG_COMMAND_PTR],y
@@ -427,39 +392,42 @@ audio_ssg_command:
   ora z:SSG_PTR+1
   beq @skip
   iny
-  rep #$20
+  a16
   phy
-  sep #$20
+  a8
   jsr .loword(ssg_start)
-  rep #$20
+  a16
   ply
 @skip16:
   ldx z:SSG_SLOT
   tya
   clc
-  adc #2
+  adc #2                        ; past the length
   tay
   txa
   clc
-  adc #32
+  adc #SSG_PART_SIZE
   tax
-  cmp #192
+  cmp #SSG_PARTS*SSG_PART_SIZE
   bne @part
 @return16:
-  sep #$20
+  a8
 @return:
   plb
   rtl
 @skip:
   iny
-  rep #$20
+  a16
   bra @skip16
+.assert SSG_PARTS*SSG_ENTRY_SIZE = 30, error
 
-; The six fixed slots do not need index arithmetic or a loop test per part.
+; audio_ssg_tick: one SSG tick. SSG_TIME counts; while SSG_NEXT counts down
+; no record is due. Then each part with a record due at SSG_TIME plays it,
+; and SSG_NEXT = the ticks before the next record of any part. JSL.
 audio_ssg_tick:
 .a8
 .i16
-  lda z:SSG_ACTIVE_D
+  lda z:SSG_ACTIVE
   bne :+
   rtl
 :
@@ -470,13 +438,13 @@ audio_ssg_tick:
   rtl
 @due:
   phb
-  lda #$01
+  lda #^SSG_STATES
   pha
   plb
   lda #$ff
   sta z:SSG_NEXT
-  .repeat 6,I
-    ldx #I*32
+  .repeat SSG_PARTS,I
+    ldx #I*SSG_PART_SIZE
     lda SSG_STATES+T_ACTIVE,x
     beq :+
     lda SSG_STATES+T_WAIT,x
@@ -497,27 +465,27 @@ audio_ssg_tick:
   bcs :+
   sta z:SSG_NEXT
 :
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #SSG_PART_SIZE
   tax
-  sep #$20
-  cpx #192
+  a8
+  cpx #SSG_PARTS*SSG_PART_SIZE
   bne @minimum
   plb
   rtl
 
-; A due part consumes its record now; its next nonzero delay becomes an
-; absolute deadline on the same SSG clock used by the fast path.
+; ssg_due_record: the part X plays its due record; its next delay becomes
+; an SSG_TIME. JSR.
 ssg_due_record:
   stx z:SSG_SLOT
-  rep #$20
+  a16
   lda SSG_STATES+T_BASE,x
   sta z:SSG_PTR
   lda SSG_STATES+T_PC,x
   tay
-  sep #$20
+  a8
   lda SSG_STATES+T_BASE+2,x
   sta z:SSG_PTR+2
   lda SSG_STATES+T_ODD,x
@@ -533,4 +501,3 @@ ssg_due_record:
   sta SSG_STATES+T_WAIT,x
 :
   rts
-

@@ -1,9 +1,8 @@
 """Lossless native palette sharing."""
 
-import json
 
 # Sprite (palette, pen) entries that no sprite draws: pen 14 of palettes 10
-# and 11 (colour $C5) is in no tile drawn in those palettes. flight_loop
+# and 11 (colour $C5) is in no tile drawn in those palettes. game_build
 # checks this against every drawn sprite key; its DAC entry is free.
 UNDRAWN_SPRITE_PENS = {(10, 14), (11, 14)}
 
@@ -55,7 +54,7 @@ def world_usage(a):
     return usages
 
 
-def merge(a, out):
+def merge(a):
     original = a.palette
     tables = a.colors
     rgb = [original[i * 3 : i * 3 + 3] for i in range(256)]
@@ -71,13 +70,10 @@ def merge(a, out):
     for index in sorted(set.union(*displayed)):
         if index != 15:
             canonical.setdefault(rgb[index], index)
-    for value in set.union(*displayed):
-        pass
     palette = bytearray(original)
     for color, index in canonical.items():
         palette[index * 3 : index * 3 + 3] = color
     converted = []
-    proof = []
     for layer, table in enumerate(tables):
         target = bytes(
             15
@@ -88,7 +84,6 @@ def merge(a, out):
             for value in table
         )
         changed = 0
-        checked = 0
         for pen, (before, after) in enumerate(zip(table, target)):
             visible = (
                 pen % 4 != 0
@@ -100,13 +95,11 @@ def merge(a, out):
                 else True
             )
             if visible:
-                checked += 1
                 changed += rgb[before] != palette[after * 3 : after * 3 + 3]
                 assert after != 15
             elif layer == 1:
                 assert after == 15
         assert changed == 0
-        proof.append(dict(layer=layer, checked_entries=checked, changed_rgb=changed))
         converted.append(target)
     usages = world_usage(a)
     active = set.union(*(values for _, values in usages))
@@ -148,33 +141,11 @@ def merge(a, out):
     assert a.prop_slots == list(range(a.prop_slots[0], a.prop_slots[0] + 2))
     for i, grey in zip(a.prop_slots, GREYS):
         palette[i * 3 : i * 3 + 3] = bytes((grey,) * 3)
-    stage_proof = []
     for stage, values in usages:
         assert not {canonical[rgb[v]] for v in values} & set(a.water_slots)
         assert all(
             rgb[v] == palette[canonical[rgb[v]] * 3 : canonical[rgb[v]] * 3 + 3] for v in values
         )
-        stage_proof.append(
-            dict(
-                stage=stage,
-                displayed_rgb=len({rgb[v] for v in values}),
-                changed_rgb=0,
-                water_slot_collisions=0,
-            )
-        )
-    result = dict(
-        displayed_rgb=len(canonical),
-        world_rgb=len({rgb[v] for v in active}),
-        stage_and_cabinet_proof=stage_proof,
-        reserved_transparency=15,
-        free_slots=len(free),
-        water_slots=a.water_slots,
-        bolt_slots=a.bolt_slots,
-        prop_slots=a.prop_slots,
-        all_stages_and_screens=proof,
-        original_to_native={str(v): canonical[rgb[v]] for v in sorted(set.union(*displayed))},
-    )
     a.palette = bytes(palette)
     a.colors = converted
-    (out / "palette-merge.json").write_text(json.dumps(result, indent=2) + "\n")
     print("Native palette", len(canonical), "RGB colours;", len(free), "free entries", flush=True)

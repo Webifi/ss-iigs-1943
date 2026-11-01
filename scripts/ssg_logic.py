@@ -93,9 +93,7 @@ def tick_curve(curve, tone_size):
     return out
 
 
-LIST_FILLER = 0x40  # a record that only waits
 LIST_REPEAT = 0x80
-LONGEST_DELAY = 254  # the native start adds one tick of count
 
 
 def compact(model):

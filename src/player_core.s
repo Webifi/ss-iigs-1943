@@ -1,90 +1,137 @@
-; Original-US ordinary-flight prefix and periodic energy, native record access.
+; Per-tick player rules around the flight (US arcade code): the collision
+; and special gates before the flight, the energy drain after it, and the
+; colour of the player's sprites. The far entries point D at the player in
+; PLAYER_CURSOR; the live_* routines expect D = the player record. A8, X16.
 .a8
 .i16
-PLAYER_EVENT_SOUND = $17cc
-PLAYER_SPECIAL_LOCK = $17cd
-PLAYER_DIP = $17ce
 
+; player_live_before, player_live_after, player_live_palette: JSL entries
+; for game_players_tick. They keep D.
 player_live_before:
-  stz PLAYER_EVENT_SOUND
-  lda PLAYER+$14
+  phd
+  a16
+  lda PLAYER_CURSOR
+  clc
+  adc #PLAYER
+  tcd
+  a8
+  jsr .loword(live_player_live_before)
+  pld
+  rtl
+player_live_after:
+  phd
+  a16
+  lda PLAYER_CURSOR
+  clc
+  adc #PLAYER
+  tcd
+  a8
+  jsr .loword(live_player_live_after)
+  pld
+  rtl
+player_live_palette:
+  phd
+  a16
+  lda PLAYER_CURSOR
+  clc
+  adc #PLAYER
+  tcd
+  a8
+  jsr .loword(live_player_live_palette)
+  pld
+  rtl
+
+; live_player_live_before: after a respawn the player cannot collide for
+; PL_IMMUNE ticks. The special gate opens again each tick, unless
+; PLAYER_SPECIAL_LOCK holds it closed.
+live_player_live_before:
+  lda z:PL_IMMUNE
   beq @vulnerable
-  dec PLAYER+$14
-  stz PLAYER+7
+  dec z:PL_IMMUNE
+  stz z:PL_COLLIDE
   bra @weapon
 @vulnerable:
-  lda PLAYER_DIP
-  and #$a0
-  beq :+
   lda #1
-:
-  sta PLAYER+7
+  sta z:PL_COLLIDE
 @weapon:
   lda PLAYER_SPECIAL_LOCK
   beq @ordinary
-  lda #$f0
-  sta PLAYER+$55
-  rtl
+  lda #GATE_USED
+  sta z:PL_WEAPON_GATE
+  rts
 @ordinary:
-  lda PLAYER+$55
-  ora #$fc
-  sta PLAYER+$55
-  rtl
+  lda z:PL_WEAPON_GATE
+  ora #GATE_READY
+  sta z:PL_WEAPON_GATE
+  rts
 
-player_live_after:
-  lda PLAYER+$0d
-  cmp #$a0
+; live_player_live_after: every DRAIN_TICKS ticks the player loses one
+; energy, and the energy gauge tile of that cell changes (arcade $8982):
+; cell energy/8 of the player's ENERGY_HUD row shows ENERGY_GLYPH + energy&7.
+live_player_live_after:
+  lda z:PL_DRAIN
+  cmp #DRAIN_TICKS
   bne @done
-  stz PLAYER+$0d
-  lda PLAYER+6
+  stz z:PL_DRAIN
+  lda z:PL_ENERGY
   beq @done
-  dec PLAYER+6
-  ; Only one energy glyph changes on this tick ($8982).
-  lda PLAYER+6
+  dec z:PL_ENERGY
+  lda z:PL_ENERGY
   and #7
   clc
-  adc #$80
+  adc #ENERGY_GLYPH
   pha
-  lda PLAYER+6
+  lda z:PL_ENERGY
   lsr
   lsr
   lsr
-  rep #$20
+  a16
   and #255
   tax
-  sep #$20
+  a8
+  pla
+  pha
+  lda z:PL_NUMBER
+  beq :+
+  a16
+  txa
+  clc
+  adc #ENERGY_HUD_ROW           ; the row of player 2
+  tax
+  a8
+:
   pla
   sta ENERGY_HUD,x
 @done:
-  rtl
+  rts
 
-; Original fixed $1912-$1945. The wing helper owns color during a dodge.
-; The arcade flips the palette here to spin the propellers; the card spins
-; them with two DAC entries (scripts/propellers.py), so the colour stays on
-; the even palette of the pair.
-player_live_palette:
-  lda #0
-@ordinary:
+; live_player_live_palette: the colour of the player: palette 0 for P1, 2 for
+; P2 (arcade $1912-$1945). The arcade also flips the palette to spin the
+; propellers; the card spins them with two DAC entries (scripts/propellers.py),
+; so the colour stays on the even palette of the pair. Damaged wings keep the
+; flash colour of player_aux.
+live_player_live_palette:
+  lda z:PL_NUMBER
+  asl
   sta PLAYER_PALETTE
-  lda PLAYER+1
-  and #$f0
+  lda z:SPR_ATTR
+  and #<~SPR_COLOUR
   ora PLAYER_PALETTE
-  sta PLAYER+1
-  lda PLAYER+$21
-  and #$f0
+  sta z:SPR_ATTR
+  lda z:PL_BODY2+SPR_ATTR
+  and #<~SPR_COLOUR
   ora PLAYER_PALETTE
-  sta PLAYER+$21
-  lda PLAYER+4
-  cmp #3
+  sta z:PL_BODY2+SPR_ATTR
+  lda z:PL_WINGS
+  cmp #WINGS_DAMAGED
   beq @done
-  lda PLAYER+$41
-  and #$f0
+  lda z:PL_LEFT_WING+SPR_ATTR
+  and #<~SPR_COLOUR
   ora PLAYER_PALETTE
-  sta PLAYER+$41
-  lda PLAYER+$61
-  and #$f0
+  sta z:PL_LEFT_WING+SPR_ATTR
+  lda z:PL_RIGHT_WING+SPR_ATTR
+  and #<~SPR_COLOUR
   ora PLAYER_PALETTE
-  sta PLAYER+$61
+  sta z:PL_RIGHT_WING+SPR_ATTR
 @done:
-  rtl
-PLAYER_PALETTE = $17d0
+  rts

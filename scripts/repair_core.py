@@ -1,14 +1,11 @@
 """Build-proved opaque interiors for moving-layer water repairs.
 
 Metadata and the selector occupy separate planes of one video RAM block. The
-selector is copied into the ship's temporary $5C00 staging buffer for repair;
+selector is copied into the ship's temporary staging buffer for repair;
 ship drawing replaces the buffer only after repair finishes.
 """
 
 import numpy as np
-
-STAGING = 0x5C00
-STAGING_END = 0x5DA0
 
 
 def reserve(scene, pool):
@@ -53,7 +50,6 @@ def reserve(scene, pool):
         entries.extend(current)
     assert len(entries) < 65536
     groups = 256 + len(entries)
-    assert groups >= STAGING_END - STAGING
     data = bytearray(groups * 4)
     for i, (offset, count) in enumerate(directory):
         data[4 * i : 4 * i + 3] = bytes((offset & 255, offset >> 8, count))
@@ -71,21 +67,23 @@ def reserve(scene, pool):
             not hi or ((int(opaque[camera]) >> lo) & ((1 << (hi - lo)) - 1)) == (1 << (hi - lo)) - 1
         )
     # Planes 0-2 hold the metadata; plane 3 holds the selector code
-    # (src/card/repair_core.s), copied to $5C00 to run, then the title
+    # (src/secondsight/repair_core.s), copied to $5C00 to run, then the title
     # preservation jobs (scripts/hitch_scene.py).
+    import secondsight_link
     from asset_source import Source
-    from card_link import alias, asset
-    import card_layout
+    from secondsight_link import alias, asset, define
 
     block = pool.vram.block(groups, 4096, "repair_cores")
     metadata = Source("repair core metadata (scripts/repair_core.py)")
     for plane in range(3):
         metadata.section(f".plane.repair_cores.{plane}.0").data(data[plane::4])
     asset("repair_metadata", metadata)
-    card_layout.runs[".plane.repair_cores.3.0"] = STAGING
+    # The selector code runs in the ship staging; secondsight.ld checks that
+    # plane 3 of the block holds a copy of the whole staging.
+    secondsight_link.runs[".plane.repair_cores.3.0"] = "ship_staging__run"
+    define("repair_core_groups", groups)
     block("group16"), block("vseg")  # repair_core_pointer
     alias("repair_core_directory", block("vptr4k"))
-    scene.repair_core = (block, groups, len(entries))
     print("Repair core VRAM:", groups * 4, "bytes, entries", len(entries), flush=True)
 
 

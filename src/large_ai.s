@@ -1,401 +1,478 @@
-; Original-US ship core ($8654-$872F, bank 4) and shared explosion $5E94.
-; D is selected here from the live record. Outer flow and secondary explosion
-; requests are explicit outputs, so no original scheduler code is executed.
+; The decisions of the large objects (four sprite records): the code tails of
+; their motion scripts (LARGE_CALLBACK) run here as native code. They cover
+; the ship cores (US arcade bank 4 $8654-$872F), the core turrets, the shared
+; explosion ($5E94), the deck aircraft and the other large planes and giants
+; (src/game_enemies.s). The results are outputs, not arcade scheduler calls:
+; LARGE_AI_NEXT (the next motion record), LARGE_AI_ACTION (LA_* bits),
+; LARGE_AI_SOUND, LARGE_AI_X/Y (a secondary explosion or bullet place),
+; LARGE_AI_FIRE (a turret pattern + 1) and TURRET_FIRE. src/large_loop.s acts
+; on them.
+
+; Motion code tails of the four-piece objects (LARGE_CALLBACK). The bank of
+; a tail from ARCADE_BANK_WINDOW on comes from OBJ_VARIANT.
+TAIL_AIMING_TURRET = $804b
+TAIL_AIMING_TURRET_2 = $81c7
+TAIL_AIMING_TURRET_3 = $8343
+TAIL_AIMING_TURRET_4 = $84b7
+TAIL_GIANT_EXPLOSION = $6626
+TAIL_LARGE_PLANE_BEGIN = $b366
+TAIL_LARGE_PLANE_WRAP = $b370
+TAIL_LARGE_PLANE_WAIT = $b3ef
+TAIL_LARGE_PLANE_ENABLE = $b425
+TAIL_LARGE_PLANE_AIM = $b458
+TAIL_LARGE_PLANE_FIRE = $b4d5
+TAIL_CORE_TURRET = $8084
+TAIL_LARGE_EXPLOSION = $5e94
+TAIL_LAUNCH_DECK_TICK = $48e7
+TAIL_LAUNCH_CREW_SOUND = $49bf
+TAIL_QUAD_TICK = $aba5
+TAIL_QUAD_FIRE = $ac55
+TAIL_QUAD_ENABLE = $ac76
+TAIL_OPEN_AIRCRAFT = $a8fc
+TAIL_WEAVE_AIRCRAFT = $aa49
+TAIL_WEAVE_PAUSE = $aa83
+TAIL_FALL_WAIT = $aee3
+TAIL_FALL_FIRE = $aefb
+TAIL_FALL_ENABLE = $af09
+TAIL_FALL_TAIL = $af14
+TAIL_LARGE_BURST = $5f1e
+TAIL_LARGE_BURST_LOOP = $5f67
+TAIL_LARGE_BURST_LOOP_2 = $5fa8
+TAIL_CARRIER_DESTROY = $a6e8
+TAIL_SWAY_AIRCRAFT = $b094
+TAIL_TURNING_AIRCRAFT = $b089
+TAIL_RAID_GIANT = $a0c3
+TAIL_CARRIER_DESTROY_2 = $a434
+TAIL_CARRIER_GIANT = $a4bf
+TAIL_LAND_QUAD = $b68d
+TAIL_LAND_QUAD_2 = $b813
+TAIL_LAND_QUAD_3 = $8972
+TAIL_TRIPLE_QUAD = $861e
+TAIL_GIANT_APPROACH = $9bee
+TAIL_GIANT_OPEN = $9bff
+TAIL_GIANT_READY = $9c10
+TAIL_GIANT_TICK = $9c74
+TAIL_GIANT_HIT = $9f1e
+TAIL_GIANT_REOPEN = $9f48
+
+; Fixed-bank explosion motions that show the scoring player.
+MOTION_LARGE_EXPLOSION = $5ea9
+MOTION_LARGE_EXPLOSION_P2 = $5ee2
+MOTION_GIANT_OWNER_EXPLOSION = $663b
+MOTION_GIANT_OWNER_EXPLOSION_P2 = $6674
+
+CORE_TURRET_STEPS = 6        ; ship_turret: the steps of one turret cycle
+CORE_TURRET_BURST = 4        ; ship_turret: the shots of one cycle
+; The family bytes of the deck aircraft record.
+DECK_TIME = $10              ; launch_deck_tick: decisions left of this step
+DECK_STEP = $11              ; launch_deck_tick: the next launch_deck_delays entry
 .a8
 .i16
 .include "boss_core_data.inc"
-BOSS_CONFIG = $1ca0
-LARGE_AI_NEXT = $1c40
-LARGE_THRESHOLD = $1c42        ; E552
-LARGE_AI_ACTION = $1c43        ; schedule 32EA, cancel 3, schedule 32E2, explosion
-LARGE_AI_SOUND = $1c44
-LARGE_AI_X = $1c45
-LARGE_AI_Y = $1c46
-LARGE_AI_FIRE = $1c47         ; 1..4 original turret pattern, zero none
 
+; large_ai: run the code tail LARGE_CALLBACK of the object at LARGE_RECORD.
+; Returns carry 1 with LARGE_AI_NEXT, or carry 0 for an unknown tail. JSL.
 large_ai:
   phd
-  rep #$20
+  a16
   lda LARGE_RECORD
   tcd
   stz LARGE_AI_NEXT
-  sep #$20
+  a8
   stz LARGE_AI_ACTION
   stz LARGE_AI_SOUND
   stz LARGE_AI_X
   stz LARGE_AI_Y
   stz LARGE_AI_FIRE
-.ifdef BANK6_TURRETS
   stz TURRET_FIRE
-.endif
-  rep #$20
+  a16
   lda LARGE_CALLBACK
-.ifdef BANK6_TURRETS
-  cmp #$804b
+  cmp #TAIL_AIMING_TURRET
   beq @aiming_turret
-  cmp #$81c7
+  cmp #TAIL_AIMING_TURRET_2
   beq @aiming_turret
-  cmp #$8343
+  cmp #TAIL_AIMING_TURRET_3
   beq @aiming_turret
-  cmp #$84b7
+  cmp #TAIL_AIMING_TURRET_4
   bne :+
 @aiming_turret:
   jmp .loword(ship_aiming_turret)
 :
-.endif
-.ifdef GIANT_ENEMIES
-  cmp #$6626
+  cmp #TAIL_GIANT_EXPLOSION
   bne :+
   jmp .loword(giant_explosion_select)
 :
-  cmp #$49b5
+  cmp #TAIL_BULLET_HIT_SOUND
   bne :+
-  sep #$20
-  lda #$0f
+  a8
+  lda #SND_BULLET_HIT
   sta LARGE_AI_SOUND
-  rep #$20
+  a16
   lda LARGE_SOURCE
   clc
-  adc #3
+  adc #STEP_TAIL_SIZE           ; the step after the code tail
   jmp .loword(large_ai_selected)
 :
-.endif
 .a16
- .ifdef SHIP_ENEMIES
-  cmp #$b366
+  cmp #TAIL_LARGE_PLANE_BEGIN
   bne :+
   jmp .loword(large_plane_begin)
 :
-  cmp #$b370
+  cmp #TAIL_LARGE_PLANE_WRAP
   bne :+
   jmp .loword(large_plane_wrap)
 :
-  cmp #$b3ef
+  cmp #TAIL_LARGE_PLANE_WAIT
   bne :+
   jmp .loword(large_plane_wait)
 :
-  cmp #$b425
+  cmp #TAIL_LARGE_PLANE_ENABLE
   bne :+
   jmp .loword(large_plane_enable)
 :
-  cmp #$b458
+  cmp #TAIL_LARGE_PLANE_AIM
   bne :+
   jmp .loword(large_plane_aim)
 :
-  cmp #$b4d5
+  cmp #TAIL_LARGE_PLANE_FIRE
   bne :+
   jmp .loword(large_plane_fire)
 :
- .endif
-  cmp #$8084
+  cmp #TAIL_CORE_TURRET
   bne :+
   jmp .loword(ship_turret)
 :
-  cmp #$5e94
+  cmp #TAIL_LARGE_EXPLOSION
   bne :+
   jmp .loword(large_explosion_select)
 :
-.ifdef CONTINUOUS_GAME
+  ; game_dispatch TAIL, ROUTINE: jump to ROUTINE for this code tail.
   .macro game_dispatch id, target
     cmp #id
     bne :+
     jmp .loword(target)
 :
   .endmacro
-  game_dispatch $48e7, launch_deck_tick
-  game_dispatch $49bf, launch_crew_sound
-  game_dispatch $aba5, game_quad_tick
-  game_dispatch $ac55, game_quad_fire
-  game_dispatch $ac76, game_quad_enable
-  game_dispatch $a8fc, game_open_aircraft
-  game_dispatch $aa49, game_weave_aircraft
-  game_dispatch $aa83, game_weave_pause
-  game_dispatch $aee3, game_fall_wait
-  game_dispatch $aefb, game_fall_fire
-  game_dispatch $af09, game_fall_enable
-  game_dispatch $af14, game_fall_tail
-  game_dispatch $5f1e, game_large_burst
-  game_dispatch $5f67, game_large_burst_loop
-  game_dispatch $5fa8, game_large_burst_loop
-  game_dispatch $a6e8, game_carrier_destroy
-  game_dispatch $b094, game_sway_aircraft
-  game_dispatch $b089, game_turning_aircraft
-  game_dispatch $a0c3, game_raid_giant
-  game_dispatch $a434, game_carrier_destroy
-  game_dispatch $a4bf, game_carrier_giant
-  game_dispatch $b68d, game_land_quad
-  game_dispatch $b813, game_land_quad
-  game_dispatch $8972, game_land_quad
-  game_dispatch $861e, game_triple_quad
-  game_dispatch $9bee, game_giant_approach
-  game_dispatch $9bff, game_giant_open
-  game_dispatch $9c10, game_giant_ready
-  game_dispatch $9c74, game_giant_tick
-  game_dispatch $9f1e, game_giant_hit
-  game_dispatch $9f48, game_giant_reopen
+  game_dispatch TAIL_LAUNCH_DECK_TICK, launch_deck_tick
+  game_dispatch TAIL_LAUNCH_CREW_SOUND, launch_crew_sound
+  game_dispatch TAIL_QUAD_TICK, game_quad_tick
+  game_dispatch TAIL_QUAD_FIRE, game_quad_fire
+  game_dispatch TAIL_QUAD_ENABLE, game_quad_enable
+  game_dispatch TAIL_OPEN_AIRCRAFT, game_open_aircraft
+  game_dispatch TAIL_WEAVE_AIRCRAFT, game_weave_aircraft
+  game_dispatch TAIL_WEAVE_PAUSE, game_weave_pause
+  game_dispatch TAIL_FALL_WAIT, game_fall_wait
+  game_dispatch TAIL_FALL_FIRE, game_fall_fire
+  game_dispatch TAIL_FALL_ENABLE, game_fall_enable
+  game_dispatch TAIL_FALL_TAIL, game_fall_tail
+  game_dispatch TAIL_LARGE_BURST, game_large_burst
+  game_dispatch TAIL_LARGE_BURST_LOOP, game_large_burst_loop
+  game_dispatch TAIL_LARGE_BURST_LOOP_2, game_large_burst_loop
+  game_dispatch TAIL_CARRIER_DESTROY, game_carrier_destroy
+  game_dispatch TAIL_SWAY_AIRCRAFT, game_sway_aircraft
+  game_dispatch TAIL_TURNING_AIRCRAFT, game_turning_aircraft
+  game_dispatch TAIL_RAID_GIANT, game_raid_giant
+  game_dispatch TAIL_CARRIER_DESTROY_2, game_carrier_destroy
+  game_dispatch TAIL_CARRIER_GIANT, game_carrier_giant
+  game_dispatch TAIL_LAND_QUAD, game_land_quad
+  game_dispatch TAIL_LAND_QUAD_2, game_land_quad
+  game_dispatch TAIL_LAND_QUAD_3, game_land_quad
+  game_dispatch TAIL_TRIPLE_QUAD, game_triple_quad
+  game_dispatch TAIL_GIANT_APPROACH, game_giant_approach
+  game_dispatch TAIL_GIANT_OPEN, game_giant_open
+  game_dispatch TAIL_GIANT_READY, game_giant_ready
+  game_dispatch TAIL_GIANT_TICK, game_giant_tick
+  game_dispatch TAIL_GIANT_HIT, game_giant_hit
+  game_dispatch TAIL_GIANT_REOPEN, game_giant_reopen
   .delmacro game_dispatch
-.endif
+  ; A ship core tail: boss_core_lookup gives its phase routine.
   jsr .loword(boss_core_lookup)
   bcc @unknown
   tax
   jmp (.loword(boss_core_vectors),x)
 @unknown:
-  sep #$20
+  a8
   pld
   clc
   rtl
+; large_ai_selected: return A = the next motion record (LARGE_AI_NEXT), carry 1.
 large_ai_selected:
 .a16
   sta LARGE_AI_NEXT
-  sep #$20
+  a8
   pld
   sec
   rtl
+
+; large_explosion_select, giant_explosion_select: the explosion that shows
+; the scoring player (OBJ_OWNER 2: player 2). The owner is used up.
 large_explosion_select:
 .a16
-  sep #$20
-  lda $0e
-  stz $0e
+  a8
+  lda OBJ_OWNER
+  stz OBJ_OWNER
   cmp #2
   bne @ordinary
-  rep #$20
-  lda #$5ee2
+  a16
+  lda #MOTION_LARGE_EXPLOSION_P2
   bra large_ai_selected
 
 @ordinary:
-  rep #$20
-  lda #$5ea9
+  a16
+  lda #MOTION_LARGE_EXPLOSION
   bra large_ai_selected
 
-.ifdef GIANT_ENEMIES
 giant_explosion_select:
 .a16
-  sep #$20
-  lda $0e
-  stz $0e
+  a8
+  lda OBJ_OWNER
+  stz OBJ_OWNER
   cmp #2
   bne @ordinary
-  rep #$20
-  lda #$6674
+  a16
+  lda #MOTION_GIANT_OWNER_EXPLOSION_P2
   jmp .loword(large_ai_selected)
 @ordinary:
-  rep #$20
-  lda #$663b
+  a16
+  lda #MOTION_GIANT_OWNER_EXPLOSION
   jmp .loword(large_ai_selected)
-.endif
 
+; The ship core phases (boss_core_vectors). BOSS_CONFIG = the core's
+; boss_core_configs entry (BC_* fields).
+; ship_core_alive: the core waits on its path. When STAGE_CORE_ARMED is set
+; and the core is on the field, the damage total decides: at LARGE_THRESHOLD
+; the core dies; else it takes shots on random ticks (random stream 0).
 ship_core_alive:
 .a16
   ldx BOSS_CONFIG
-  lda f:boss_core_configs+0,x
+  lda f:boss_core_configs+BC_ALIVE,x
   sta LARGE_AI_NEXT
-  sep #$20
-  lda STAGE_FLAGS+$11
+  a8
+  lda STAGE_CORE_ARMED
   beq @done
-  lda $01
-  and #16
+  lda SPR_ATTR
+  and #SPR_ALONG_HIGH
   bne @done
   lda LARGE_TOTAL
   cmp LARGE_THRESHOLD
   bne :+
   jmp .loword(ship_core_died)
 :
-  lda #4
-  sta $09
-  lda RANDOM_STATE
+  lda #OF_CAMERA
+  sta OBJ_FLAGS
+  lda RANDOM_STATE              ; random stream 0, step $77
   lsr
   bcc :+
-  lda #6
-  sta $09
+  lda #OF_CAMERA|OF_SHOT
+  sta OBJ_FLAGS
 :
   lda RANDOM_STATE
   clc
   adc #$77
   sta RANDOM_STATE
 @done:
-  rep #$20
+  a16
   lda LARGE_AI_NEXT
   jmp .loword(large_ai_selected)
 
+; ship_core_died: the core is destroyed. The turrets fall and score for the
+; core's owner, the camera pan stops, and the players loop. Near the top of
+; the field (SPR_ALONG >= BC_NEAR) the ship explodes now; else the camera
+; goes back (HOLD_BACK) and the looping ship finish starts.
 ship_core_died:
 .a8
-  sep #$20
-  lda $0e
-  sta STAGE_FLAGS+7
+  a8
+  lda OBJ_OWNER
+  sta STAGE_CORE_OWNER
   lda #1
-  sta STAGE_FLAGS+$13
-  sta STAGE_FLAGS+$12
+  sta STAGE_TURRETS_FALL
+  sta STAGE_CORE_DOWN
   stz CAMERA_PAN_ON
-  stz CAMERA+$1c
-  stz CAMERA+$1f
-  stz CAMERA+$20
-  rep #$20
-  stz CAMERA+$1d
-  sep #$20
+  stz CAMERA_PAN_TIME
+  stz CAMERA_PAN_DELTA
+  stz CAMERA_PAN_HOLD
+  a16
+  stz CAMERA_PAN_OFFSET
+  a8
   lda LARGE_THRESHOLD
   sta LARGE_TOTAL
-  lda $03
+  lda SPR_ALONG
   ldx BOSS_CONFIG
-  cmp f:boss_core_configs+12,x
+  cmp f:boss_core_configs+BC_NEAR,x
   bcs ship_core_explode
   ldx BOSS_CONFIG
-  lda f:boss_core_configs+10,x
-  sta STAGE_FLAGS+$1c
-  rep #$20
+  lda f:boss_core_configs+BC_PATTERN,x
+  sta STAGE_BLAST_PATTERN
+  a16
   lda LARGE_RECORD
-  sta STAGE_FLAGS+$1d
-  sep #$20
-  lda #1
+  sta STAGE_BLAST_SOURCE
+  a8
+  lda #LA_FINISH_LOOP           ; = HOLD_BACK
   sta LARGE_AI_ACTION
-  sta CAMERA+$21
-  stz CAMERA+$13
-  lda PLAYER+8
-  cmp #2
+  sta CAMERA_HOLD
+  stz CAMERA_BG1_DIVISOR
+  lda PLAYER+PL_STATE
+  cmp #PS_LIVE
   bne :+
-  lda #10
-  sta PLAYER+8
+  lda #PS_LOOP
+  sta PLAYER+PL_STATE
 :
-  lda PLAYER+$88
-  cmp #2
+  lda PLAYER2+PL_STATE
+  cmp #PS_LIVE
   bne :+
-  lda #10
-  sta PLAYER+$88
+  lda #PS_LOOP
+  sta PLAYER2+PL_STATE
 :
-  rep #$20
+  a16
   ldx BOSS_CONFIG
-  lda f:boss_core_configs+2,x
+  lda f:boss_core_configs+BC_DYING,x
   jmp .loword(large_ai_selected)
+.assert LA_FINISH_LOOP = HOLD_BACK, error
 
+; ship_core_wait: the dead core moves until it reaches BC_FAR, then the ship
+; explodes.
 ship_core_wait:
 .a16
-  sep #$20
-  lda $03
+  a8
+  lda SPR_ALONG
   ldx BOSS_CONFIG
-  cmp f:boss_core_configs+13,x
+  cmp f:boss_core_configs+BC_FAR,x
   bcs ship_core_explode
-  rep #$20
+  a16
   ldx BOSS_CONFIG
-  lda f:boss_core_configs+2,x
+  lda f:boss_core_configs+BC_DYING,x
   jmp .loword(large_ai_selected)
+; ship_core_explode: the ship explosion: the camera holds, the sound plays,
+; and a secondary explosion starts above the core when it is on the field.
 ship_core_explode:
 .a8
-  lda #2
-  sta CAMERA+$21
+  lda #HOLD_STILL
+  sta CAMERA_HOLD
   lda #1
-  sta CAMERA+$13
-  lda #$1d
+  sta CAMERA_BG1_DIVISOR
+  lda #SND_SHIP_EXPLODE
   sta LARGE_AI_SOUND
-  lda $03
+  lda SPR_ALONG
   sec
-  sbc #16
+  sbc #PIECE_RISE
   bcc @next
   sta LARGE_AI_Y
-  lda $02
+  lda SPR_CROSS
   clc
-  adc #8
+  adc #SPRITE_HALF
   sta LARGE_AI_X
   lda LARGE_AI_ACTION
-  ora #8
+  ora #LA_EXPLOSION
   sta LARGE_AI_ACTION
-  ; Original $832E advances E009 even when no explosion slot is free.
+  ; The arcade ($832E) steps E009 (random stream 1) even when no explosion
+  ; slot is free.
   lda RANDOM_STATE+1
   clc
   adc #$77
   sta RANDOM_STATE+1
 @next:
-  rep #$20
+  a16
   ldx BOSS_CONFIG
-  lda f:boss_core_configs+4,x
+  lda f:boss_core_configs+BC_EXPLODE,x
   jmp .loword(large_ai_selected)
+; ship_core_finish: the ship finish of this core (BC_PATTERN, BC_ACTION).
 ship_core_finish:
 .a16
   lda LARGE_RECORD
-  sta STAGE_FLAGS+$1d
-  sep #$20
+  sta STAGE_BLAST_SOURCE
+  a8
   ldx BOSS_CONFIG
-  lda f:boss_core_configs+10,x
-  sta STAGE_FLAGS+$1c
-  lda f:boss_core_configs+11,x
+  lda f:boss_core_configs+BC_PATTERN,x
+  sta STAGE_BLAST_PATTERN
+  lda f:boss_core_configs+BC_ACTION,x
   sta LARGE_AI_ACTION
-  rep #$20
+  a16
   ldx BOSS_CONFIG
-  lda f:boss_core_configs+6,x
+  lda f:boss_core_configs+BC_FINISH,x
   jmp .loword(large_ai_selected)
 
+; ship_turret: a turret beside a core. When the core falls (STAGE_TURRETS_FALL)
+; the turret dies and scores for the core's owner. Else it counts
+; CORE_TURRET_STEPS steps and fires at step 0, CORE_TURRET_BURST times in a
+; cycle, while it is on the field: LARGE_AI_FIRE = its pattern + 1.
 ship_turret:
 .a16
-  sep #$20
-  lda STAGE_FLAGS+$13
+  a8
+  lda STAGE_TURRETS_FALL
   beq @alive
-  lda STAGE_FLAGS+7
-  sta $0e
-  lda #16
+  lda STAGE_CORE_OWNER
+  sta OBJ_OWNER
+  lda #LA_KILL
   sta LARGE_AI_ACTION
-  rep #$20
-  lda #0
+  a16
+  lda #0                        ; no next motion record
   jmp .loword(large_ai_selected)
 @alive:
 .a8
-  lda $10
+  lda CORE_TURRET_STEP
   inc
-  cmp #6
+  cmp #CORE_TURRET_STEPS
   bcc @select
   pha
-  lda $11
-  cmp #4
+  lda CORE_TURRET_SHOTS
+  cmp #CORE_TURRET_BURST
   bne @fire
-  stz $11
+  stz CORE_TURRET_SHOTS
   pla
   bra @select
 @fire:
   pla
-  lda $41
-  and #16
-  bne @reset
-  lda $02
+  lda 2*SPRITE_SIZE+SPR_ATTR
+  and #SPR_ALONG_HIGH
+  bne @reset                    ; the turret is off the field
+  lda SPR_CROSS
   clc
-  adc #8
+  adc #SPRITE_HALF
   sta LARGE_AI_X
-  lda $03
+  lda SPR_ALONG
   sec
-  sbc #8
+  sbc #SPRITE_HALF
   sta LARGE_AI_Y
-  lda $12
+  lda CORE_TURRET_FIRE
   inc
   sta LARGE_AI_FIRE
 @reset:
-  inc $11
+  inc CORE_TURRET_SHOTS
   lda #0
 @select:
-  sta $10
-  rep #$20
+  sta CORE_TURRET_STEP
+  a16
   and #255
   asl
   tax
   lda f:large_turret_paths,x
   jmp .loword(large_ai_selected)
 
-; The page table limits the search to callbacks sharing one ROM address page.
-; D remains the live record; only the selected data-row offset is retained.
+; boss_core_lookup: find the ship core row of LARGE_CALLBACK (motion bank 4).
+; boss_core_pages has one list for each arcade page $80-$BF; a list holds
+; BR_SIZE rows and ends with a zero word. Returns carry 1 with BOSS_CONFIG
+; and A = the phase (a word index into boss_core_vectors), else carry 0.
+; D is the object record; A16.
+BOSS_CORE_BANK = .bankbyte(boss_core_pages) << 16
 boss_core_lookup:
 .a16
-  lda $0a
-  and #$70
-  cmp #$40
+  lda OBJ_VARIANT
+  and #OBJ_BANK_BITS
+  cmp #4<<4                     ; motion bank 4
   bne @unknown
   lda LARGE_CALLBACK
-  cmp #$8000
+  cmp #ARCADE_BANK_WINDOW
   bcc @unknown
-  cmp #$c000
+  cmp #ARCADE_BANK_END
   bcs @unknown
   xba
-  and #63
+  and #(ARCADE_BANK_END-ARCADE_BANK_WINDOW)/256-1  ; the page in the window
   asl
   tax
   lda f:boss_core_pages,x
   tax
 @row:
-  lda f:$010000,x
+  lda f:BOSS_CORE_BANK+BR_CALLBACK,x
   beq @unknown
   cmp LARGE_CALLBACK
   beq @found
@@ -404,59 +481,61 @@ boss_core_lookup:
   inx
   inx
   inx
-  inx
+  inx                           ; BR_SIZE
   bra @row
 @found:
-  lda f:$010002,x
+  lda f:BOSS_CORE_BANK+BR_CONFIG,x
   sta BOSS_CONFIG
-  lda f:$010004,x
+  lda f:BOSS_CORE_BANK+BR_PHASE,x
   sec
   rts
 @unknown:
   clc
   rts
+.assert BR_SIZE = 6, error
+; boss_core_retire: the core's retire phase: it follows the camera only.
 boss_core_retire:
 .a16
-  sep #$20
-  lda #4
-  sta $09
-  rep #$20
+  a8
+  lda #OF_CAMERA
+  sta OBJ_FLAGS
+  a16
   ldx BOSS_CONFIG
-  lda f:boss_core_configs+8,x
+  lda f:boss_core_configs+BC_RETIRE,x
   jmp .loword(large_ai_selected)
 
-.ifdef CONTINUOUS_GAME
-; Native US $48E7-$4912. D selects a deck aircraft's live 128-byte record.
+; launch_deck_tick: a deck aircraft (US $48E7-$4912): DECK_TIME decisions on
+; each launch_deck_paths step; launch_deck_delays gives the times.
 launch_deck_tick:
-  sep #$20
-  lda $10
+  a8
+  lda DECK_TIME
   beq @next
-  dec $10
+  dec DECK_TIME
   bra @select
 @next:
-  rep #$20
-  lda $11
+  a16
+  lda DECK_STEP
   and #255
   tax
-  sep #$20
+  a8
   lda f:launch_deck_delays,x
-  sta $10
-  inc $11
+  sta DECK_TIME
+  inc DECK_STEP
 @select:
-  rep #$20
-  lda $11
+  a16
+  lda DECK_STEP
   and #255
   asl
   tax
   lda f:launch_deck_paths,x
   jmp .loword(large_ai_selected)
+; launch_crew_sound: the deck crew tail: the bullet-hit sound, then go on.
 launch_crew_sound:
-  sep #$20
-  lda #$0f
+  a8
+  lda #SND_BULLET_HIT
   sta LARGE_AI_SOUND
-  rep #$20
+  a16
   lda LARGE_SOURCE
   clc
-  adc #3
+  adc #STEP_TAIL_SIZE
   jmp .loword(large_ai_selected)
-.endif

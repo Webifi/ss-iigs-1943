@@ -68,13 +68,13 @@ def prepare(scene):
         code, color = (0x24, 0)
         assert not any(any(row) for row in scene.pool.items[(0, code, color, 0, 0)].masks)
     cache = scene.energy_cache
-    from card_link import alias
+    from secondsight_link import alias
 
     alias("energy_cache_group", cache("group16"))
     alias("energy_cache_segment", cache("vseg"))
 
-    # region bank-code of src/card/memory.toml holds the cache code;
-    # scripts/card_layout.py places its two bridges in common SRAM. The
+    # .bank_code of secondsight.ld holds the cache code;
+    # scripts/secondsight_fit.py places its two bridges in common SRAM. The
     # planner saves the template cursor before entering; L still holds the
     # marker.
     return []

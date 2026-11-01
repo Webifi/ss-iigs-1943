@@ -1,88 +1,95 @@
-; Original-US large-object contacts $5CC4-$5E29. D is the live 128-byte
-; object. Return the common transition/sound/owner fields to the game loop.
+; The contacts of a large object (four sprite records) with the player shots
+; and with the players. A native port of the US arcade code at $5CC4-$5E29.
+; D = the object during each test. The results go to the game loop as
+; CONTACT_ACTION (CONTACT_* bits) and CONTACT_SOUND; OBJ_OWNER gets the player.
+; The centre of a giant is its record 2; of other large objects, record 1's
+; cross and record 0's along (large_contact_center).
 .a8
 .i16
+
+; large_shot_contact: the player shots against the object at LARGE_RECORD.
+; JSL; A, X, Y: changed.
 large_shot_contact:
   phd
-  rep #$20
+  a16
   lda LARGE_RECORD
   tcd
-  sep #$20
+  a8
   stz CONTACT_ACTION
   stz CONTACT_SOUND
-  stz CONTACT_PLAYER
   jsr .loword(large_contact_center)
   jsr .loword(large_shot_test)
   pld
   rtl
 
+; large_shot_test: only an object that shots can hit (OF_SHOT) and that is
+; on the field. Ordinary objects test the live shots that the wave pass
+; listed (SHOT_ACTIVE); giants run on another phase and test every shot
+; record of the live players in order.
 large_shot_test:
-  lda $09
-  and #2
+  lda OBJ_FLAGS
+  and #OF_SHOT
   beq @done
-.ifdef CONTINUOUS_GAME
-  ; Ordinary objects use the even-phase list built by the wave pass.
-  ; Giants use a different phase and keep their original linear scan.
-  lda $08
-  cmp #$40
+  lda OBJ_TYPE
+  cmp #OT_GIANT
   beq :+
   ldy SHOT_ACTIVE_END
   bne :+
-  sty CONTACT_LIMIT
+  sty CONTACT_LIMIT             ; no live shot this tick
   rts
 :
-.endif
-  lda $01
-  ora $41
-  and #16
+  lda SPR_ATTR
+  ora 2*SPRITE_SIZE+SPR_ATTR
+  and #SPR_ALONG_HIGH
   bne @done
+  ; X..Y = the shot records of the live players.
   ldx #0
-  ldy #9*32
-  lda PLAYER+8
-  cmp #2
+  ldy #SHOTS_PER_PLAYER*SHOT_SIZE
+  lda PLAYER+PL_STATE
+  cmp #PS_LIVE
   beq @p1
-  lda PLAYER+$88
-  cmp #2
+  lda PLAYER2+PL_STATE
+  cmp #PS_LIVE
   beq @p2
 @done:
   rts
 @p2:
-  ldx #9*32
-  ldy #18*32
+  ldx #SHOTS_PER_PLAYER*SHOT_SIZE
+  ldy #SHOT_COUNT*SHOT_SIZE
   bra @start
 @p1:
-  lda PLAYER+$88
-  cmp #2
+  lda PLAYER2+PL_STATE
+  cmp #PS_LIVE
   bne @start
-  ldy #18*32
+  ldy #SHOT_COUNT*SHOT_SIZE
 @start:
-.ifdef CONTINUOUS_GAME
-  ; Select the list or linear iterator once. D remains on the live object;
-  ; $dc is a bank-zero pointer and $de is the coordinate adjustment.
+  ; Choose the shot list or the record scan once. CONTACT_NEXT holds the
+  ; step routine; CONTACT_ADJUST is SPRITE_HALF for listed shots (their
+  ; centres), 0 for the scan. D stays on the object.
   jsl large_list_prepare
   bcc @linear_start
   cpy CONTACT_LIMIT
   beq @done
   jsl large_shot_y_cull
-  bcs @done
-  rep #$20
+  bcs @done                     ; no listed shot can reach the object
+  a16
   lda #.loword(@list_next)
-  sta a:$dc
-  sep #$20
-  lda #8
-  sta a:$de
+  sta a:CONTACT_NEXT
+  a8
+  lda #SPRITE_HALF
+  sta a:CONTACT_ADJUST
   ldx SHOT_ACTIVE,y
   bra @slot
 @linear_start:
   sty CONTACT_LIMIT
-  rep #$20
+  a16
   lda #.loword(@linear_next)
-  sta a:$dc
-  sep #$20
-  stz a:$de
+  sta a:CONTACT_NEXT
+  a8
+  stz a:CONTACT_ADJUST
   bra @slot
 @next:
-  jmp ($00dc)
+  jmp (CONTACT_NEXT)
 @list_next:
   iny
   iny
@@ -91,80 +98,40 @@ large_shot_test:
   ldx SHOT_ACTIVE,y
   bra @slot
 @linear_next:
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #SHOT_SIZE
   tax
-  sep #$20
+  a8
   cpx CONTACT_LIMIT
   beq @done
   bra @slot
-.else
-  sty CONTACT_LIMIT
-  bra @slot
-@next:
-  rep #$20
-  txa
-  clc
-  adc #32
-  tax
-  sep #$20
-  cpx CONTACT_LIMIT
-  bne @slot
-  rts
-.endif
+  ; The shot at SHOTS+X: a flying shot that overlaps the object on both axes.
+  ; The arcade adds the 8 before the byte subtraction; adding it to the
+  ; centre instead would change the borrow where the coordinates wrap.
 @slot:
-  lda SHOTS+8,x
-  cmp #2
+  lda SHOTS+SHOT_STATE,x
+  cmp #SHOT_FLYING
   bne @next
-  ; Ordinary four-piece shots add 8 before the byte subtraction. Moving
-  ; that offset to the centre changes the borrow at coordinate wraparound.
-  ; Giant objects keep their unadjusted shot and centre coordinates.
- .ifdef CONTINUOUS_GAME
-  lda SHOTS+3,x
+  lda SHOTS+SPR_ALONG,x
   clc
-  adc a:$de
- .else
-  lda $08
-  cmp #$40
-  beq @giant_y
-  lda SHOTS+3,x
-  clc
-  adc #8
-  bra @shot_y
-@giant_y:
-  lda SHOTS+3,x
-@shot_y:
- .endif
+  adc a:CONTACT_ADJUST
   sec
   sbc CONTACT_CENTER_Y
   bcs :+
-  eor #255
+  eor #255                      ; the absolute distance
   inc
 :
   sta CONTACT_DELTA
-  lda $0d
+  lda OBJ_ALONG_RADIUS
   clc
-  adc SHOTS+7,x
+  adc SHOTS+SHOT_ALONG_RADIUS,x
   cmp CONTACT_DELTA
   bcc @next
- .ifdef CONTINUOUS_GAME
-  lda SHOTS+2,x
+  lda SHOTS+SPR_CROSS,x
   clc
-  adc a:$de
- .else
-  lda $08
-  cmp #$40
-  beq @giant_x
-  lda SHOTS+2,x
-  clc
-  adc #8
-  bra @shot_x
-@giant_x:
-  lda SHOTS+2,x
-@shot_x:
- .endif
+  adc a:CONTACT_ADJUST
   sec
   sbc CONTACT_CENTER_X
   bcs :+
@@ -172,70 +139,75 @@ large_shot_test:
   inc
 :
   sta CONTACT_DELTA
-  lda $0c
+  lda OBJ_CROSS_RADIUS
   clc
-  adc SHOTS+6,x
+  adc SHOTS+SHOT_CROSS_RADIUS,x
   cmp CONTACT_DELTA
   bcc @next
-  lda $0b
-  cmp SHOTS+$0d,x
+  ; A hit. The shot's damage takes HP: more HP than damage leaves the object
+  ; alive; equal kills it and ends the shot; more damage kills it and the
+  ; shot goes on with the damage left.
+  lda OBJ_HP
+  cmp SHOTS+SHOT_DAMAGE,x
   bcc @penetrate
   beq @equal
   sec
-  sbc SHOTS+$0d,x
-  sta $0b
-  lda #4
-  sta SHOTS+8,x
-  lda #$13
+  sbc SHOTS+SHOT_DAMAGE,x
+  sta OBJ_HP
+  lda #SHOT_IMPACT
+  sta SHOTS+SHOT_STATE,x
+  lda #SND_ENEMY_HIT
   sta CONTACT_SOUND
   rts
 @equal:
-  lda #4
-  sta SHOTS+8,x
+  lda #SHOT_IMPACT
+  sta SHOTS+SHOT_STATE,x
   bra @kill
 @penetrate:
-  lda SHOTS+$0d,x
+  lda SHOTS+SHOT_DAMAGE,x
   sec
-  sbc $0b
-  sta SHOTS+$0d,x
+  sbc OBJ_HP
+  sta SHOTS+SHOT_DAMAGE,x
 @kill:
-  stz $0b
-  lda $08
-  cmp #$40
+  stz OBJ_HP
+  lda OBJ_TYPE
+  cmp #OT_GIANT
   bne @ordinary_sound
-  lda #$0d
+  lda #SND_GIANT_KILL
   bra @sound_ready
 @ordinary_sound:
-  lda #$0f
+  lda #SND_BULLET_HIT
 @sound_ready:
   sta CONTACT_SOUND
-  lda SHOTS+9,x
+  lda SHOTS+SHOT_OWNER,x
   inc
-  sta $0e
-  sta CONTACT_PLAYER
-  lda #1
+  sta OBJ_OWNER
+  lda #CONTACT_KILL
   sta CONTACT_ACTION
   rts
 
+; large_body_contact: the player X (0 or PLAYER_SIZE) against the object at
+; LARGE_RECORD. JSL; A, Y: changed.
 large_body_contact:
   phd
-  rep #$20
+  a16
   lda LARGE_RECORD
   tcd
-  sep #$20
+  a8
   stz CONTACT_ACTION
   stz CONTACT_SOUND
-  stz CONTACT_PLAYER
   jsr .loword(large_contact_center)
   jsr .loword(large_body_test)
   pld
   rtl
+; large_body_test: the overlap of the player's centre with the object; the
+; wings take the hit first, as in player_body_test.
 large_body_test:
-  lda PLAYER+7,x
+  lda PLAYER+PL_COLLIDE,x
   beq @miss
-  lda PLAYER+3,x
+  lda PLAYER+SPR_ALONG,x
   clc
-  adc #8
+  adc #SPRITE_HALF
   sec
   sbc CONTACT_CENTER_Y
   bcs :+
@@ -243,45 +215,45 @@ large_body_test:
   inc
 :
   sta CONTACT_DELTA
-  lda $0d
+  lda OBJ_ALONG_RADIUS
   clc
-  adc PLAYER+$11,x
+  adc PLAYER+PL_ALONG_RADIUS,x
   cmp CONTACT_DELTA
   bcc @miss
   lda CONTACT_CENTER_X
   sec
-  sbc PLAYER+$22,x
+  sbc PLAYER+PL_BODY2+SPR_CROSS,x
   bcs :+
   eor #255
   inc
 :
   sta CONTACT_DELTA
-  lda $0c
+  lda OBJ_CROSS_RADIUS
   clc
-  adc PLAYER+$10,x
+  adc PLAYER+PL_CROSS_RADIUS,x
   cmp CONTACT_DELTA
   bcc @miss
-  lda PLAYER+4,x
-  and #1
+  lda PLAYER+PL_WINGS,x
+  and #WINGS_ON
   beq @damage
-  lda PLAYER+4,x
-  cmp #1
+  lda PLAYER+PL_WINGS,x
+  cmp #WINGS_ON
   bne @lose_wings
-  lda #3
+  lda #WINGS_DAMAGED
   bra @wings
 @lose_wings:
-  lda #8
+  lda #WINGS_EXPLODE
 @wings:
-  sta PLAYER+4,x
-  lda #1
-  sta PLAYER+$0e,x
+  sta PLAYER+PL_WINGS,x
+  lda #HIT_ROLL
+  sta PLAYER+PL_HIT,x
   bra @kill
 @miss:
   rts
 @damage:
-  ; Three original RLCA operations rotate, not saturate. Only the third
-  ; carry bit requests immediate death; the two earlier carries wrap.
-  lda $0b
+  ; The damage is HP times 8 by three arcade RLCA steps: they rotate, not
+  ; saturate. Only the third carry kills at once; the first two wrap.
+  lda OBJ_HP
   asl
   bcc :+
   inc
@@ -293,78 +265,74 @@ large_body_test:
   asl
   bcs @death
   sta CONTACT_DELTA
-  lda PLAYER+6,x
+  lda PLAYER+PL_ENERGY,x
   sec
   sbc CONTACT_DELTA
-  sta PLAYER+6,x
-  lda #1
-  sta PLAYER+$0e,x
+  sta PLAYER+PL_ENERGY,x
+  lda #HIT_ROLL
+  sta PLAYER+PL_HIT,x
   bcc @death
-  lda #6
+  lda #SND_PLAYER_HIT
   bra @sound
 @death:
-  stz PLAYER+6,x
-  lda #4
-  sta PLAYER+8,x
-  lda #5
+  stz PLAYER+PL_ENERGY,x
+  lda #PS_DEATH
+  sta PLAYER+PL_STATE,x
+  lda #SND_PLAYER_DOWN
 @sound:
   sta CONTACT_SOUND
   jsr .loword(player_contact_energy)
 @kill:
-  stz $0b
-  lda PLAYER+5,x
+  stz OBJ_HP
+  lda PLAYER+PL_NUMBER,x
   inc
-  sta $0e
-  sta CONTACT_PLAYER
-  lda #1
+  sta OBJ_OWNER
+  lda #CONTACT_KILL
   sta CONTACT_ACTION
   rts
 
-CONTACT_LIMIT = $1c76
-CONTACT_CENTER_X = $1c78
-CONTACT_CENTER_Y = $1c79
+; large_contact_center: CONTACT_CENTER_X/Y of the object (see the top).
 large_contact_center:
-  lda $08
-  cmp #$40
+  lda OBJ_TYPE
+  cmp #OT_GIANT
   beq @giant
-  lda $22
+  lda SPRITE_SIZE+SPR_CROSS
   sta CONTACT_CENTER_X
-  lda $03
+  lda SPR_ALONG
   sta CONTACT_CENTER_Y
   rts
 @giant:
-  lda $42
+  lda 2*SPRITE_SIZE+SPR_CROSS
   sta CONTACT_CENTER_X
-  lda $43
+  lda 2*SPRITE_SIZE+SPR_ALONG
   sta CONTACT_CENTER_Y
   rts
 
-.ifdef CONTINUOUS_GAME
 .pushseg
 .segment "NATIVE"
-; D still selects the large record; the ordered list remains in bank zero.
-; D selects the four-piece object. The wave list's Y union is valid
-; for unshifted shots. If any shot could wrap when adding 8, or the object
-; centre could wrap when subtracting 8, fall back to the original scan.
-; Carry set only when the clipped intervals are definitely disjoint.
+; large_shot_y_cull: can a listed shot reach the object? The wave pass keeps
+; the bounds of the listed shots (SHOT_X_MIN..SHOT_Y_MAX). Returns carry 1
+; only when the object's range and the shot bounds are surely apart on an
+; axis; when a value could wrap with the SPRITE_HALF offsets, it returns
+; carry 0 and the shots are tested one by one. D = the object. JSL.
 large_shot_y_cull:
   lda SHOT_Y_MAX
-  cmp #248
+  cmp #256-SPRITE_HALF
   bcs @maybe
   lda CONTACT_CENTER_Y
   sec
-  sbc #8
+  sbc #SPRITE_HALF
   bcc @maybe
   clc
-  adc $0d
+  adc OBJ_ALONG_RADIUS
   bcs @maybe
   cmp SHOT_Y_MIN
   bcc @disjoint
   lda CONTACT_CENTER_Y
   sec
-  sbc #8
+  sbc #SPRITE_HALF
   sec
-  sbc $0d
+  sbc OBJ_ALONG_RADIUS
   bcc @maybe
   cmp SHOT_Y_MAX
   bcc @maybe
@@ -374,22 +342,22 @@ large_shot_y_cull:
   rtl
 @maybe:
   lda SHOT_X_MAX
-  cmp #248
+  cmp #256-SPRITE_HALF
   bcs @overlap
   lda CONTACT_CENTER_X
   sec
-  sbc #8
+  sbc #SPRITE_HALF
   bcc @overlap
   clc
-  adc $0c
+  adc OBJ_CROSS_RADIUS
   bcs @overlap
   cmp SHOT_X_MIN
   bcc @disjoint
   lda CONTACT_CENTER_X
   sec
-  sbc #8
+  sbc #SPRITE_HALF
   sec
-  sbc $0c
+  sbc OBJ_CROSS_RADIUS
   bcc @overlap
   cmp SHOT_X_MAX
   bcc @overlap
@@ -399,13 +367,17 @@ large_shot_y_cull:
   clc
   rtl
 
+; large_list_prepare: in X..Y the shot records of the live players. For an
+; ordinary object returns carry 1, Y = the first SHOT_ACTIVE entry and
+; CONTACT_LIMIT = the end entry of those players (P1's entries come first,
+; P2's from SHOT_ACTIVE_P2). A giant returns carry 0: the record scan. JSL.
 large_list_prepare:
-  lda $08
-  cmp #$40
+  lda OBJ_TYPE
+  cmp #OT_GIANT
   beq @linear
-  cpy #9*32
+  cpy #SHOTS_PER_PLAYER*SHOT_SIZE
   bne :+
-  ldy SHOT_ACTIVE_P2
+  ldy SHOT_ACTIVE_P2            ; P1 only
   bra @end
 :
   ldy SHOT_ACTIVE_END
@@ -416,7 +388,7 @@ large_list_prepare:
   ldy #0
   bra @ready
 :
-  ldy SHOT_ACTIVE_P2
+  ldy SHOT_ACTIVE_P2            ; P2 only
 @ready:
   sec
   rtl
@@ -424,4 +396,3 @@ large_list_prepare:
   clc
   rtl
 .popseg
-.endif

@@ -2,7 +2,6 @@
 
 from roms import load
 
-WIRE = 0x2C80
 BOSS_TEMPLATE = None
 
 
@@ -67,8 +66,8 @@ def prepare(scene, pool, chars, energy):
 
 
 def messages_source():
-    """build/card/gen/game_hud_messages.s."""
-    from card_link import generate
+    """build/secondsight/gen/game_hud_messages.s."""
+    from secondsight_link import generate
 
     assert BOSS_TEMPLATE is not None
     # The UI messages of the ROM (CONTINUE, GAME OVER, ...) as HUD selectors.

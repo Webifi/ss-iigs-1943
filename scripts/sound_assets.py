@@ -15,7 +15,6 @@ source changes. build/sound/stage.json holds the key of the last run.
 import hashlib
 import json
 import subprocess
-import sys
 
 from roms import ROOT, load
 from sound_files import SOUND, SCORE_LOG, EFFECT_LOG, SCORE, BANK
@@ -65,7 +64,7 @@ def build():
     if stamp.exists() and json.loads(stamp.read_text())["key"] == want:
         return
     stamp.unlink(missing_ok=True)
-    subprocess.run(["make", "-s", "sound-renderer", f"PYTHON={sys.executable}"], cwd=ROOT, check=True)
+    # The Makefile builds the renderer (build/sound/ym_stems) before the asset build.
     sound_logs.write(SCORE_LOG, sound_logs.run(rom, sound_logs.song_schedule(rom)))
     sound_logs.write(EFFECT_LOG, sound_logs.run(rom, sound_logs.effect_schedule()))
 

@@ -1,7 +1,13 @@
 """Port movement-script data handling without executing original program code."""
 
-from harness import HostData
+from iigs_payload import HostData
 from roms import load
+
+# The page table of the motion scripts (src/records.inc, src/enemy_script.s):
+# bank n has the rows from n * SCRIPT_BANK_ROWS, the fixed ROM bank 8 the
+# rows from SCRIPT_FIXED_ROW. enemy_script_data.inc asserts the same values.
+SCRIPT_BANK_ROWS = 64
+SCRIPT_FIXED_ROW = 8 * SCRIPT_BANK_ROWS
 
 
 def prepare_data(out, rows, roots=()):
@@ -94,7 +100,7 @@ def prepare_data(out, rows, roots=()):
                 overlap_bytes += overlap
                 last_data = data
             assert stream[offsets[data] : offsets[data] + len(data)] == data
-            slot = (512 + page) if bank == 8 else bank * 64 + page
+            slot = (SCRIPT_FIXED_ROW + page) if bank == 8 else bank * SCRIPT_BANK_ROWS + page
             pages[slot] = (offsets[data] - first, data)
         block = host.blob_at_bank(bytes(stream), "enemy_script_data")
         table = HostData().faraddr(*(block + entry[0] if entry else 0 for entry in pages))
@@ -102,7 +108,10 @@ def prepare_data(out, rows, roots=()):
         # The direct pool reader uses the bank of the block, including a page
         # pointer biased into the preceding bank. Other readers consume the
         # 24-bit table.
-        (out / "enemy_script_data.inc").write_text("ENEMY_SCRIPT_FAST_BANK = ^enemy_script_data\n")
+        (out / "enemy_script_data.inc").write_text(
+            "ENEMY_SCRIPT_FAST_BANK = ^enemy_script_data\n"
+            f".assert SCRIPT_BANK_ROWS = {SCRIPT_BANK_ROWS} .and SCRIPT_FIXED_ROW = {SCRIPT_FIXED_ROW}, error\n"
+        )
         meta.update(
             table_storage_bytes=3 * len(pages) + len(stream),
             bank_padding_bytes=0,

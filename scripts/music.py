@@ -22,7 +22,6 @@ class Part:
     pitch_base: int = 0
     repeat_pc: int = 0
     repeat_count: int = 0
-    repeat_forever: bool = False
     tie: int = 0
     fast: int = 0
     fnum: int = 0

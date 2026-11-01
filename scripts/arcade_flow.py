@@ -6,7 +6,7 @@ credits and transitions; the existing renderer displays its current layout.
 """
 
 import struct
-from harness import HostData
+from iigs_payload import HostData, content_key
 from roms import load
 from world_stream import replace
 
@@ -218,7 +218,7 @@ def install(out, host, scene):
     directory = [0] * 32
 
     def blob(data):
-        key = bytes(data)
+        key = content_key(data)
         if key not in shared:
             try:
                 shared[key] = host.slow_blob_at(data)

@@ -1,55 +1,62 @@
-; Native original-US $3F2D-$3F75 and muzzle placement $3DDC-$3E00.
-; A failed/full spawn still writes only the original scratch object's XY.
+; turret_bullet_spawn: a bullet from the ship turret at LARGE_RECORD at the
+; muzzle LARGE_AI_X/Y (US arcade $3F2D-$3F75 and $3DDC-$3E00). The bullet
+; takes the first free record of the BULLET_SLOTS records of BULLETS; its
+; speed class (TURRET_FIRE) is kept in OBJ_HP. A turret off the field, near
+; the bottom, or a full pool writes the muzzle into BULLET_SCRATCH only, as
+; the arcade does. JSL; A8, X16.
 .a8
 .i16
+TURRET_FIRE_ALONG = 40       ; below this along the turret does not fire
+
 turret_bullet_spawn:
   phd
-  rep #$20
+  a16
   lda LARGE_RECORD
   tcd
-  sep #$20
+  a8
   ldx #BULLET_SCRATCH
-  lda $01
-  ora $41
-  and #16
+  lda SPR_ATTR
+  ora 2*SPRITE_SIZE+SPR_ATTR
+  and #SPR_ALONG_HIGH
   bne @blocked
-  lda $03
-  cmp #40
+  lda SPR_ALONG
+  cmp #TURRET_FIRE_ALONG
   bcc @blocked
-  lda BULLET_CONTEXT+1
+  lda BULLET_SUPPRESS
   bne @blocked
-  lda BULLET_CONTEXT+2
+  lda BULLET_SLOTS
   beq @blocked
-  rep #$20
+  a16
   and #255
   asl
   asl
   asl
   asl
-  asl
+  asl                           ; times OBJECT_SIZE
   clc
   adc #BULLETS
-  sta a:$d0
+  sta a:BULLET_SEARCH_END
   ldx #BULLETS
 @slot:
-  sep #$20
-  lda a:8,x
+  a8
+  lda a:OBJ_TYPE,x
   beq @found
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #OBJECT_SIZE
   tax
-  cpx a:$d0
+  cpx a:BULLET_SEARCH_END
   bne @slot
   ldx #BULLET_SCRATCH
-  sep #$20
+  a8
 @blocked:
   jmp .loword(@position)
 @found:
-  rep #$20
-  stx a:$d2
-  .repeat 16,I
+  ; Copy the template, then the motion of the barrel direction.
+  a16
+  stx a:BULLET_RECORD
+  .repeat OBJECT_SIZE/2,I
     lda f:turret_bullet_template+2*I
     sta a:2*I,x
   .endrepeat
@@ -57,17 +64,17 @@ turret_bullet_spawn:
   and #31
   tax
   lda f:turret_bullet_paths,x
-  ldx a:$d2
-  sta a:$1e,x
-  sep #$20
+  ldx a:BULLET_RECORD
+  sta a:OBJ_MOTION,x
+  a8
   lda TURRET_FIRE
-  sta a:$0b,x
-  lda #$0c
-  sta PLAYER_EVENT_SOUND
+  sta a:OBJ_HP,x
+  lda #SND_TURRET_SHOT
+  jsl game_sound_request        ; arcade $3F70
 @position:
   lda LARGE_AI_X
-  sta a:2,x
+  sta a:SPR_CROSS,x
   lda LARGE_AI_Y
-  sta a:3,x
+  sta a:SPR_ALONG,x
   pld
   rtl

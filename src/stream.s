@@ -1,48 +1,48 @@
-; Native command packet at bank 0 $8000, with byte-swapped words for PEI.
-; $28 = payload bytes, A = DMA1 ready token ($40/$41). No IRQ is installed.
-; M=8/X=16, DBR=DP=0. Interrupts are already disabled by the game entry.
+; stream_packet: send the packet in PACKET_BUFFER to the card.
+;
+; The card reads a packet from its receive buffer when the handshake byte
+; shows the token of that buffer. The packet goes as fast as the 65816 can
+; write: S points at the card port SS_BURST, and PEI pushes two packet bytes
+; from the page that D points at. Four PEIs fill $C0B0-$C0B7 (one burst);
+; then S goes back to SS_BURST. Each word of the packet is high byte first,
+; so the pushes send the bytes in packet order.
+;
+; In: A = the token of the card buffer (PACKET_TOKEN or PACKET_TOKEN+1),
+; PACKET_LENGTH = the bytes after PACKET_SIZE. A8, X16, DBR = 0, D = 0.
+; Out: A8. A, X, Y: changed. A card that does not answer stops the game.
 stream_packet:
-  sta $60
-.ifdef STREAM_PROFILE
-  lda $68
-  sta f:$05040a
-.endif
-  ldy #$ffff
+  sta STREAM_TOKEN
+  ; Wait for the card. Keep the sound uploads and the input running while
+  ; it draws the last picture.
+  ldy #SS_POLLS
 @wait:
-.ifdef AUDIO_GAME
   phy
   jsl audio_game_upload
   ply
-.endif
-.ifdef STREAM_POLL_INPUT
   phy
   jsr input_poll
   ply
-.endif
-  lda f:$e0c0b8
-  cmp $60
+  lda f:SS_HANDSHAKE
+  cmp STREAM_TOKEN
   beq @ready
   dey
   bne @wait
   jmp failed
 @ready:
-.ifdef AUDIO_GAME
   php
   sei
-  ; Stack writes must reach slot I/O in bank zero. The raw IRQ vector
-  ; uses RAM at $FFEE, so restore its mapping before unmasking interrupts.
-  lda f:$e0c035
-  and #$bf
-  sta f:$e0c035
-.endif
-.ifdef STREAM_PROFILE
-  lda $68
-  sta f:$05040b
-.endif
-  rep #$30
+  ; The pushes must reach the slot I/O in bank 0, so show the I/O at $C000
+  ; (IOLC off). The IRQ vector at $FFEE then is the firmware's; IRQ stays
+  ; masked until the RAM mapping is back.
+  lda f:SHADOW
+  and #<~SHADOW_IOLC
+  sta f:SHADOW
+  ax16
   tsc
-  sta f:$050310
-  lda $28
+  sta stream_saved_sp
+  ; Y = the bytes after the last full page, X = the full pages. The count
+  ; includes the 2 bytes of PACKET_SIZE.
+  lda PACKET_LENGTH
   clc
   adc #2
   pha
@@ -52,14 +52,15 @@ stream_packet:
   xba
   and #255
   tax
-  lda #$8000
+  lda #.loword(PACKET_BUFFER)   ; D = the first page of the packet
   tcd
   cpx #0
   bne @page
   jmp @tail
+  ; One page: 256 / SS_BURST_SIZE bursts.
 @page:
-  .repeat 32,I
-    lda #$c0b7
+  .repeat 256/SS_BURST_SIZE,I
+    lda #.loword(SS_BURST)
     tcs
     pei (I*8)
     pei (I*8+2)
@@ -68,18 +69,17 @@ stream_packet:
   .endrepeat
   tdc
   clc
-  adc #256
+  adc #256                      ; D = the next page
   tcd
   dex
   beq @tail
   jmp @page
+  ; The rest: full bursts while SS_BURST_SIZE or more bytes are left.
 @tail:
-  ; Use the same eight-byte event burst for the remainder. Previously up to
-  ; 254 bytes took the scalar word path just because they crossed a page.
-  cpy #8
+  cpy #SS_BURST_SIZE
   bcc @short_tail
 @eight:
-  lda #$c0b7
+  lda #.loword(SS_BURST)
   tcs
   pei (0)
   pei (2)
@@ -87,42 +87,43 @@ stream_packet:
   pei (6)
   tdc
   clc
-  adc #8
+  adc #SS_BURST_SIZE
   tcd
   tya
   sec
-  sbc #8
+  sbc #SS_BURST_SIZE
   tay
-  cmp #8
+  cmp #SS_BURST_SIZE
   bcs @eight
+  ; The last bytes go one word at a time through SS_DATA_OUT, from the
+  ; address in X. The game stack and D = 0 come back first.
 @short_tail:
-  lda f:$050310
+  lda stream_saved_sp
   tcs
   tdc
   tax
-  lda #0
+  lda #ZERO_PAGE
   tcd
   cpy #0
   beq @done
 @word:
-  lda a:$0000,x
-  xba
-  sta f:$e0c0b1
+  lda a:0,x                     ; X holds the address of the word
+  xba                           ; the high byte first
+  sta f:SS_DATA_OUT
   inx
   inx
   dey
   dey
   bne @word
 @done:
-  sep #$20
-.ifdef AUDIO_GAME
-  lda f:$e0c035
-  ora #$40
-  sta f:$e0c035
+  ; RAM at $C000-$FFFF again (IOLC on), then the caller's P (and IRQ mask).
+  a8
+  lda f:SHADOW
+  ora #SHADOW_IOLC
+  sta f:SHADOW
   plp
-.endif
-.ifdef STREAM_PROFILE
-  lda $68
-  sta f:$05040c
-.endif
   rts
+.assert SS_BURST_SIZE = 8, error  ; the four PEIs of each burst above
+
+; The game stack pointer while S points at the card port for the pushes.
+stream_saved_sp: .res 2

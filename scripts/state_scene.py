@@ -6,44 +6,21 @@ object records. Placement, clipping and repair records never cross the bus.
 """
 
 import struct
-from native_foreground import LiveScene
+from scene import Scene
 
-# Common SRAM, below the renderer. No firmware drawing runs in this phase.
-OUT = 0x0C02
-REPAIR = 0x0C04
-RESTORE_START = 0x0C06
-BASE = 0x0C08
-START = 0x0C0A
-PAGE = 0x0C0C
-ITEMS = 0x0C0E
-ITEM = 0x0C10
-SPRITE_BASE = 0x0C22
-COUNT = 0x0C2A
-HUDPTR = 0x0C2C
-SCORE = 0x0C40
-FG = 0x0C38
-FGPTR = 0x0C3A
+# hud_lines (src/secondsight/hud.s): the boss bar cells follow the two lines of 14 cells.
+BOSS_CELL = 2 * 14
 
 
-class StateScene(LiveScene):
-    state_only = True
-    deferred_receive = True
-
-    def __init__(self, *args, background_cache=False, **kwargs):
-        super().__init__(*args, **kwargs)
+class StateScene(Scene):
+    def __init__(self, a, pool, background_cache=False):
+        super().__init__(a, pool, window=0x2000)
         self.background_cache = background_cache
-        self.packed_coverage = background_cache
-        self.direct_masks = background_cache
-        self.retained_rows = False
-        self.damage_cells = False
         self.pattern_hud = background_cache
 
     def planner(self):
         """The generated sources and the checks of the renderer and the
         planner."""
-        self.code_pages = 8
-        self.indexed_codes = False
-        self.code_table_bytes = 8192
         self.sprite_cache.sources()
         from ship_alignment import bases_source
 
@@ -67,8 +44,6 @@ class StateScene(LiveScene):
 
 def tables(scene, offload):
     """All code, palette and clipping decisions independent of play are data."""
-    codes = bytearray(scene.code_pages * 512)
-    codes = bytes(8192)
     palette_chunks = []
     scene.compound_chunks = []
     # HUD data owns only its measured prefix of this 4 KB bank. Use the
@@ -95,8 +70,6 @@ def tables(scene, offload):
         + sum(len(glyphs(kind, color)) * 4 for kind, color in variables)
         + timer_bytes
     )
-    palette_at = 0x15000 + ((hud_bytes + 15) & ~15)
-    keys = sorted({(k[1], k[2]) for k in offload if k[0] == 3})
     clip = bytearray()
     for x in range(256):
         left = x - 16
@@ -122,13 +95,13 @@ def tables(scene, offload):
             offset = (top * 56) & 65535
             clip.extend(struct.pack("<hHHBB", top, bits, offset, height, int(not 0 <= top <= 240)))
     from asset_source import Source, derived
-    from card_link import alias, asset
+    from secondsight_link import alias, asset
 
     # The HUD templates, then a lookup list for each variable glyph kind,
-    # then the weapon timer. region hud-templates of src/card/memory.toml holds them in one 4 KB page.
+    # then the weapon timer. .hud_templates of secondsight.ld holds them in one 4 KB page.
     hud = Source("HUD templates (scripts/state_scene.py)").section(".rodata.hud_templates")
     hud.label("hud_templates")
-    derived("bbr", "hud_templates"), derived("ptr", "hud_templates")  # src/card/hud.s
+    derived("bbr", "hud_templates"), derived("ptr", "hud_templates")  # src/secondsight/hud.s
     variables = sorted({(v[0], v[2]) for _, _, _, v in scene.state_hud if v})
     lookup = {key: f"hud_lookup_{i}" for i, key in enumerate(variables)}
     for handler, (bank, ptr), offset, variable in scene.state_hud:
@@ -145,19 +118,21 @@ def tables(scene, offload):
             handler = 7 if variable[0] == "score" else 8
         kind, index, color = variable
         ptr = derived("ptr", lookup[kind, color])
-        selector = (
-            0x0C60 + (2 + index if kind == "weapon_time" else 0)
-            if kind.startswith("weapon")
-            else SCORE + (0) + index
-        )
+        # The selector: the card variable that holds the glyph code (src/secondsight/hud.s).
         if kind == "game_line":
-            selector = 0x2CC0 + index
+            selector = f"hud_lines+{index}"
+            if index == BOSS_CELL:
+                hud.label("hud_boss_template")  # src/secondsight/hud.s ends the list here without a boss
         elif kind == "loop":
-            selector = 0x2CBC + index
+            selector = f"hud_loop_selectors+{index}"
         elif kind == "score2":
-            selector = 0x2C80 + index
+            selector = f"hud_p2_score+{index}"
         elif kind.startswith("p2_weapon"):
-            selector = 0x2CA0 + (2 + index if kind == "p2_weapon_time" else 0)
+            selector = f"hud_p2_weapon+{2 + index if kind == 'p2_weapon_time' else 0}"
+        elif kind.startswith("weapon"):
+            selector = f"hud_p1_weapon+{2 + index if kind == 'weapon_time' else 0}"
+        else:
+            selector = f"hud_p1_score+{index}"
         hud.word(handler, bank, ptr, offset, selector)
     hud.word(0)
     from hud_fast import uniform_descriptor
@@ -182,9 +157,11 @@ def tables(scene, offload):
     asset("hud_templates", hud)
     # The sprite cache phase records and directory own $11000-$12EFF; the
     # rest of the old code table stays zero.
+    # The sprite position records (src/secondsight/include/sprite_records.inc).
+    source = Source("sprite position records (scripts/state_scene.py)").section(".rodata.position_records")
+    asset("position_records", source.label("x_records").data(clip[:2048]).label("y_records").data(clip[2048:]))
     result = [
         (0x12F00, bytes(256)),
-        (0x13000, bytes(clip)),
         *palette_chunks,
         *scene.compound_chunks,
     ]
@@ -195,7 +172,6 @@ def tables(scene, offload):
 
     install_sparse_sprites(scene)
 
-    scene.state_lookup_bytes = len(codes) + sum(len(data) for _, data in palette_chunks)
     # These are startup uploads. Adjacent palette lists need one host command,
     # not a repeated upload loop for every resident sprite code.
     uploads = []

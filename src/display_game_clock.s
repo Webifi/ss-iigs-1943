@@ -1,7 +1,14 @@
-; Game updates follow half the actual programmed refresh. Menu/startup only
-; calculates the period; sound oscillator frequencies and IRQ stay unchanged.
+; The game update rate: one update each two pictures of the display mode
+; that Second Sight runs. The start-up and the menu work out the DOC ticks
+; of an update; the sound timer does not change.
 .a16
 .i16
+
+; game_clock_display_rate: game_clock_step_integer and _fraction = the DOC
+; ticks of one update (Q16): the coefficient of the pixel clock (VGA or RGB)
+; times the horizontal total times the vertical total, Q32 rounded to Q16.
+; At a whole number, game_clock_deadline_step is ADC #integer; else a JSR to
+; the fraction step. JSL.
 game_clock_display_rate:
   phb
   phk
@@ -16,21 +23,21 @@ game_clock_display_rate:
   cmp a:.loword(game_rate_v)
   beq @found
   inx
-  cpx #5
+  cpx #DISPLAY_CLOCKS
   bcc @clock
-  ldx #3                     ; validated mode fallback: 40 MHz
+  ldx #DISPLAY_CLOCK_FALLBACK   ; 40 MHz
 @found:
   txa
   asl
-  asl
+  asl                           ; dword entries
   tax
-  lda f:DISPLAY_MODE+1
+  lda f:DISPLAY_MODE+DISPLAY_PIXEL_CLOCK
   and #255
-  cmp #$a9
+  cmp #PIXEL_CLOCK_RGB
   bne :+
   txa
   clc
-  adc #20
+  adc #DISPLAY_CLOCKS*4         ; the RGB coefficients
   tax
 :
   lda f:display_rate_coefficients,x
@@ -43,7 +50,7 @@ game_clock_display_rate:
   stz a:.loword(game_rate_sum)
   stz a:.loword(game_rate_sum)+2
   stz a:.loword(game_rate_sum)+4
-  ; Coefficient * horizontal characters, bounded by 260 menu-only additions.
+  ; The coefficient times the horizontal total (CRTC 0 + 5 characters).
   lda f:DISPLAY_MODE+DISPLAY_CRTC_00
   and #255
   clc
@@ -62,7 +69,8 @@ game_clock_display_rate:
   sta a:.loword(game_rate_mul)+4
   dex
   bne @horizontal
-  ; Decode actual vertical total, including both VGA overflow bits.
+  ; The vertical total: CRTC 6, bit 8 from CRTC 7 bit 0, bit 9 from CRTC 7
+  ; bit 5, + 2 lines.
   lda f:DISPLAY_MODE+DISPLAY_CRTC_07
   and #1
   xba
@@ -72,7 +80,7 @@ game_clock_display_rate:
   asl
   asl
   asl
-  asl
+  asl                           ; bit 5 to bit 9
   ora a:.loword(game_rate_v)
   sta a:.loword(game_rate_v)
   lda f:DISPLAY_MODE+DISPLAY_CRTC_06
@@ -82,6 +90,7 @@ game_clock_display_rate:
   inc
   sta a:.loword(game_rate_v)
 @vertical:
+  ; game_rate_sum = game_rate_mul * game_rate_v, by shifts and adds.
   lsr a:.loword(game_rate_v)
   bcc @shift
   clc
@@ -100,7 +109,7 @@ game_clock_display_rate:
   rol a:.loword(game_rate_mul)+4
   lda a:.loword(game_rate_v)
   bne @vertical
-  ; Round Q32 to Q16 ticks/update. The entire validated range fits 48 bits.
+  ; Q32 rounded to Q16 ticks an update; each valid mode fits 48 bits.
   lda a:.loword(game_rate_sum)
   clc
   adc #$8000
@@ -114,24 +123,24 @@ game_clock_display_rate:
   stz a:.loword(game_clock_fraction)
   lda a:.loword(game_clock_step_fraction)
   bne @fractional
-  sep #$20
-  lda #$69                    ; ADC #integer, zero extra work at exact arcade rate
+  a8
+  lda #OPCODE_ADC_IMM           ; the arcade rate: no fraction work
   bra @patch
 @fractional:
 .a16
   lda #.loword(game_clock_fraction_bridge)
   sta f:game_clock_deadline_step+1
-  sep #$20
-  lda #$20                    ; JSR bridge replaces ADC immediate
+  a8
+  lda #OPCODE_JSR
 @patch:
   sta f:game_clock_deadline_step
-  rep #$20
+  a16
   plb
   rtl
 
+; game_clock_fraction_step: A = the deadline before; returns the next one:
+; the fraction adds up, and its carry is one more DOC tick. JSL.
 game_clock_fraction_step:
-  ; Incoming A is the previous deadline. Carry from fraction addition is
-  ; the extra DOC tick; STA/PLA preserve it. No per-update rate arithmetic.
   pha
   lda f:game_clock_fraction
   clc
@@ -141,7 +150,8 @@ game_clock_fraction_step:
   adc f:game_clock_step_integer
   rtl
 
-game_clock_step_integer: .word 8
+; The step and the fraction sum, and the work of game_clock_display_rate.
+game_clock_step_integer: .word UPDATE_TICKS
 game_clock_step_fraction: .word 0
 game_clock_fraction: .word 0
 game_rate_add: .res 4

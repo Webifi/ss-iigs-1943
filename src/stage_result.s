@@ -1,82 +1,98 @@
-; Native stage outcome, retry and awards. The tables are prepared at build time.
+; The stage result: the outcome of the ship or the air boss, the retry, the
+; energy refill and the score awards. The tables are build data.
 .a8
 .i16
-RESULT_TICKS = $149d
-RESULT_REMAIN = $149f
+DIFFICULTY_ENTRY_SIZE = 4    ; game_difficulty: bullets, speed, spawns, air pass
+TALLY_TICKS = 2              ; updates of each refill step
+REFILL_ENTRY_SIZE = 3        ; game_refill: ENERGY_MAX, the refill, the refill of a replay
+PASS_BAND_FIRST = 60         ; the award band: 1 for each 10 above 60 percent
+PASS_BAND_STEP = 10
+REPLAY_BANDS = 6             ; a replay uses the bands after these
+AWARD_100 = 23               ; score_awards: 100 points
+AWARD_40000 = 40             ; score_awards: two times 20000 points
+RETRY_SEA = $1000            ; CAMERA_BG2_SCROLL of a retry
+RETRY_ALONG = $10            ; the players start the retry here
+DECK_ALONG_P2 = $40          ; the deck place of player 2 (player 1: DOCK_ALONG)
 
+; game_difficulty_init: the difficulty of the DIP switches: STAGE_DIP_LEVEL
+; and its game_difficulty entry. JSR.
 game_difficulty_init:
   lda GAME_DIP_A
-  eor #255
-  and #15
-  sta STAGE_DIFFICULTY+7
+  eor #$ff
+  and #DIP_A_LEVEL
+  sta STAGE_DIP_LEVEL
   asl
-  asl
-  rep #$20
+  asl                           ; times DIFFICULTY_ENTRY_SIZE
+  a16
   and #255
   tax
-  sep #$20
+  a8
   lda f:game_difficulty,x
-  sta STAGE_DIFFICULTY
-  sta STAGE_DIFFICULTY+4
+  sta STAGE_BULLET_BASE
+  sta STAGE_BULLET_SLOTS
   lda f:game_difficulty+1,x
-  sta STAGE_DIFFICULTY+1
+  sta STAGE_SPEED_BASE
   lda f:game_difficulty+2,x
-  sta STAGE_DIFFICULTY+2
-  sta STAGE_DIFFICULTY+6
+  sta STAGE_SPAWN_SLOTS
   lda f:game_difficulty+3,x
-  sta STAGE_DIFFICULTY+3
+  sta STAGE_AIR_PASS
   rts
 
+; game_stage_result: the end of a stage (game_scene_tick, EXIT_RESULT):
+; the outcome (the ship result, except on the air boss stages); a failed
+; first pass or last stage is a retry; the last stage goes to the ending;
+; else the refill tally starts (EXIT_REFILL), with the awards of a pass.
+; JSL.
 game_stage_result:
   lda GAME_STAGE_EXIT
-  cmp #2
+  cmp #EXIT_REFILL
   bne @begin
   jmp .loword(game_refill_tick)
 @begin:
   lda CAMERA_STAGE
-  cmp #2
+  cmp #AIR_STAGE_1
   beq @outcome
-  cmp #8
+  cmp #AIR_STAGE_2
   beq @outcome
-  cmp #13
+  cmp #AIR_STAGE_3
   beq @outcome
   jsr .loword(game_ship_result)
 @outcome:
   jsr .loword(game_result_clear)
   lda AIR_RESULT
-  cmp #1
+  cmp #AR_RETRY
   bne @award
   lda CAMERA_STAGE
-  cmp #15
+  cmp #LAST_STAGE
   beq @retry
   lda STAGE_BOSS_PHASE
   bne @award
 @retry:
   stz RESULT_REMAIN
-  lda #3
+  lda #EXIT_RETRY
   sta GAME_STAGE_EXIT
   jsl game_present_result
   rtl
 @award:
   lda CAMERA_STAGE
-  cmp #15
+  cmp #LAST_STAGE
   bne :+
   stz RESULT_REMAIN
-  lda #4
+  lda #EXIT_ENDING
   sta GAME_STAGE_EXIT
   jsl game_present_result
   rtl
 :
-  lda #2
+  lda #EXIT_REFILL
   sta GAME_STAGE_EXIT
   stz RESULT_REMAIN
-  rep #$20
-  lda #2
+  a16
+  lda #TALLY_TICKS
   sta RESULT_TICKS
-  sep #$20
+  a8
   jsr .loword(game_refill_index)
   lda f:game_refill,x
-  sta CONTACT_CONTEXT
+  sta ENERGY_MAX
   lda AIR_RESULT
   bne @done
   inx
@@ -89,19 +105,19 @@ game_stage_result:
   ldx #0
   lda AIR_PERCENT
   sec
-  sbc #60
+  sbc #PASS_BAND_FIRST
   bcc @points
 @band:
   inx
   sec
-  sbc #10
+  sbc #PASS_BAND_STEP
   bcs @band
 @points:
   lda STAGE_BOSS_PHASE
   beq :+
   txa
   clc
-  adc #6
+  adc #REPLAY_BANDS
   tax
 :
   lda f:game_result_awards,x
@@ -110,54 +126,59 @@ game_stage_result:
   jsl game_present_result
   rtl
 
-; The outcome belongs over the completed stage. Change to the carrier only
-; when the outcome has finished and the statistics/refill page begins.
+; game_result_deck: when the refill page starts after the outcome, the
+; players stand docked on the carrier deck; their controls are off
+; (PS_LEAVE) while the bonus counts. JSL.
 game_result_deck:
 .a8
 .i16
   phx
-  rep #$20
-  lda #$d500
-  sta CAMERA+$0f
-  stz CAMERA
-  sep #$20
+  a16
+  lda #DECK_SCROLL
+  sta CAMERA_BG1_SCROLL
+  stz CAMERA_BG2_SCROLL
+  a8
   ldx #0
 @deck:
-  lda PLAYER+8,x
+  lda PLAYER+PL_STATE,x
   beq @next_player
-  cmp #4
+  cmp #PS_DEATH
   beq @next_player
-  lda #12                    ; lock controls while the deck bonus counts
-  sta PLAYER+8,x
-  lda #$4a
+  lda #PS_LEAVE
+  sta PLAYER+PL_STATE,x
+  lda #DOCKED_CODE
   sta PLAYER,x
   inc
-  sta PLAYER+$20,x
-  stz PLAYER+1,x
-  stz PLAYER+$21,x
-  lda #$68
-  sta PLAYER+2,x
-  lda #$78
-  sta PLAYER+$22,x
-  lda #$50
+  sta PLAYER+PL_BODY2+SPR_CODE,x
+  stz PLAYER+SPR_ATTR,x
+  stz PLAYER+PL_BODY2+SPR_ATTR,x
+  lda #DOCK_CROSS
+  sta PLAYER+SPR_CROSS,x
+  lda #DOCK_CROSS+BODY2_CROSS
+  sta PLAYER+PL_BODY2+SPR_CROSS,x
+  lda #DOCK_ALONG
   cpx #0
   beq :+
-  lda #$40
+  lda #DECK_ALONG_P2
 :
-  sta PLAYER+3,x
-  sta PLAYER+$23,x
+  sta PLAYER+SPR_ALONG,x
+  sta PLAYER+PL_BODY2+SPR_ALONG,x
 @next_player:
-  cpx #128
+  cpx #PLAYER_SIZE
   beq @done
-  ldx #128
+  ldx #PLAYER_SIZE
   bra @deck
 @done:
   plx
   rtl
 
+; game_ship_result: AIR_PERCENT of a ship stage: 100 when the core is down,
+; else the damage of the boss parts (LARGE_TOTAL of LARGE_THRESHOLD, by
+; game_damage_percent); below STAGE_AIR_PASS it fails (AR_RETRY, or
+; AR_FAILED when the result repeats). JSR.
 game_ship_result:
-  stz AIR_RESULT
-  lda STAGE_FLAGS+$12
+  stz AIR_RESULT                ; AR_PASS
+  lda STAGE_CORE_DOWN
   bne @complete
   lda LARGE_TOTAL
   beq @percent
@@ -167,209 +188,219 @@ game_ship_result:
   lda #100
   bra @percent
 @ratio:
-  rep #$20
+  ; QUOTIENT = LARGE_TOTAL * 256 / LARGE_THRESHOLD (8 bits).
+  a16
   and #255
-  sta $d8
+  sta DIVIDEND
   lda LARGE_THRESHOLD
   and #255
-  sta $da
-  stz $d4
+  sta DIVISOR
+  stz QUOTIENT
   ldx #8
 @divide:
-  asl $d8
-  lda $d8
-  cmp $da
+  asl DIVIDEND
+  lda DIVIDEND
+  cmp DIVISOR
   bcc :+
-  sbc $da
-  sta $d8
+  sbc DIVISOR
+  sta DIVIDEND
 :
-  rol $d4
+  rol QUOTIENT
   dex
   bne @divide
-  ldx $d4
-  sep #$20
+  ldx QUOTIENT
+  a8
   lda f:game_damage_percent,x
 @percent:
   sta AIR_PERCENT
-  cmp STAGE_DIFFICULTY+3
+  cmp STAGE_AIR_PASS
   bcs @done
-  lda #1
+  lda #AR_RETRY
   sta AIR_RESULT
-  lda STAGE_FLAGS+$25
+  lda STAGE_RESULT_REPEAT
   beq @done
-  lda #3
+  lda #AR_FAILED
   sta AIR_RESULT
 @done:
   rts
 
+; game_refill_index: X = the game_refill entry of the stage. JSR.
 game_refill_index:
-  rep #$20
+  a16
   lda CAMERA_STAGE
-  and #15
-  sta $d4
+  and #STAGES-1
+  sta REFILL_STAGE
   asl
-  adc $d4
+  adc REFILL_STAGE              ; times REFILL_ENTRY_SIZE
   tax
-  sep #$20
+  a8
   rts
 
+; game_refill_tick: one update of the refill (EXIT_REFILL): every
+; TALLY_TICKS one more energy to each player in the game (up to ENERGY_MAX),
+; or 100 points for a full one, with SND_TALLY, RESULT_REMAIN times. Then
+; the continue awards, GAME_CONTINUE_LEVEL again, and the next stage. JSL.
 game_refill_tick:
-  rep #$20
+  a16
   dec RESULT_TICKS
-  sep #$20
+  a8
   beq :+
   rtl
 :
-  lda #2
+  lda #TALLY_TICKS
   sta RESULT_TICKS
   lda RESULT_REMAIN
   beq @finished
   dec RESULT_REMAIN
   jsr .loword(game_refill_index)
   lda f:game_refill,x
-  sta $d6
+  sta REFILL_ENERGY
   ldx #0
 @player:
-  lda PLAYER+8,x
+  lda PLAYER+PL_STATE,x
   beq @next
-  cmp #4
+  cmp #PS_DEATH
   beq @next
-  lda PLAYER+6,x
-  cmp $d6
+  lda PLAYER+PL_ENERGY,x
+  cmp REFILL_ENERGY
   bcs @points
-  inc PLAYER+6,x
+  inc PLAYER+PL_ENERGY,x
   phx
   jsl player_energy_hud_far
   plx
   bra @next
 @points:
-  lda #1
+  lda #1                        ; SCORE_OWNER: the player number
   cpx #0
   beq :+
   inc
 :
   sta SCORE_OWNER
-  lda #23                    ; existing 100-point digit vector
+  lda #AWARD_100
   sta SCORE_AWARD_INDEX
   phx
   jsl large_score_far
   plx
 @next:
-  cpx #128
+  cpx #PLAYER_SIZE
   beq @sound
-  ldx #128
+  ldx #PLAYER_SIZE
   bra @player
 @sound:
-  lda #$0b
+  lda #SND_TALLY
   jsl game_sound_request
   rtl
 @finished:
-  rep #$20
+  a16
   lda GAME_CONTINUE_LEVEL
   and #255
   tax
-  sep #$20
+  a8
   lda f:game_continue_awards,x
   jsr .loword(game_award_both)
   lda GAME_CONTINUE_LEVEL
-  cmp #4
+  cmp #CONTINUE_LEVEL_MAX
   bne :+
-  lda #40                    ; 40000 = two existing 20000-point vectors
+  lda #AWARD_40000
   jsr .loword(game_award_both)
 :
-  lda #2
+  lda #CONTINUE_START
   sta GAME_CONTINUE_LEVEL
   jsl special_sync_shadow
-  lda PLAYER+8
+  lda PLAYER+PL_STATE
   beq @count
-  lda PLAYER+$88
+  lda PLAYER2+PL_STATE
   beq @count
-  lda #4
+  lda #CONTINUE_LEVEL_MAX       ; two players
   sta GAME_CONTINUE_LEVEL
   jsl special_sync_shadow
 @count:
   jsl game_next_stage
   rtl
 
+; game_award_both: the award A (score_awards) to each player in the game. JSR.
 game_award_both:
   sta SCORE_AWARD_INDEX
   lda #1
   sta SCORE_OWNER
-  lda PLAYER+8
+  lda PLAYER+PL_STATE
   beq :+
   jsl large_score_far
 :
   lda #2
   sta SCORE_OWNER
-  lda PLAYER+$88
+  lda PLAYER2+PL_STATE
   beq :+
   jsl large_score_far
 :
   rts
 
+; game_result_clear: no objects, shots, boss or ship finish. JSR.
 game_result_clear:
-  rep #$20
-  ldx #$c1e
+  a16
+  ldx #POOLS_END-ENEMY_POOL-2
 @enemies:
   stz ENEMY_POOL,x
   dex
   dex
   bpl @enemies
-  ldx #18*32-2
+  ldx #SHOT_COUNT*SHOT_SIZE-2
 @shots:
   stz SHOTS,x
   dex
   dex
   bpl @shots
-  sep #$20
+  a8
   stz STAGE_BOSS_COUNT
   stz SHIP_FINISH_ACTIVE
   rts
 
+; game_stage_retry: the stage again (EXIT_RETRY): its retry event
+; (game_retry_events), the scroll stage * $800, the players enter again at
+; RETRY_ALONG, SND_RESULT_MUSIC. JSL.
 game_stage_retry:
-  rep #$20
+  a16
   lda CAMERA_STAGE
-  and #15
+  and #STAGES-1
   asl
   tax
   lda f:game_retry_events,x
-  sta CAMERA+$11
+  sta CAMERA_STAGE_OFFSET
   txa
   xba
   asl
-  asl
-  sta CAMERA+$0f
-  lda #$1000
-  sta CAMERA
-  stz CAMERA+4
-  stz CAMERA+$15
-  sep #$20
-  stz CAMERA+2
-  stz CAMERA+$13
+  asl                           ; stage * 2 * 256 * 4
+  sta CAMERA_BG1_SCROLL
+  lda #RETRY_SEA
+  sta CAMERA_BG2_SCROLL
+  stz CAMERA_BG2_GATE
+  stz CAMERA_BG1_GATE
+  a8
+  stz CAMERA_BG2_DIVISOR
+  stz CAMERA_BG1_DIVISOR
   stz GAME_STAGE_EXIT
-  stz STAGE_FLAGS+9
-  stz STAGE_FLAGS+11
+  stz STAGE_PLAYER_REQUEST
   stz GAME_DEPART_MODE
   stz STAGE_BANNER_TASK
   stz GAME_SEQUENCE
   ldx #0
 @player:
-  lda PLAYER+8,x
+  lda PLAYER+PL_STATE,x
   beq @next
-  cmp #4
+  cmp #PS_DEATH
   beq @next
-  lda #6
-  sta PLAYER+8,x
-  lda #$10
-  sta PLAYER+3,x
-  sta PLAYER+$23,x
-  stz PLAYER+$55,x
+  lda #PS_RESPAWN
+  sta PLAYER+PL_STATE,x
+  lda #RETRY_ALONG
+  sta PLAYER+SPR_ALONG,x
+  sta PLAYER+PL_BODY2+SPR_ALONG,x
+  stz PLAYER+PL_WEAPON_GATE,x
 @next:
-  cpx #128
+  cpx #PLAYER_SIZE
   beq @done
-  ldx #128
+  ldx #PLAYER_SIZE
   bra @player
 @done:
-  lda #$2d
+  lda #SND_RESULT_MUSIC
   jsl game_sound_request
   rtl

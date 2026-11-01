@@ -28,8 +28,8 @@ def empty_views(world):
 
 
 def limits_source(scene):
-    """build/card/gen/background_empty_limits.s."""
-    from card_link import generate
+    """build/secondsight/gen/background_empty_limits.s."""
+    from secondsight_link import generate
 
     # Per world page: the first and the last camera row whose view is empty.
     limits = empty_views(scene.game_world)

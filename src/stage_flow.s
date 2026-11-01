@@ -1,126 +1,110 @@
-.ifdef NATIVE_STAGE_FLOW
-; Original-US stage transitions ($690A-$6EC4). The game owns these states;
-; no arcade scheduler stack or program instruction is executed at runtime.
+; The stage flow controls: the event handlers of the US arcade fixed ROM
+; ($46DA, $690A-$6EC4, $76F7) for the air bosses, the stage music, the
+; banners, the carrier landing and takeoff, the difficulty and the secret
+; weapons. They are in the stage_controls.s table: each gets A = its value
+; (A8) and ends at stage_control_done. The arcade starts its own tasks here;
+; the port sets STAGE_BANNER_TASK and STAGE_SCROLL_TASK for its own code.
 .a8
 .i16
-.ifndef STAGE_GROUP_INDEX
-STAGE_GROUP_INDEX = $1b50
-STAGE_GROUP_REPLAY = $1b51
-.endif
-STAGE_DAMAGE_GROUPS = $1c00
-STAGE_DAMAGE_TOTAL = $1c30
-STAGE_DAMAGE_THRESHOLD = $1c42
-STAGE_SAVED_CAMERA = $1b52
-STAGE_SCROLL_TASK = $1b54
-STAGE_SCROLL_WAIT = $1b56
-STAGE_SCROLL_STEP = $1b58
-STAGE_BOSS_PHASE = $1b59        ; E551
-STAGE_SOUND_WRITE = $1b5a
-STAGE_SOUND_READ = $1b5b
-STAGE_BANNER_TASK = $1b5c
-STAGE_DEPARTURE = $1b5d         ; E458
-STAGE_INPUT_P2 = $1b5e
-STAGE_MUSIC = $1b5f
-STAGE_SOUND_QUEUE = $1b60
+BOSS_SCROLL_SKIP = $20       ; after the air boss the foreground is this far on
+SCROLL_ACCELERATE = 1        ; STAGE_SCROLL_TASK: the foreground speeds up
+SCROLL_DECELERATE = 2        ; STAGE_SCROLL_TASK: the foreground slows down
+SCROLL_STEPS = 4             ; the entries of the scroll speed tables
+; stage_weapon_secrets: the player 1 list, then the player 2 list; one
+; SECRET_SIZE entry for each of the SECRET_STAGES stages.
+SECRET_CODE = 0              ; the input (active high) that gives the weapon
+SECRET_WEAPON = 1            ; the PL_WEAPON it gives
+SECRET_SIZE = 2
+SECRET_STAGES = 16
 
+; stage_flow_init: the scroll task, the boss phase and the banner task stop.
+; JSL.
 stage_flow_init:
-  rep #$20
-  ldx #6
+  a16
+  ldx #STAGE_SCROLL_END-STAGE_SAVED_CAMERA-2
 @clear:
   stz STAGE_SAVED_CAMERA,x
   dex
   dex
   bpl @clear
+  a8
   stz STAGE_BANNER_TASK
-  stz STAGE_INPUT_P2
-  sep #$20
-  lda #255
+  lda #INPUT_NONE
   sta STAGE_INPUT_P2
   rtl
+.assert (STAGE_SCROLL_END-STAGE_SAVED_CAMERA) .mod 2 = 0, error ; word clear
 
+; stage_sound_put: request the sound A (a JSR is shorter than the JSL).
 stage_sound_put:
-.ifdef CONTINUOUS_GAME
   jsl game_sound_request
   rts
-.else
-  pha
-  rep #$20
-  lda STAGE_SOUND_WRITE
-  and #15
-  tax
-  sep #$20
-  pla
-  sta STAGE_SOUND_QUEUE,x
-  txa
-  inc
-  and #15
-  cmp STAGE_SOUND_READ
-  bne :+
-  lda #$d8                    ; queue overflow is a failure, never a lost cue
-  sta f:$050301
-  rts
-:
-  sta STAGE_SOUND_WRITE
-  rts
-.endif
 
+; stage_control_boss_camera: the air boss scene A (0-2): keep the foreground
+; scroll (plus BOSS_SCROLL_SKIP) for the end of the fight (air_boss.s), show
+; the boss scene and start its music.
 stage_control_boss_camera:
-  rep #$20
+  a16
   and #255
   asl
   tax
-  lda CAMERA+$0f
+  lda CAMERA_BG1_SCROLL
   clc
-  adc #32
+  adc #BOSS_SCROLL_SKIP
   sta STAGE_SAVED_CAMERA
   lda f:stage_boss_cameras,x
-  sta CAMERA+$0f
-  sep #$20
-  stz CAMERA+$0e
-  lda #$2a
-  cpx #4
+  sta CAMERA_BG1_SCROLL
+  a8
+  stz CAMERA_CROSS
+  lda #SND_BOSS_MUSIC
+  cpx #2*2                      ; scene 2
   bne :+
-  lda #$31
+  lda #SND_BOSS3_MUSIC
 :
   jsr .loword(stage_sound_put)
   jmp .loword(stage_control_done)
+; The CAMERA_BG1_SCROLL of each air boss scene.
 stage_boss_cameras:
   .word $f100,$e100,$f900
 
+; stage_control_boss_reset: a new boss pass: the boss part ledger, the
+; damage and the ship core state are cleared; the camera runs.
 stage_control_boss_reset:
   stz STAGE_GROUP_INDEX
-  stz STAGE_GROUP_REPLAY
-  stz STAGE_DAMAGE_TOTAL
-  stz STAGE_DAMAGE_THRESHOLD
+  stz LARGE_TOTAL
+  stz LARGE_THRESHOLD
   stz STAGE_BOSS_PHASE
   stz CAMERA_PAN_ON
-  stz CAMERA+$21
-  stz STAGE_FLAGS+17
-  stz STAGE_FLAGS+18
-  stz STAGE_FLAGS+19
-  stz STAGE_FLAGS+11
-  rep #$20
-  ldx #46
+  stz CAMERA_HOLD
+  stz STAGE_CORE_ARMED
+  stz STAGE_CORE_DOWN
+  stz STAGE_TURRETS_FALL
+  a16
+  ldx #LARGE_GROUPS_SIZE-2
 @clear:
-  stz STAGE_DAMAGE_GROUPS,x
+  stz LARGE_GROUPS,x
   dex
   dex
   bpl @clear
-  sep #$20
+  a8
   jmp .loword(stage_control_done)
 
+; stage_control_boss_replay: the boss pass starts again (arcade $6987). In
+; the replay a boss part spawns only when its LARGE_GROUPS slot is not 0:
+; the parts that live come back, and half of the destroyed parts (rounded
+; up) come back with HP_REVIVED, taken in turn from the front and the back
+; of the STAGE_GROUP_INDEX slots (1 to STAGE_GROUP_INDEX).
+HP_REVIVED = $ff
 stage_control_boss_replay:
-  ; $6987-$69C4 preserves the damaged targets and removes half the empty
-  ; slots from alternating ends. This changes the next pass, not live art.
   lda STAGE_GROUP_INDEX
   beq @reset
-  rep #$20
+  ; Y = the destroyed parts.
+  a16
   and #255
   tax
   ldy #0
-  sep #$20
+  a8
 @count:
-  lda STAGE_DAMAGE_GROUPS,x
+  lda LARGE_GROUPS,x
   bne :+
   iny
 :
@@ -128,88 +112,91 @@ stage_control_boss_replay:
   bne @count
   tya
   lsr
-  adc #0
+  adc #0                        ; half, rounded up
   beq @reset
-  sta $d0
-  ldx #1
-  rep #$20
+  sta REVIVE_COUNT
+  ldx #1                        ; the front
+  a16
   lda STAGE_GROUP_INDEX
   and #255
-  tay
-  sep #$20
+  tay                           ; the back
+  a8
 @front:
-  lda STAGE_DAMAGE_GROUPS,x
+  lda LARGE_GROUPS,x
   beq @front_empty
   inx
   bra @front
 @front_empty:
-  lda #255
-  sta STAGE_DAMAGE_GROUPS,x
+  lda #HP_REVIVED
+  sta LARGE_GROUPS,x
   inx
-  dec $d0
+  dec REVIVE_COUNT
   beq @reset
 @back:
-  lda STAGE_DAMAGE_GROUPS,y
+  lda LARGE_GROUPS,y
   beq @back_empty
   dey
   bra @back
 @back_empty:
-  lda #255
-  sta STAGE_DAMAGE_GROUPS,y
+  lda #HP_REVIVED
+  sta LARGE_GROUPS,y
   dey
-  dec $d0
+  dec REVIVE_COUNT
   bne @front
 @reset:
-  stz STAGE_GROUP_REPLAY
-  stz STAGE_DAMAGE_TOTAL
+  ; The damage, the ship core state and the camera pan are cleared.
+  stz LARGE_TOTAL
   stz STAGE_GROUP_INDEX
-  stz STAGE_DAMAGE_THRESHOLD
+  stz LARGE_THRESHOLD
   stz CAMERA_PAN_ON
-  stz STAGE_FLAGS+17
-  stz STAGE_FLAGS+18
-  stz STAGE_FLAGS+19
-  stz CAMERA+$21
-  stz STAGE_FLAGS+11
-  stz CAMERA+$1c
-  stz CAMERA+$1f
-  stz CAMERA+$0e
-  stz CAMERA+$20
-  rep #$20
-  stz CAMERA+$1d
-  sep #$20
+  stz STAGE_CORE_ARMED
+  stz STAGE_CORE_DOWN
+  stz STAGE_TURRETS_FALL
+  stz CAMERA_HOLD
+  stz CAMERA_PAN_TIME
+  stz CAMERA_PAN_DELTA
+  stz CAMERA_CROSS
+  stz CAMERA_PAN_HOLD
+  a16
+  stz CAMERA_PAN_OFFSET
+  a8
   lda #1
-  sta STAGE_BOSS_PHASE
-  sta STAGE_BANNER_TASK        ; native $2E3F continuation
+  sta STAGE_BOSS_PHASE          ; a replay pass
+  .assert SEQ_REPLAY = 1, error
+  sta STAGE_BANNER_TASK
   jmp .loword(stage_control_done)
 
+; stage_control_boss_result: the boss result (arcade $6A11): the foreground
+; stops, the boss hold starts and the result repeats on a failure.
 stage_control_boss_result:
-  lda #255
-  sta CAMERA+$15
-  sta CAMERA+$16
-  lda #$29
+  lda #SCROLL_STOP
+  sta CAMERA_BG1_GATE
+  sta CAMERA_BG1_GATE+1
+  lda #SND_BOSS_RESULT
   jsr .loword(stage_sound_put)
   lda #1
-  sta STAGE_FLAGS+$24
-  sta STAGE_FLAGS+$25
-  stz STAGE_DAMAGE_TOTAL
-  stz STAGE_DAMAGE_THRESHOLD
-  lda #2
-  sta STAGE_BANNER_TASK        ; native $324D continuation
+  sta STAGE_BOSS_HOLD
+  sta STAGE_RESULT_REPEAT
+  stz LARGE_TOTAL
+  stz LARGE_THRESHOLD
+  lda #SEQ_RESULT
+  sta STAGE_BANNER_TASK
   jmp .loword(stage_control_done)
 
+; stage_control_music: start the stage music A (an FM piece). The sounds
+; stop first; an even piece also starts SND_START_EFFECT. The start music
+; that audio_start_music_stage already plans does not start again. Then the
+; energy gauge of each player in the game is drawn again.
 stage_control_music:
   sta STAGE_MUSIC
-  stz STAGE_FLAGS+$1a
-.ifdef CONTINUOUS_GAME
   jsl audio_start_music_stage
   bcs @music_scheduled
-.endif
-  lda #0
+  lda #SND_STOP_ALL
   jsr .loword(stage_sound_put)
   lda STAGE_MUSIC
   and #1
   bne :+
-  lda #$19
+  lda #SND_START_EFFECT
   jsr .loword(stage_sound_put)
 :
   lda STAGE_MUSIC
@@ -217,62 +204,73 @@ stage_control_music:
 @music_scheduled:
   ldx #0
 @player:
-  lda PLAYER+8,x
-  beq @next
+  lda PLAYER+PL_STATE,x
+  beq @next                     ; PS_INACTIVE
   jsl player_energy_hud_far
 @next:
-  cpx #128
+  cpx #PLAYER_SIZE
   beq @done
-  ldx #128
+  ldx #PLAYER_SIZE
   bra @player
 @done:
   jmp .loword(stage_control_done)
 
+; stage_control_banner: show a banner (arcade $6B41).
 stage_control_banner:
-  lda #3
-  sta STAGE_BANNER_TASK        ; native $2778 continuation
+  lda #SEQ_BANNER
+  sta STAGE_BANNER_TASK
   jmp .loword(stage_control_done)
 
+; stage_control_accelerate: the takeoff from the carrier: PS_LANDING players
+; take off and the foreground speeds up (stage_scroll_tick).
 stage_control_accelerate:
-  lda #1
+  lda #SCROLL_ACCELERATE
   sta STAGE_SCROLL_TASK
-  lda #14
-  sta $d0
-  lda #16
+  lda #PS_LANDING
+  sta SPEED_FROM_STATE
+  lda #PS_TAKEOFF
   bra stage_speed_players
+; stage_control_decelerate: the landing on the carrier: live players land
+; and the foreground slows down, then stops (stage_scroll_tick).
 stage_control_decelerate:
-  lda #2
+  lda #SCROLL_DECELERATE
   sta STAGE_SCROLL_TASK
-  lda #2
-  sta $d0
-  lda #14
+  lda #PS_LIVE
+  sta SPEED_FROM_STATE
+  lda #PS_LANDING
+; stage_speed_players: players in SPEED_FROM_STATE go to the state A; the
+; scroll task starts at its first step.
 stage_speed_players:
-  sta $d1
+  sta SPEED_TO_STATE
   ldx #0
 @player:
-  lda PLAYER+8,x
-  cmp $d0
+  lda PLAYER+PL_STATE,x
+  cmp SPEED_FROM_STATE
   bne @next
-  lda $d1
-  sta PLAYER+8,x
+  lda SPEED_TO_STATE
+  sta PLAYER+PL_STATE,x
 @next:
-  cpx #128
+  cpx #PLAYER_SIZE
   beq @timer
-  ldx #128
+  ldx #PLAYER_SIZE
   bra @player
 @timer:
   stz STAGE_SCROLL_STEP
-  rep #$20
+  a16
   stz STAGE_SCROLL_WAIT
-  sep #$20
+  a8
   jmp .loword(stage_control_done)
 
+; stage_scroll_tick: one update of the scroll task (flight_weapons). Each of
+; the SCROLL_STEPS steps sets the CAMERA_BG1_DIVISOR of its table and waits
+; its time. At the end the takeoff leaves the foreground at full speed (1)
+; and the landing stops it. JSL.
 stage_scroll_tick:
   lda STAGE_SCROLL_TASK
   bne :+
   rtl
 :
-  rep #$20
+  a16
   lda STAGE_SCROLL_WAIT
   beq @next
   dec STAGE_SCROLL_WAIT
@@ -282,148 +280,160 @@ stage_scroll_tick:
   and #255
   asl
   tax
-  sep #$20
+  a8
   lda STAGE_SCROLL_TASK
-  cmp #1
+  cmp #SCROLL_ACCELERATE
   beq @accelerate
-  cpx #8
+  cpx #SCROLL_STEPS*2
   bcc :+
-  lda #255
-  sta CAMERA+$15
-  sta CAMERA+$16
+  lda #SCROLL_STOP
+  sta CAMERA_BG1_GATE
+  sta CAMERA_BG1_GATE+1
   bra @finished
 :
   lda f:stage_decelerate_speed,x
-  sta CAMERA+$13
-  rep #$20
+  sta CAMERA_BG1_DIVISOR
+  a16
   lda f:stage_decelerate_wait,x
   bra @wait
 @accelerate:
 .a8
-  cpx #8
+  cpx #SCROLL_STEPS*2
   bcc :+
-  lda #1
-  sta CAMERA+$13
+  lda #1                        ; a foreground step every update
+  sta CAMERA_BG1_DIVISOR
 @finished:
   stz STAGE_SCROLL_TASK
   rtl
 :
   lda f:stage_accelerate_speed,x
-  sta CAMERA+$13
-  rep #$20
+  sta CAMERA_BG1_DIVISOR
+  a16
   lda f:stage_accelerate_wait,x
 @wait:
   sta STAGE_SCROLL_WAIT
-  sep #$20
+  a8
   inc STAGE_SCROLL_STEP
   rtl
 @done:
-  sep #$20
+  a8
   rtl
+; The CAMERA_BG1_DIVISOR and the updates of each step. The divisors are
+; words so that one X reads both tables.
 stage_accelerate_speed: .word 5,4,3,2
 stage_accelerate_wait: .word $c0,$5a,$20,$18
 stage_decelerate_speed: .word 2,3,4,5
 stage_decelerate_wait: .word $0e,$20,$5a,$c0
 
+; stage_control_boss_departure: the players leave for the ship scene (arcade
+; $6BBC): the foreground stops, specials and loops stop, a banner shows and
+; the players dive.
 stage_control_boss_departure:
-  lda #255
-  sta CAMERA+$15
-  sta CAMERA+$16
+  lda #SCROLL_STOP
+  sta CAMERA_BG1_GATE
+  sta CAMERA_BG1_GATE+1
   ldx #0
 @player:
-  lda PLAYER+8,x
-  beq @next
-  stz PLAYER+$55,x
+  lda PLAYER+PL_STATE,x
+  beq @next                     ; PS_INACTIVE
+  stz PLAYER+PL_WEAPON_GATE,x
 @next:
-  cpx #128
+  cpx #PLAYER_SIZE
   beq @ready
-  ldx #128
+  ldx #PLAYER_SIZE
   bra @player
 @ready:
-  lda #1
-  sta STAGE_DEPARTURE
-  lda #3
+  lda #SEQ_BANNER
   sta STAGE_BANNER_TASK
-  lda #$10
+  lda #SND_DIVE
   jsr .loword(stage_sound_put)
-  lda #8
-  sta STAGE_FLAGS+9
+  lda #PS_DIVE
+  sta STAGE_PLAYER_REQUEST
   jmp .loword(stage_control_done)
 
+; stage_control_stage_difficulty: STAGE_BULLET_SPEED and STAGE_PLAYER_SPEED
+; come from stage_difficulty_values at STAGE_SPEED_BASE + CAMERA_STAGE.
 stage_control_stage_difficulty:
-  lda STAGE_DIFFICULTY+1
+  lda STAGE_SPEED_BASE
   clc
   adc CAMERA_STAGE
-  rep #$20
+  a16
   and #255
   tax
-  sep #$20
+  a8
   lda f:stage_difficulty_values,x
-  sta STAGE_DIFFICULTY+5
-  sta STAGE_FLAGS+10
+  sta STAGE_BULLET_SPEED
+  sta STAGE_PLAYER_SPEED
   jmp .loword(stage_control_done)
 
+; stage_control_secret_weapon: the secret weapons (arcade $6E11): a player
+; who holds the stage's secret input gets its weapon. A player without it
+; loses a LASER.
 stage_control_secret_weapon:
-  rep #$20
+  a16
   lda CAMERA_STAGE
-  and #15
-  asl
+  and #SECRET_STAGES-1
+  asl                           ; times SECRET_SIZE
   tay
-  sep #$20
+  a8
   lda INPUT_P1
   ldx #0
   jsr .loword(stage_secret_player)
-  rep #$20
+  a16
   tya
   clc
-  adc #32
+  adc #SECRET_STAGES*SECRET_SIZE ; the player 2 list
   tay
-  sep #$20
+  a8
   lda STAGE_INPUT_P2
-  ldx #128
+  ldx #PLAYER_SIZE
   jsr .loword(stage_secret_player)
   jmp .loword(stage_control_done)
+.assert SECRET_SIZE = 2, error ; the ASL above
+; stage_secret_player: A = the input of the player at X (active low), Y = its
+; stage_weapon_secrets entry. A player in the game with the secret input gets
+; the weapon: WEAPON_TIME_MAX, or WEAPON_ENDLESS for the LASER. Y is kept.
 stage_secret_player:
-  eor #255
-  sta $d0
-  lda PLAYER+8,x
-  beq @done
+  eor #$ff                      ; active high
+  sta SECRET_INPUT
+  lda PLAYER+PL_STATE,x
+  beq @done                     ; PS_INACTIVE
   phx
   tyx
-  lda f:stage_weapon_secrets,x
-  cmp $d0
+  lda f:stage_weapon_secrets+SECRET_CODE,x
+  cmp SECRET_INPUT
   beq @grant
   plx
-  lda PLAYER+$51,x
-  cmp #16
+  lda PLAYER+PL_WEAPON,x
+  cmp #WEAPON_LASER
   bne @done
-  stz PLAYER+$51,x
-  stz PLAYER+$57,x
+  stz PLAYER+PL_WEAPON,x
+  stz PLAYER+PL_WEAPON_TIME,x
   rts
 @grant:
-  lda f:stage_weapon_secrets+1,x
+  lda f:stage_weapon_secrets+SECRET_WEAPON,x
   plx
-  sta PLAYER+$51,x
-  cmp #16
+  sta PLAYER+PL_WEAPON,x
+  cmp #WEAPON_LASER
   beq @laser
-  lda #64
+  lda #WEAPON_TIME_MAX
   bra @timer
 @laser:
-  lda #255
+  lda #WEAPON_ENDLESS
 @timer:
-  sta PLAYER+$57,x
+  sta PLAYER+PL_WEAPON_TIME,x
 @done:
   rts
 
-
+; stage_control_intro: the stage intro (arcade $46DA): the foreground stops.
 stage_control_intro:
-  lda #4
+  lda #SEQ_INTRO
   sta STAGE_BANNER_TASK
-  lda #255
-  sta CAMERA+$15
-  sta CAMERA+$16
+  lda #SCROLL_STOP
+  sta CAMERA_BG1_GATE
+  sta CAMERA_BG1_GATE+1
   jmp .loword(stage_control_done)
+; stage_control_bonus: the bonus pickup (arcade $76F7, game_bonus_spawn).
 stage_control_bonus:
   jsl game_bonus_spawn
   jmp .loword(stage_control_done)
-.endif

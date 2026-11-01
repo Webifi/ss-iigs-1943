@@ -1,1849 +1,1659 @@
-; Native adaptation of Wolf3D j13.s, SHA256 1f6f09af9da69e2a3a7bc74eff66eee4c24ad832a06ed8f0a2fe715223f90aaf.
-; Source: the Wolfenstein 3D IIgs port, src/iigs/j13.s.
-; Capture, recovery, row generations, ownership and transition validation are retained.
-; 1943 schedules parameter delivery on its always-running DOC timer (4.19 ms).
-; Paired latency/cost acceptance is required before this replaces the old input.
+; The J13 keyboard: the keyboard of the ROM 00 and ROM 01 IIgs, read through
+; its microcontroller. A native port of src/iigs/j13.s of the Wolf3D IIgs port
+; (SHA-256 1f6f09af9da69e2a3a7bc74eff66eee4c24ad832a06ed8f0a2fe715223f90aaf).
+; KBD and KBDSTRB give only the last character and "a key is down", not the
+; state of each key. So a new character becomes a key identity (asciiKeys)
+; and an INPUT_J13 press event; KBDSTRB gives the release of a single key.
+; With more keys held, and only on the known microcontroller ROM
+; (j13Matrix), the code reads the switch rows of the held keys from the
+; microcontroller RAM (GLU_READ_MEMORY) to find the key that went up, and P3
+; (MCU_P3) for the live modifier keys. A row read owns the GLU: the DOC timer
+; interrupt sends its bytes (sendAlarm) and the ADB interrupt takes its reply
+; (J13Pump). The menus always read the J13 keyboard; the play reads it only
+; when the player turns it on.
 .a16
 .i16
-;;; ROM 00/01 compatibility keyboard. Menus always accept it; gameplay is
-;;; opt-in. C000/C010 provide character/any-key-down, not an 80-key bitmap.
-;;; Only a matching MCU firmware fingerprint permits partial-release reads.
-;;; Captured transitions enter the timestamped input ring with source tag 2.
-;;; DOC interrupts sample registers; DATA interrupts retire private replies.
-;;; The existing short-lived DOC alarm sends a bounded batch of parameters.
-;;; Controller service never installs a hook in the renderer.
-AKD = KBDSTRB
-MODIFIERS = KEYMODREG
-ADBDATA = DATAREG
-ADBSTATUS = KMSTATUS
-NONE = 255
+NONE = 255                   ; no key identity (j13Keys, keyAction)
+ROMVER_J13_END = 2           ; ROMVER: the J13 keyboard on ROM 00 and 01 only
+GLU_WAIT = 16384             ; sendBounded, readBounded: the most status reads
+INIT_DRAIN_MAX = 256         ; J13Init: the most old DATAREG bytes to read
+MCU_SIGNATURE1 = $18ac       ; the microcontroller ROM: SIGNATURE_PART bytes at
+MCU_SIGNATURE2 = $1a10       ; each address must be equal to matrixROM
+SIGNATURE_PART = 32
+MCU_P3 = $e8                 ; the microcontroller RAM: port 3, the modifier switches
+P3_LOW_BITS = KMOD_SHIFT|KMOD_CONTROL|KMOD_CAPS  ; P3: these bits are 0 when down
+MCU_ROW_FIRST = $31          ; the microcontroller RAM: the switch rows
+MCU_ROWS = 10
+MATRIX_KEYS = 64             ; pumpRows, pumpMasks: the identities below this
+J13_KEY_SLOTS = 3            ; j13Keys: the most held key identities
+QUEUE_ROOM = 10              ; J13Sample: the free events it needs (five
+                             ; modifiers, three releases, a release and press)
+ROW_WAKES = 2                ; deferRows: the DOC wakes before the row batch
+ROW_GAP = 7                  ; GAME_CLOCK ticks from one row batch to the next
+ROW_TIMEOUT = 239            ; GAME_CLOCK ticks: a longer batch stops the row reads
+RECOVER_WAIT = 7             ; GAME_CLOCK ticks before a lost character is read again
+SEND_BUDGET = 16             ; sendAlarm calls for P3 and up to three rows
+FINISH_TRIES = 16384         ; finishOwner: J13Pump steps before the row reads stop
+TRANSITION_TRIES = 1024      ; readTransition: ADB captures before it stops
+NOTICE_MAX = 16              ; the most ADB status bytes before a reply
+MODIFIER_KEYS = 5            ; modifierMasks, modifierKeys
+NO_FRAME = $ffff             ; rowFrame, rowArmFrame, maskGeneration: not yet
+ASCII_ESC = $1b
+; j13State: the steps of a row read.
+JS_IDLE = 0
+JS_ARMED = 1                 ; J13Pump takes the GLU when it is free
+JS_ADDRESS = 2               ; GLU_READ_MEMORY went out: next the address
+JS_HIGH = 3                  ; next the high byte of the address
+JS_REPLY = 4                 ; the reply comes in the ADB interrupt
 
-;;; Before StartKeys owns ADB. Save firmware buffering/repeat policy, then
-;;; validate the private row layout. Failure leaves only ASCII/all-up input.
-J13Init:      php
-              sei
-              rep #$30
-              phb
-              phk
-              plb
-              sep #$20
-              lda f:ROMVER
-              cmp #2
-              bcs initDone
-              lda #1
-              sta a:.loword(j13Available)
-              ldy #256
-initDrain:    lda f:ADBSTATUS
-              and #$20
-              beq initModes
-              lda f:ADBDATA
-              dey
-              bne initDrain
-              bra initDone
-initModes:    lda #$0a
-              jsr a:.loword(sendBounded)
-              bcs initDone
-              jsr a:.loword(readBounded)
-              bcs initDone
-              sta a:.loword(savedModes)
-              lda #1
-              sta a:.loword(modesValid)
-              jsr a:.loword(probeADB)
-              jsr a:.loword(bufferKeyboard)
-              ldx #0
-initSignature:phx
-              rep #$20
-              txa
-              cpx #32
-              bcs initSecond
-              clc
-              adc #$18ac
-              bra initAddress
-initSecond:   clc
-              adc #($1a10-32)
-initAddress:  tax
-              sep #$20
-              jsl readMCU
-              plx
-              bcs initDone
-              cmp f:matrixROM,x
-              bne initDone
-              inx
-              cpx #64
-              bcc initSignature
-              lda #1
-              sta a:.loword(j13Matrix)
+; J13Init: on a ROM 00/01 machine: empty the GLU, check that it answers,
+; probe the ADB keyboard, set the key buffer and stop the firmware key repeat,
+; then compare the microcontroller ROM with matrixROM: when equal, the row
+; reads work (j13Matrix). JSL; the DBR, D and widths stay.
+J13Init:
+  php
+  sei
+  ax16
+  phb
+  phk
+  plb
+  a8
+  lda f:ROMVER
+  cmp #ROMVER_J13_END
+  bcs initDone
+  lda #1
+  sta a:.loword(j13Available)
+  ldy #INIT_DRAIN_MAX
+@drain:
+  lda f:KMSTATUS
+  and #KM_DATA_FULL
+  beq @modes
+  lda f:DATAREG
+  dey
+  bne @drain
+  bra initDone
+@modes:
+  lda #GLU_READ_MODES            ; the GLU answers
+  jsr .loword(sendBounded)
+  bcs initDone
+  jsr .loword(readBounded)
+  bcs initDone
+  jsr .loword(probeADB)
+  jsr .loword(bufferKeyboard)
+  ldx #0
+@signature:
+  phx
+  a16
+  txa
+  cpx #SIGNATURE_PART
+  bcs @second
+  clc
+  adc #MCU_SIGNATURE1
+  bra @address
+@second:
+  clc
+  adc #MCU_SIGNATURE2-SIGNATURE_PART
+@address:
+  tax
+  a8
+  jsr .loword(readMCU)
+  plx
+  bcs initDone
+  cmp f:matrixROM,x
+  bne initDone
+  inx
+  cpx #2*SIGNATURE_PART
+  bcc @signature
+  lda #1
+  sta a:.loword(j13Matrix)
 initDone:
-              rep #$30
-              plb
-              plp
-              rtl
+  ax16
+  plb
+  plp
+  rtl
 
-J13Prime:     php
-              sei
-              rep #$30
-              phb
-              phk
-              plb
-              lda a:.loword(j13Available)
-              beq primeDone
-              sep #$20
-              lda #3
-              jsr a:.loword(sendBounded)
-              lda f:AKD
-              sta a:.loword(sampleAKD)
-              lda f:KBD
-              .a8
-              and #127
-              sta a:.loword(j13LastAscii)
-              rep #$20
-              .a16
-              lda #1
-              sta a:.loword(j13Mode)
-primeDone:    plb
-              plp
-              rtl
+; J13Prime: empty the key buffer, take the KBDSTRB and KBD state of now as
+; known, then J13_MENU. JSL.
+J13Prime:
+  php
+  sei
+  ax16
+  phb
+  phk
+  plb
+  lda a:.loword(j13Available)
+  beq @done
+  a8
+  lda #GLU_FLUSH_KEYS
+  jsr .loword(sendBounded)
+  lda f:KBDSTRB
+  sta a:.loword(sampleAKD)
+  lda f:KBD
+  and #<~KBD_STROBE
+  sta a:.loword(j13LastAscii)
+  a16
+  lda #J13_MENU
+  sta a:.loword(j13Mode)
+@done:
+  plb
+  plp
+  rtl
 
-;;; Mode transitions happen outside timed frames. Finish an owned command
-;;; before changing its IRQ mask. Retain observed keys between menu/game;
-;;; the UI resets its consumer, and game entry validates the held switches.
+; J13Menu: setMode with J13_MENU. setMode: j13Mode = A, outside a timed
+; frame; an owned read ends first. A change to J13_ESCAPE, or from it,
+; forgets the held keys; from J13_MENU to J13_PLAY or back they stay, and
+; J13_PLAY checks them (J13ValidateTracked). JSL; A16; all kept.
 J13Menu:
-              .a16
-              lda #1
-              bra setMode
-J13Benchmark:
-              .a16
-              lda #0
-              bra setMode
-J13Game:      lda f:j13Enabled
-              beq gameOff
-              .a16
-              lda #2
-              bra setMode
-gameOff:
-              .a16
-              lda #0
-setMode:      php
-              sei
-              rep #$30
-              pha
-              phx
-              phy
-              phb
-              phk
-              plb
-              lda a:.loword(j13Available)
-              bne modeAvailable
-              brl modeDone
-modeAvailable:
-              lda 6,s                     ; requested A below B,Y,X
-              sta a:.loword(j13NextMode)
-              jsr a:.loword(finishOwner)
-              jsr a:.loword(restoreHeldSample)
-              stz a:.loword(rowWakeBudget)
-              jsr a:.loword(removeOwnerIRQ)
-              jsr a:.loword(stopSendTimer)
-              jsr a:.loword(stopTimer)
-              lda a:.loword(j13NextMode)
-              beq modeClearHeld
-              lda a:.loword(j13Mode)
-              bne modeKeepHeld
-modeClearHeld:
-              jsr a:.loword(clearHeld)
-modeKeepHeld:
-              lda a:.loword(j13NextMode)
-              sta a:.loword(j13Mode)
-              .a16
-              cmp #2
-              bne modeDone
-              jsl J13ValidateTracked
-modeDone:     plb
-              ply
-              plx
-              pla
-              plp
-              rtl
+  .a16
+  lda #J13_MENU
+setMode:
+  php
+  sei
+  ax16
+  pha
+  phx
+  phy
+  phb
+  phk
+  plb
+  lda a:.loword(j13Available)
+  beq @done
+  lda 6,s                       ; the new mode, below B, Y and X
+  sta a:.loword(j13NextMode)
+  jsr .loword(finishOwner)
+  stz a:.loword(rowWakeBudget)
+  stz a:.loword(j13SendTimer)
+  lda a:.loword(j13NextMode)
+  beq @clear
+  lda a:.loword(j13Mode)
+  bne @keep
+@clear:
+  jsr .loword(clearHeld)
+@keep:
+  lda a:.loword(j13NextMode)
+  sta a:.loword(j13Mode)
+  cmp #J13_PLAY
+  bne @done
+  jsr .loword(J13ValidateTracked)
+@done:
+  plb
+  ply
+  plx
+  pla
+  plp
+  rtl
 
-;;; Menu recognition is once per program run, so explicitly selecting Off
-;;; with J13 is not undone by the following Escape. Saving remains explicit.
-J13Toggle:    lda f:j13Enabled
-              eor #1
-              sta f:j13Enabled
-              .a16
-              lda #2
-              sta f:j13Manual
-              .a16
-              lda #1
-              sta f:j13MenuSeen
-              rtl
-
-;;; Bit 1 remembers an explicit choice, including saved Off. An untouched
-;;; default remains eligible for automatic enable on the first menu use.
+; J13SettingsLoad: j13Enabled, j13Manual and j13MenuSeen from SET_J13. A
+; choice by hand counts as a menu use; an untouched default can still turn
+; on at the first menu use (menuUsed). JSL; A16.
 J13SettingsLoad:
-              lda f:settings + 8
-              .a16
-              and #1
-              and f:j13Available
-              sta f:j13Enabled
-              lda f:settings + 8
-              and #2
-              sta f:j13Manual
-              sta f:j13MenuSeen
-              rtl
+  .a16
+  lda f:settings+SET_J13
+  and #J13_ON
+  and f:j13Available
+  sta f:j13Enabled
+  lda f:settings+SET_J13
+  and #J13_CHOSEN
+  sta f:j13Manual
+  sta f:j13MenuSeen
+  rtl
+; J13SettingsStore: SET_J13 from j13Enabled and j13Manual. JSL; A16.
 J13SettingsStore:
-              lda f:j13Enabled
-              ora f:j13Manual
-              sep #$20
-              sta f:settings + 8
-              rep #$20
-              rtl
+  lda f:j13Enabled
+  ora f:j13Manual
+  a8
+  sta f:settings+SET_J13
+  a16
+  rtl
 
-;;; Called by PollKey in menus and attract playback. Benchmark mode only
-;;; checks Escape; it does not run gameplay capture or MCU row scans.
-J13Poll:      php
-              sei
-              rep #$30
-              phb
-              phk
-              plb
-              lda a:.loword(j13Available)
-              beq pollDone
-              lda a:.loword(j13Mode)
-              beq pollEscape
-              .a16
-              cmp #2
-              bne pollSample
-              jsr a:.loword(readControllerClock)
-pollSample:
-              jsr a:.loword(J13Sample)
-              jsr a:.loword(scheduleRow)
-              jsr a:.loword(J13Pump)
-              bra pollDone
-pollEscape:   jsr a:.loword(escapeSample)
-pollDone:     plb
-              plp
-              rtl
+; J13Poll: the J13 work of a sample in a menu or the attract (never in
+; J13_PLAY, so no row read): J13_ESCAPE looks only for ESC (escapeSample);
+; J13_MENU reads the keys. JSL.
+J13Poll:
+  php
+  sei
+  ax16
+  phb
+  phk
+  plb
+  lda a:.loword(j13Available)
+  beq @done
+  lda a:.loword(j13Mode)
+  beq @escape
+  jsr .loword(J13Sample)
+  bra @done
+@escape:
+  jsr .loword(escapeSample)
+@done:
+  plb
+  plp
+  rtl
 
-J13Frame:     php
-              sei
-              phb
-              sep #$20
-              lda #^input_native
-              pha
-              plb
-              rep #$20
-              jsl I_GetTime
-              phk
-              plb
-              sta a:.loword(controllerTime)
-              jsr a:.loword(J13Sample)
-              jsr a:.loword(ensureTimer)
-              jsr a:.loword(deferRows)
-              jsr a:.loword(serviceController)
-              lda a:.loword(controllerTime)
-              plb
-              plp
-              rtl
+; J13Frame: the J13 work of a play sample: the keys, the row batch (now or
+; after ROW_WAKES DOC wakes) and a service step. JSL; A16.
+J13Frame:
+  php
+  sei
+  phb
+  phk
+  plb
+  lda f:GAME_CLOCK
+  sta a:.loword(controllerTime)
+  jsr .loword(J13Sample)
+  jsr .loword(deferRows)
+  jsr .loword(serviceController)
+  plb
+  plp
+  rtl
+; readControllerClock: A = controllerTime = GAME_CLOCK. JSR; A16.
 readControllerClock:
-              phb
-              sep #$20
-              lda #^input_native
-              pha
-              plb
-              rep #$20
-              jsl I_GetTime
-              plb
-              sta a:.loword(controllerTime)
-              rts
-J13EscapeFrame:
-              php
-              sei
-              phb
-              phk
-              plb
-              jsr a:.loword(escapeSample)
-              plb
-              plp
-              jml I_GetTime
+  lda f:GAME_CLOCK
+  sta a:.loword(controllerTime)
+  rts
+; escapeSample: in J13_ESCAPE a new ESC character becomes an ESC press and
+; release (the menu opens); it is a menu use too. JSR; A16.
 escapeSample:
-              sep #$20
-              lda f:KBD
-              bpl escapeDone
-              pha
-              lda f:AKD
-              pla
-              cmp #$9b
-              bne escapeDone
-              rep #$20
-              jsr a:.loword(queueRoom)
-              bcc escapeDone
-              jsr a:.loword(menuUsed)
-              stz a:.loword(sampleTimed)
-              lda #$35
-              jsr a:.loword(queue)
-              lda #$b5
-              jsr a:.loword(queue)
-escapeDone:
-              rep #$20
-              rts
+  a8
+  lda f:KBD
+  bpl @done
+  pha
+  lda f:KBDSTRB
+  pla
+  cmp #ASCII_ESC|KBD_STROBE
+  bne @done
+  a16
+  jsr .loword(queueRoom)
+  bcc @done
+  jsr .loword(menuUsed)
+  stz a:.loword(sampleTimed)
+  lda #KEY_ESC
+  jsr .loword(queue)
+  lda #KEY_ESC|KEY_RELEASE
+  jsr .loword(queue)
+@done:
+  a16
+  rts
 
-;;; The DOC IRQ entry already saved every register and DBR. Private replies
-;;; belong to the DATA interrupt; sampling never issues a controller command.
+; j13Irq: the DOC timer interrupt in J13_PLAY: the keys, and at the last of
+; the ROW_WAKES wakes of deferRows the row batch. The interrupt entry saved
+; all the registers and the DBR. JSR; A16.
 j13Irq:
-              rep #$30
-              jsr a:.loword(J13Sample)
-              lda a:.loword(rowWakeBudget)
-              beq irqCaptureDone
-              dec a:.loword(rowWakeBudget)
-              bne irqCaptureDone
-              jsr a:.loword(scheduleRow)
-              jsr a:.loword(J13Pump)
-irqCaptureDone:
-              rts
+  jsr .loword(J13Sample)
+  lda a:.loword(rowWakeBudget)
+  beq @done
+  dec a:.loword(rowWakeBudget)
+  bne @done
+  jsr .loword(scheduleRow)
+  jsr .loword(J13Pump)
+@done:
+  rts
 
-;;; Caller masks IRQs, DBR=code bank, A/X/Y16. Reserve room before touching C010.
-;;; At most five modifiers, three releases and a repress pair can be queued.
+; J13Sample: one sample of the J13 keyboard (interrupts off, DBR = this
+; bank). It needs QUEUE_ROOM free events, else it waits for the next sample.
+; A new character: the modifier changes, then the press of its identity. No
+; new character: the modifier changes from KEYMODREG, and when KBDSTRB shows
+; no key down the release of the held identities. JSR; A16.
 J13Sample:
-              .a16
-              lda f:inputHead
-              cmp f:inputTail
-              beq sampleRoom
-              jsr a:.loword(queueRoom)
-              bcs sampleRoom
-              rts
-sampleRoom:   inc a:.loword(j13Samples)
-              sep #$20
-              lda f:KBD
-              ; Recover a character whose strobe raced the previous C010.
-              bmi sampleFresh
-              cmp a:.loword(j13LastAscii)
-              beq sampleUnchanged
-              .a8
-              ora #128
-sampleFresh:  sta a:.loword(sampleAscii)
-              stz a:.loword(sampleRecover)
-              .a8
-              and #127
-              sta a:.loword(j13LastAscii)
-              ; Snapshot character modifiers before acknowledging C010.
-              lda f:MODIFIERS
-              sta a:.loword(sampleMods)
+  .a16
+  lda f:inputHead
+  cmp f:inputTail
+  beq @room
+  jsr .loword(queueRoom)
+  bcs @room
+  rts
+@room:
+  a8
+  lda f:KBD
+  ; A character whose strobe a KBDSTRB read cleared too soon: KBD keeps it.
+  bmi sampleFresh
+  cmp a:.loword(j13LastAscii)
+  beq sampleSlowHeld
+  .a8
+  ora #KBD_STROBE
+sampleFresh:
+  sta a:.loword(sampleAscii)
+  stz a:.loword(sampleRecover)
+  .a8
+  and #<~KBD_STROBE
+  sta a:.loword(j13LastAscii)
+  ; The modifiers of the character, before the KBDSTRB read clears it.
+  lda f:KEYMODREG
+  sta a:.loword(sampleMods)
 sampleMetadata:
-              lda f:AKD
-              sta a:.loword(sampleAKD)
-              jsr a:.loword(readModifiers)
-              stz a:.loword(sampleTimed)
-              jmp a:.loword(sampleModifiers)
-sampleUnchanged:
-              bra sampleSlowHeld
-;;; P3 enabled this path only after recovery finished. Fresh characters still
-;;; take sampleFresh. All-up and mode changes restore the general sampler.
-sampleSteadyHeld:
-              lda f:AKD
-              bpl sampleSteadyUp
-              rep #$20
-              rts
-sampleSteadyUp:
-              .a8
-              sta a:.loword(sampleAKD)
-              lda #(sampleSlowHeld-sampleUnchanged-2)
-              sta a:.loword(sampleUnchanged+1)
-              jmp a:.loword(sampleIdleModifiers)
+  lda f:KBDSTRB
+  sta a:.loword(sampleAKD)
+  jsr .loword(readModifiers)
+  stz a:.loword(sampleTimed)
+  jmp .loword(sampleModifiers)
 sampleSlowHeld:
-              .a8
-              sta a:.loword(sampleAscii)
-              ldx a:.loword(sampleAKD)
-              lda f:AKD
-              sta a:.loword(sampleAKD)
-              bmi sampleDown
-              bra sampleUpCheck
-sampleDown:
-              txa
-              bmi sampleDownKnown
-              lda #1
-              sta a:.loword(sampleRecover)
-              rep #$20
-              jsr a:.loword(readControllerClock)
-              clc
-              adc #7
-              sta a:.loword(recoverTime)
-              sep #$20
-              bra sampleHeld
+  ; The same character: is a key still down (KBDSTRB)?
+  .a8
+  sta a:.loword(sampleAscii)
+  ldx a:.loword(sampleAKD)
+  lda f:KBDSTRB
+  sta a:.loword(sampleAKD)
+  bpl sampleUpCheck
+  txa
+  bmi sampleDownKnown
+  ; Down with no new character: the strobe can have raced a KBDSTRB read.
+  lda #1
+  sta a:.loword(sampleRecover)
+  a16
+  jsr .loword(readControllerClock)
+  clc
+  adc #RECOVER_WAIT
+  sta a:.loword(recoverTime)
+  a8
+  bra sampleHeld
 sampleDownKnown:
-              ldx a:.loword(sampleRecover)
-              bne sampleRecovery
+  ldx a:.loword(sampleRecover)
+  bne sampleRecovery
 sampleHeld:
-              ; With an ordinary key held, P3 replies already publish live
-              ; modifiers. No new character means no translation work here.
-              rep #$20
-              lda a:.loword(j13Mode)
-              .a16
-              cmp #2
-              bne sampleLive8
-              lda a:.loword(physicalValid)
-              beq sampleLive8
-              rts
-sampleLive8:
-              sep #$20
+  ; With a key held, the P3 reads give the live modifiers; no new character
+  ; means no work here.
+  a16
+  lda a:.loword(j13Mode)
+  cmp #J13_PLAY
+  bne @live
+  lda a:.loword(physicalValid)
+  beq @live
+  rts
+@live:
+  a8
 sampleIdleModifiers:
-              .a8
-              lda f:MODIFIERS
-              ; AKD can clear before C025 stops describing the old character.
-              ; Bit 5 identifies an independent modifier-latch update.
-              bit #$20
-              bne sampleIdleReady
-              rep #$20
-              jmp a:.loword(sampleRelease)
-sampleIdleReady:
-              stz a:.loword(physicalValid)
-              sta a:.loword(sampleMods)
-              jsr a:.loword(readModifiers)
-              cmp a:.loword(j13Mods)
-              beq sampleNoModifierChange
-              stz a:.loword(sampleTimed)
-              jsr a:.loword(updateModifiers)
-sampleNoModifierChange:
-              jmp a:.loword(sampleRelease)
+  .a8
+  lda f:KEYMODREG
+  ; KBDSTRB can clear before KEYMODREG stops showing the old character;
+  ; KMOD_LATCH marks a change of the modifiers alone.
+  bit #KMOD_LATCH
+  bne @latch
+  a16
+  jmp .loword(sampleRelease)
+@latch:
+  stz a:.loword(physicalValid)
+  sta a:.loword(sampleMods)
+  jsr .loword(readModifiers)
+  cmp a:.loword(j13Mods)
+  beq @same
+  stz a:.loword(sampleTimed)
+  jsr .loword(updateModifiers)
+@same:
+  jmp .loword(sampleRelease)
 sampleUpCheck:
-              ldx a:.loword(sampleRecover)
-              beq sampleIdleModifiers
+  ldx a:.loword(sampleRecover)
+  beq sampleIdleModifiers
 sampleRecovery:
-              ; AKD can rise before the MCU writes ASCII. A C010 read in
-              ; that interval can clear the later strobe even when the new
-              ; character equals the last one. Wait for character modifiers,
-              ; or retain the completed tap when AKD has already fallen.
-              ; Menu polls can run before the MCU finishes publishing the
-              ; character. Fresh strobes still bypass this recovery-only
-              ; delay; two clock edges guarantee at least one full tic.
-              rep #$20
-              jsr a:.loword(readControllerClock)
-              sec
-              sbc a:.loword(recoverTime)
-              sep #$20
-              bmi sampleHeld
-              lda f:MODIFIERS
-              bit #$20
-              beq sampleRecovered
-              bit a:.loword(sampleAKD)
-              bmi sampleHeld
-sampleRecovered:
-              ; Metadata must precede the recovered character read: the MCU
-              ; may publish ASCII while the earlier C010 is being sampled.
-              and #$f7
-              sta a:.loword(sampleMods)
-              lda f:KBD
-              .a8
-              ora #128
-              sta a:.loword(sampleAscii)
-              .a8
-              and #127
-              sta a:.loword(j13LastAscii)
-              stz a:.loword(sampleRecover)
-              jmp a:.loword(sampleMetadata)
+  ; KBDSTRB can rise before the microcontroller writes the character; a
+  ; KBDSTRB read then can clear the later strobe, also for the same
+  ; character. After RECOVER_WAIT, read the character when KEYMODREG shows
+  ; it (KMOD_LATCH 0), or when the key is up again (the tap is complete).
+  a16
+  jsr .loword(readControllerClock)
+  sec
+  sbc a:.loword(recoverTime)
+  a8
+  bmi sampleHeld
+  lda f:KEYMODREG
+  bit #KMOD_LATCH
+  beq @recovered
+  bit a:.loword(sampleAKD)
+  bmi sampleHeld
+@recovered:
+  ; The modifiers first: the microcontroller can write the character
+  ; during the KBDSTRB read before.
+  and #<~KMOD_REPEAT
+  sta a:.loword(sampleMods)
+  lda f:KBD
+  .a8
+  ora #KBD_STROBE
+  sta a:.loword(sampleAscii)
+  .a8
+  and #<~KBD_STROBE
+  sta a:.loword(j13LastAscii)
+  stz a:.loword(sampleRecover)
+  jmp .loword(sampleMetadata)
+; readModifiers: A = nextMods = the KMOD_KEYS bits of sampleMods, with the
+; Apple keys from BUTN0 and BUTN1. JSR; A8 in, A16 out.
 readModifiers:
-              lda a:.loword(sampleMods)
-              .a8
-              and #$c7
-              sta a:.loword(nextMods)
-              lda f:BUTN0
-              bpl sampleApple1
-              lda a:.loword(nextMods)
-              .a8
-              ora #128
-              sta a:.loword(nextMods)
-sampleApple1: lda f:BUTN1
-              bpl sampleModifierBits
-              lda a:.loword(nextMods)
-              ora #64
-              sta a:.loword(nextMods)
-sampleModifierBits:
-              rep #$20
-              lda a:.loword(nextMods)
-              rts
+  lda a:.loword(sampleMods)
+  .a8
+  and #KMOD_KEYS
+  sta a:.loword(nextMods)
+  lda f:BUTN0
+  bpl @option
+  lda a:.loword(nextMods)
+  .a8
+  ora #KMOD_COMMAND
+  sta a:.loword(nextMods)
+@option:
+  lda f:BUTN1
+  bpl @done
+  lda a:.loword(nextMods)
+  ora #KMOD_OPTION
+  sta a:.loword(nextMods)
+@done:
+  a16
+  lda a:.loword(nextMods)
+  rts
+; sampleModifiers: a new character. In J13_PLAY a firmware repeat
+; (KMOD_REPEAT) keeps the modifiers of P3, or of before: KEYMODREG can be
+; wrong then. Then the modifier changes, and the character.
 sampleModifiers:
-              lda a:.loword(j13Mode)
-              .a16
-              cmp #2
-              bne sampleUpdateMods
-              ; A fresh character is newer than the cached P3 reply. Repeat
-              ; modifier bits can be mistranslated, so retain live state there.
-              lda a:.loword(sampleMods)
-              bit #8
-              beq sampleUpdateMods
-              lda a:.loword(physicalValid)
-              beq sampleRepeatMods
-              lda a:.loword(physicalMods)
-              bra sampleKeepMods
-sampleRepeatMods:
-              lda a:.loword(j13Mods)
-sampleKeepMods:
-              sta a:.loword(nextMods)
-sampleUpdateMods:
-              jsr a:.loword(updateModifiers)
-              bra sampleCharacter
+  lda a:.loword(j13Mode)
+  .a16
+  cmp #J13_PLAY
+  bne @update
+  lda a:.loword(sampleMods)
+  bit #KMOD_REPEAT
+  beq @update
+  lda a:.loword(physicalValid)
+  beq @before
+  lda a:.loword(physicalMods)
+  bra @keep
+@before:
+  lda a:.loword(j13Mods)
+@keep:
+  sta a:.loword(nextMods)
+@update:
+  jsr .loword(updateModifiers)
+  bra sampleCharacter
+; updateModifiers: an event for each modifier key whose bit is not the same
+; in j13Mods and nextMods; then j13Mods = nextMods. JSR; A16.
 updateModifiers:
-              lda a:.loword(nextMods)
-              cmp a:.loword(j13Mods)
-              bne modifiersChanged
-              rts
-modifiersChanged:
-              ldx #0
-sampleModifier:
-              lda a:.loword(nextMods)
-              eor a:.loword(j13Mods)
-              and f:modifierMasks,x
-              and #255
-              beq sampleNextModifier
-              lda a:.loword(nextMods)
-              and f:modifierMasks,x
-              and #255
-              beq sampleModifierUp
-              lda f:modifierKeys,x
-              and #255
-              bra sampleModifierQueue
-sampleModifierUp:
-              lda f:modifierKeys,x
-              and #255
-              ora #128
-sampleModifierQueue:
-              jsr a:.loword(queue)
-sampleNextModifier:
-              inx
-              cpx #5
-              bcc sampleModifier
-              lda a:.loword(nextMods)
-              sta a:.loword(j13Mods)
-              rts
+  lda a:.loword(nextMods)
+  cmp a:.loword(j13Mods)
+  bne @changed
+  rts
+@changed:
+  ldx #0
+@modifier:
+  lda a:.loword(nextMods)
+  eor a:.loword(j13Mods)
+  and f:modifierMasks,x
+  and #255
+  beq @next
+  lda a:.loword(nextMods)
+  and f:modifierMasks,x
+  and #255
+  beq @up
+  lda f:modifierKeys,x
+  and #255
+  bra @queue
+@up:
+  lda f:modifierKeys,x
+  and #255
+  ora #KEY_RELEASE
+@queue:
+  jsr .loword(queue)
+@next:
+  inx
+  cpx #MODIFIER_KEYS
+  bcc @modifier
+  lda a:.loword(nextMods)
+  sta a:.loword(j13Mods)
+  rts
+; sampleCharacter: a new character that is not a firmware repeat: the press
+; of its identity (asciiKeys). In J13_MENU the first key is a menu use
+; (in the demo only ESC is), and the held keys are checked first. Then
+; sampleRelease: no key down (KBDSTRB) releases the held identities.
 sampleCharacter:
-              lda a:.loword(sampleAscii)
-              bit #128
-              beq sampleRelease
-              lda a:.loword(sampleMods)
-              bit #8                       ; firmware repeat is not a fresh down
-              bne sampleRelease
-              lda a:.loword(sampleAscii)
-              and #127
-              tax
-              lda f:asciiKeys,x
-              and #255
-              cmp #NONE
-              beq sampleRelease
-              sta a:.loword(newKey)
-              lda a:.loword(j13Mode)
-              .a16
-              cmp #1
-              bne sampleOrdinary
-              lda a:.loword(j13MenuSeen)
-              bne sampleMenuOrdinary
-              ; Ignored title/demo keys do not opt gameplay in.
-              lda f:$001520
-              bne sampleAttractKey
-              lda f:menuMode
-              and #255
-              cmp #13
-              bne sampleMenuUsed
-sampleAttractKey:
-              lda a:.loword(newKey)
-              cmp #$35
-              bne sampleMenuOrdinary
+  lda a:.loword(sampleAscii)
+  bit #KBD_STROBE
+  beq sampleRelease
+  lda a:.loword(sampleMods)
+  bit #KMOD_REPEAT              ; a firmware repeat is not a new press
+  bne sampleRelease
+  lda a:.loword(sampleAscii)
+  and #<~KBD_STROBE
+  tax
+  lda f:asciiKeys,x
+  and #255
+  cmp #NONE
+  beq sampleRelease
+  sta a:.loword(newKey)
+  lda a:.loword(j13Mode)
+  .a16
+  cmp #J13_MENU
+  bne sampleOrdinary
+  lda a:.loword(j13MenuSeen)
+  bne sampleMenuOrdinary
+  lda f:CAB_DEMO
+  beq sampleMenuUsed
+  lda a:.loword(newKey)
+  cmp #KEY_ESC
+  bne sampleMenuOrdinary
 sampleMenuUsed:
-              jsr a:.loword(menuUsed)
+  jsr .loword(menuUsed)
 sampleMenuOrdinary:
-              lda #1
-              sta a:.loword(validateIncoming)
-              jsl J13ValidateTracked
-              stz a:.loword(validateIncoming)
+  lda #1
+  sta a:.loword(validateIncoming)
+  jsr .loword(J13ValidateTracked)
+  stz a:.loword(validateIncoming)
 sampleOrdinary:
-              jsr a:.loword(ordinaryDown)
-sampleRelease:lda a:.loword(sampleAKD)
-              bit #128
-              bne sampleDone
-              lda a:.loword(knownCount)
-              beq sampleDone
-              stz a:.loword(sampleTimed)
-              jsr a:.loword(releaseOrdinary)
-sampleDone:   rts
+  jsr .loword(ordinaryDown)
+sampleRelease:
+  lda a:.loword(sampleAKD)
+  bit #KBD_STROBE               ; KBDSTRB: a key is down
+  bne @done
+  lda a:.loword(knownCount)
+  beq @done
+  stz a:.loword(sampleTimed)
+  jsr .loword(releaseOrdinary)
+@done:
+  rts
 
-menuUsed:     lda a:.loword(j13MenuSeen)
-              bne menuUseDone
-              .a16
-              lda #1
-              sta a:.loword(j13MenuSeen)
-              sta a:.loword(j13Enabled)
-menuUseDone:  rts
+; menuUsed: the first menu use turns J13 play on (j13MenuSeen). JSR; A16.
+menuUsed:
+  lda a:.loword(j13MenuSeen)
+  bne @done
+  .a16
+  lda #1
+  sta a:.loword(j13MenuSeen)
+  sta a:.loword(j13Enabled)     ; J13_ON
+@done:
+  rts
 
-ordinaryDown: inc a:.loword(j13Generation)
-              ldx #0
-ordinaryFind: lda a:.loword(j13Keys),x
-              cmp a:.loword(newKey)
-              beq ordinaryRepress
-              inx
-              inx
-              cpx #6
-              bcc ordinaryFind
-              lda a:.loword(j13Matrix)
-              beq ordinarySingle
-              ldx a:.loword(newKey)
-              cpx #64
-              bcs ordinarySingle
-              lda f:pumpMasks,x
-              and #255
-              beq ordinarySingle
-              ldx #0
-ordinarySlot: lda a:.loword(j13Keys),x
-              cmp #NONE
-              beq ordinaryInstall
-              inx
-              inx
-              cpx #6
-              bcc ordinarySlot
-              rts                            ; three ordinary identities maximum
-ordinarySingle:
-              jsr a:.loword(releaseOrdinary)
-              ldx #0
-ordinaryInstall:
-              lda a:.loword(newKey)
-              sta a:.loword(j13Keys),x
-              inc a:.loword(knownCount)
-              jmp a:.loword(queue)
-ordinaryRepress:
-              ora #128
-              jsr a:.loword(queue)
-              lda a:.loword(newKey)
-              jmp a:.loword(queue)
+; ordinaryDown: newKey is pressed. Held already: a release and a press. On
+; the known ROM a key with a row takes a free slot of j13Keys (no slot free:
+; no event); else it releases all the held keys and takes the first slot.
+; JSR; A16.
+ordinaryDown:
+  inc a:.loword(j13Generation)
+  ldx #0
+@find:
+  lda a:.loword(j13Keys),x
+  cmp a:.loword(newKey)
+  beq @repress
+  inx
+  inx
+  cpx #2*J13_KEY_SLOTS
+  bcc @find
+  lda a:.loword(j13Matrix)
+  beq @single
+  ldx a:.loword(newKey)
+  cpx #MATRIX_KEYS
+  bcs @single
+  lda f:pumpMasks,x
+  and #255
+  beq @single
+  ldx #0
+@slot:
+  lda a:.loword(j13Keys),x
+  cmp #NONE
+  beq @install
+  inx
+  inx
+  cpx #2*J13_KEY_SLOTS
+  bcc @slot
+  rts
+@single:
+  jsr .loword(releaseOrdinary)
+  ldx #0
+@install:
+  lda a:.loword(newKey)
+  sta a:.loword(j13Keys),x
+  inc a:.loword(knownCount)
+  jmp .loword(queue)
+@repress:
+  ora #KEY_RELEASE
+  jsr .loword(queue)
+  lda a:.loword(newKey)
+  jmp .loword(queue)
+; releaseOrdinary: release all the held identities. JSR; A16.
 releaseOrdinary:
-              jsr a:.loword(restoreHeldSample)
-              inc a:.loword(j13Generation)
-              ldx #0
-releaseKey:   lda a:.loword(j13Keys),x
-              cmp #NONE
-              beq releaseNext
-              ora #128
-              jsr a:.loword(queue)
-              lda #NONE
-              sta a:.loword(j13Keys),x
-releaseNext:  inx
-              inx
-              cpx #6
-              bcc releaseKey
-              stz a:.loword(knownCount)
-              rts
+  inc a:.loword(j13Generation)
+  ldx #0
+@key:
+  lda a:.loword(j13Keys),x
+  cmp #NONE
+  beq @next
+  ora #KEY_RELEASE
+  jsr .loword(queue)
+  lda #NONE
+  sta a:.loword(j13Keys),x
+@next:
+  inx
+  inx
+  cpx #2*J13_KEY_SLOTS
+  bcc @key
+  stz a:.loword(knownCount)
+  rts
 
-queueRoom:    lda f:inputTail
-              sec
-              sbc f:inputHead
-              dec a
-              and #1023
-              cmp #(10*8)
-              rts
-;;; Preserve X/Y. Timestamp once for all transitions from one sample.
-queue:        phx
-              phy
-              pha
-              lda a:.loword(sampleTimed)
-              bne queueTimed
-              phb
-              sep #$20
-              lda #^input_native
-              pha
-              plb
-              rep #$20
-              jsl I_GetTime
-              plb
-              sta a:.loword(sampleTime)
-              inc a:.loword(sampleTimed)
-queueTimed:   lda f:inputHead
-              tax
-              lda a:.loword(sampleTime)
-              sta f:inputRing,x
-              .a16
-              lda #2
-              sta f:inputRing+2,x
-              pla
-              sta f:inputRing+4,x
-              .a16
-              lda #0
-              sta f:inputRing+6,x
-              txa
-              clc
-              adc #8
-              and #1023
-              sta f:inputHead
-              inc a:.loword(j13Events)
-              ply
-              plx
-              rts
+; queueRoom: carry 1 when inputRing has QUEUE_ROOM free events. JSR; A16.
+queueRoom:
+  lda f:inputTail
+  sec
+  sbc f:inputHead
+  dec a
+  and #INPUT_RING_SIZE-1
+  cmp #QUEUE_ROOM*INPUT_EVENT_SIZE
+  rts
+; queue: put the J13 key byte A in inputRing (queueRoom gave the room). The
+; events of one sample get one time (sampleTimed). JSR; A16; X and Y kept.
+queue:
+  phx
+  phy
+  pha
+  lda a:.loword(sampleTimed)
+  bne @timed
+  lda f:GAME_CLOCK
+  sta a:.loword(sampleTime)
+  inc a:.loword(sampleTimed)
+@timed:
+  lda f:inputHead
+  tax
+  lda a:.loword(sampleTime)
+  sta f:inputRing+INPUT_TIME,x
+  .a16
+  lda #INPUT_J13
+  sta f:inputRing+INPUT_TYPE,x
+  pla
+  sta f:inputRing+INPUT_VALUE,x
+  .a16
+  lda #0
+  sta f:inputRing+INPUT_AUX,x
+  txa
+  clc
+  adc #INPUT_EVENT_SIZE
+  and #INPUT_RING_SIZE-1
+  sta f:inputHead
+  ply
+  plx
+  rts
 
-;;; One batch per frame, at least two tics apart: P3 and every distinct held
-;;; row. One ordinary key needs only P3 because AKD supplies its release.
-;;; With overlapping keys, two existing music wakes move the batch away
-;;; from the frame boundary. The stopped-music sampler supplies the same
-;;; wakes; a sparse-wake frame falls back at the next foreground poll.
-deferRows:    lda a:.loword(knownCount)
-              .a16
-              cmp #2
-              bcc deferImmediate
-              lda f:$000068
-              cmp a:.loword(rowArmFrame)
-              beq deferDone
-              sta a:.loword(rowArmFrame)
-              lda a:.loword(rowWakeBudget)
-              bne deferImmediate
-              .a16
-              lda #2
-              sta a:.loword(rowWakeBudget)
-deferDone:    rts
-deferImmediate:
-              stz a:.loword(rowWakeBudget)
-              jmp a:.loword(scheduleRow)
+; deferRows: with two or more held keys the row batch comes once a frame,
+; at the last of ROW_WAKES DOC wakes (away from the frame edge: j13Irq). With
+; fewer keys (P3 only: KBDSTRB gives the release of one key), or when the
+; wakes did not come, it comes now. JSR; A16.
+deferRows:
+  lda a:.loword(knownCount)
+  .a16
+  cmp #2
+  bcc @now
+  lda f:GAME_UPDATES
+  cmp a:.loword(rowArmFrame)
+  beq @done
+  sta a:.loword(rowArmFrame)
+  lda a:.loword(rowWakeBudget)
+  bne @now
+  .a16
+  lda #ROW_WAKES
+  sta a:.loword(rowWakeBudget)
+@done:
+  rts
+@now:
+  stz a:.loword(rowWakeBudget)
+  jmp .loword(scheduleRow)
 
-scheduleRow:  lda f:$000068
-              cmp a:.loword(rowFrame)
-              beq scheduleReturn
-              lda a:.loword(j13Mode)
-              .a16
-              cmp #2
-              bne scheduleReturn
-              lda a:.loword(j13State)
-              bne scheduleReturn
-              lda a:.loword(j13Matrix)
-              beq scheduleReturn
-              lda a:.loword(knownCount)
-              beq scheduleReturn
-              lda f:$000068
-              sta a:.loword(rowFrame)
-              lda a:.loword(controllerTime)
-              sec
-              sbc a:.loword(lastRowTime)
-              cmp #7
-              bcs scheduleDue
-scheduleReturn:rts
-scheduleDue:  lda a:.loword(controllerTime)
-              sta a:.loword(lastRowTime)
-              jsr a:.loword(cacheRows)
-              lda a:.loword(rowListSize)
-              lsr a
-              sta a:.loword(rowsLeft)
-              lda #$e8
-              sta a:.loword(rowAddress)
-              bra scheduleReady
-scheduleHeldRow:
-              lda a:.loword(knownCount)
-              .a16
-              cmp #2
-              bcs scheduleTwoKeys
-              rts
+; scheduleRow: in J13_PLAY on the known ROM with a key held, once a frame
+; and ROW_GAP ticks after the last batch: arm a batch (JS_ARMED) that reads
+; P3, then the rows. scheduleTwoKeys: arm the read of the next row of
+; rowList. JSR; A16.
+scheduleRow:
+  lda f:GAME_UPDATES
+  cmp a:.loword(rowFrame)
+  beq @return
+  lda a:.loword(j13Mode)
+  .a16
+  cmp #J13_PLAY
+  bne @return
+  lda a:.loword(j13State)
+  bne @return
+  lda a:.loword(j13Matrix)
+  beq @return
+  lda a:.loword(knownCount)
+  beq @return
+  lda f:GAME_UPDATES
+  sta a:.loword(rowFrame)
+  lda a:.loword(controllerTime)
+  sec
+  sbc a:.loword(lastRowTime)
+  cmp #ROW_GAP
+  bcs @due
+@return:
+  rts
+@due:
+  lda a:.loword(controllerTime)
+  sta a:.loword(lastRowTime)
+  jsr .loword(cacheRows)
+  lda a:.loword(rowListSize)
+  lsr a
+  sta a:.loword(rowsLeft)
+  lda #MCU_P3
+  sta a:.loword(rowAddress)
+  bra scheduleReady
 scheduleTwoKeys:
-              jsr a:.loword(cacheRows)
-              ldx a:.loword(rowNext)
-              inx
-              inx
-              cpx a:.loword(rowListSize)
-              bcc scheduleIndex
-              ldx #0
-scheduleIndex:stx a:.loword(rowNext)
-              lda a:.loword(rowList),x
-              sep #$20
-              sta a:.loword(rowAddress)
-              xba
-              sta a:.loword(rowExpected)
-              rep #$20
-scheduleReady:lda a:.loword(lastRowTime)
-              clc
-              adc #239
-              sta a:.loword(rowDeadline)
-              .a16
-              lda #1
-              sta a:.loword(j13State)
-scheduleDone: rts
+  jsr .loword(cacheRows)
+  ldx a:.loword(rowNext)
+  inx
+  inx
+  cpx a:.loword(rowListSize)
+  bcc @index
+  ldx #0
+@index:
+  stx a:.loword(rowNext)
+  lda a:.loword(rowList),x
+  a8
+  sta a:.loword(rowAddress)
+  xba
+  sta a:.loword(rowExpected)
+  a16
+scheduleReady:
+  lda a:.loword(lastRowTime)
+  clc
+  adc #ROW_TIMEOUT
+  sta a:.loword(rowDeadline)
+  .a16
+  lda #JS_ARMED
+  sta a:.loword(j13State)
+  rts
 
-restoreHeldSample:
-              lda #($80 | ((sampleSlowHeld-sampleUnchanged-2) << 8))
-              sta a:.loword(sampleUnchanged)
-              rts
+; cacheRows: rowMasks and rowList for the held keys, when they changed. JSR;
+; A16.
+cacheRows:
+  lda a:.loword(j13Generation)
+  cmp a:.loword(maskGeneration)
+  beq @done
+  jsr .loword(J13CacheRows)
+@done:
+  rts
 
-cacheRows:    lda a:.loword(j13Generation)
-              cmp a:.loword(maskGeneration)
-              beq cacheRowsDone
-              jsl J13CacheRows
-cacheRowsDone:rts
-
-;;; One status sample per call. Pending ADB Talk, DATA or mouse wins before
-;;; acquisition. While owned, only DATA IRQ/parsing is masked; mouse runs.
+; J13Pump: one step of a row read (from the samples, sendAlarm and the ADB
+; interrupt). JS_ARMED: take the GLU when the ADB capture has no work (no
+; talk, no byte, no command): the ADB data interrupt off (the mouse one
+; stays), CaptureInput off DATAREG, GLU_READ_MEMORY out. Owned: a byte in
+; DATAREG goes to pumpData; else the next address byte goes out when the
+; GLU is free. JSR; A16.
 J13Pump:
-              .a16
-              lda a:.loword(j13State)
-              bne pumpActive
-              rts
-pumpActive:
-              sep #$20
-              lda f:ADBSTATUS
-              sta a:.loword(rowStatus)
-              lda a:.loword(j13State)
-              cmp #1
-              bne pumpOwned
-              lda f:keyTalk
-              ora f:keyPending
-              beq j13Long3
-              brl pumpDone
-j13Long3:
-              lda a:.loword(rowStatus)
-              and #$a1
-              beq j13Long4
-              brl pumpDone
-j13Long4:
-              lda a:.loword(rowStatus)
-              and #$50
-              sta a:.loword(rowEnables)
-              lda a:.loword(rowStatus)
-              and #$40
-              sta f:ADBSTATUS
-              lda #0
-              sta f:captureStatusMask+1
-              lda #1
-              sta a:.loword(j13Owner)
-              sta f:keyTalk
-              jsr a:.loword(installOwnerIRQ)
-              rep #$20
-              jsr a:.loword(startSendTimer)
-              sep #$20
-pumpCommand:  lda #9
-              sta f:ADBDATA
-              ; $C05F is a Second Sight event; never inject it into DMA1.
-              lda #2
-              sta a:.loword(j13State)
-              rep #$20
-              lda a:.loword(j13Generation)
-              sta a:.loword(rowGeneration)
-              rts
+  .a16
+  lda a:.loword(j13State)
+  bne @active
+  rts
+@active:
+  a8
+  lda f:KMSTATUS
+  sta a:.loword(rowStatus)
+  lda a:.loword(j13State)
+  cmp #JS_ARMED
+  bne pumpOwned
+  lda f:keyTalk
+  ora f:keyPending
+  beq @free
+  brl pumpDone
+@free:
+  lda a:.loword(rowStatus)
+  and #KM_MOUSE_FULL|KM_DATA_FULL|KM_COMMAND_FULL
+  beq @take
+  brl pumpDone
+@take:
+  lda a:.loword(rowStatus)
+  and #KM_MOUSE_IRQ|KM_DATA_IRQ
+  sta a:.loword(rowEnables)
+  lda a:.loword(rowStatus)
+  and #KM_MOUSE_IRQ
+  sta f:KMSTATUS
+  lda #0                        ; CaptureInput does not read DATAREG
+  sta f:captureStatusMask+1
+  lda #1
+  sta a:.loword(j13Owner)
+  sta f:keyTalk                 ; and does not talk to the keyboard
+  a16
+  jsr .loword(startSendTimer)
+  a8
+pumpCommand:
+  lda #GLU_READ_MEMORY
+  sta f:DATAREG
+  lda #JS_ADDRESS
+  sta a:.loword(j13State)
+  a16
+  lda a:.loword(j13Generation)
+  sta a:.loword(rowGeneration)
+  rts
 pumpOwned:
-              .a8
-              lda a:.loword(rowStatus)
-              bit #$20
-              bne pumpData
-              lda a:.loword(j13State)
-              .a8
-              cmp #4
-              bne pumpSend
-              brl pumpDone
-pumpSend:
-              lda a:.loword(rowStatus)
-              and #1
-              beq j13Long5
-              brl pumpDone
-j13Long5:
-              lda a:.loword(j13State)
-              cmp #2
-              bne pumpHigh
-              lda a:.loword(rowAddress)
-              sta f:ADBDATA
-              ; $C05F is a Second Sight event; never inject it into DMA1.
-              lda #3
-              sta a:.loword(j13State)
-              brl pumpDone
-pumpHigh:     lda #0
-              sta f:ADBDATA
-              ; $C05F is a Second Sight event; never inject it into DMA1.
-              lda #4
-              sta a:.loword(j13State)
-              lda a:.loword(rowEnables)
-              sta f:ADBSTATUS
-              rep #$20
-              brl pumpDone
+  .a8
+  lda a:.loword(rowStatus)
+  bit #KM_DATA_FULL
+  bne pumpData
+  lda a:.loword(j13State)
+  .a8
+  cmp #JS_REPLY
+  bne @send
+  brl pumpDone
+@send:
+  lda a:.loword(rowStatus)
+  and #KM_COMMAND_FULL
+  beq @free
+  brl pumpDone
+@free:
+  lda a:.loword(j13State)
+  cmp #JS_ADDRESS
+  bne @high
+  lda a:.loword(rowAddress)
+  sta f:DATAREG
+  lda #JS_HIGH
+  sta a:.loword(j13State)
+  brl pumpDone
+@high:
+  lda #0                        ; the high byte: RAM page 0
+  sta f:DATAREG
+  lda #JS_REPLY
+  sta a:.loword(j13State)
+  lda a:.loword(rowEnables)     ; the data interrupt again, for the reply
+  sta f:KMSTATUS
+  a16
+  brl pumpDone
 pumpData:
-              .a8
-     lda f:ADBDATA
-              sta a:.loword(rowValue)
-              lda a:.loword(j13State)
-              .a8
-              cmp #4
-              bne pumpStatusByte
-              lda a:.loword(rowAddress)
-              cmp #$e8
-              bne pumpMatrixReply
-              lda a:.loword(rowValue)
-              cmp #8                      ; keyboard SRQ
-              beq pumpStatusByte
-              cmp #$20                   ; Escape notification
-              beq pumpStatusByte
-              cmp #$40                   ; controller error
-              beq pumpStatusByte
-              rep #$20
-              brl pumpPhysicalReply
-pumpMatrixReply:
-              .a8
-
-              lda a:.loword(rowValue)
-              eor #255
-              cmp a:.loword(rowExpected)
-              bne pumpChangedRow
-              rep #$20
-              brl batchReadDone
-pumpChangedRow:
-              .a8
-
-              ora a:.loword(rowExpected)
-              cmp a:.loword(rowExpected)
-              beq pumpValidReply
-              ; Status notifications may precede the single-byte row reply.
-              lda a:.loword(rowValue)
-              and #$87
-              beq pumpStatusByte
-              rep #$20
-              jsr a:.loword(releaseOwner)
-              brl pumpDone                  ; ambiguous row: no inferred releases
+  .a8
+  lda f:DATAREG
+  sta a:.loword(rowValue)
+  lda a:.loword(j13State)
+  .a8
+  cmp #JS_REPLY
+  bne pumpStatusByte
+  lda a:.loword(rowAddress)
+  cmp #MCU_P3
+  bne @matrix
+  lda a:.loword(rowValue)       ; a status byte before the reply?
+  cmp #ADB_KEY_REQUEST
+  beq pumpStatusByte
+  cmp #ADB_STATUS_ESC
+  beq pumpStatusByte
+  cmp #ADB_STATUS_ERROR
+  beq pumpStatusByte
+  a16
+  brl pumpPhysicalReply
+@matrix:
+  .a8
+  lda a:.loword(rowValue)
+  eor #$ff                      ; the switches: 1 = down
+  cmp a:.loword(rowExpected)
+  bne @changed
+  a16
+  brl batchReadDone             ; no held key went up
+@changed:
+  .a8
+  ora a:.loword(rowExpected)
+  cmp a:.loword(rowExpected)
+  beq pumpValidReply            ; no other switch is down: held keys went up
+  ; A status byte can come before the one-byte row reply.
+  lda a:.loword(rowValue)
+  and #ADB_REPLY_FOLLOWS|ADB_REPLY_BITS
+  beq pumpStatusByte
+  a16
+  jsr .loword(releaseOwner)
+  brl pumpDone                  ; a row that is not clear: no releases
 pumpStatusByte:
-              .a8
-
-              lda a:.loword(rowValue)
-              and #$87
-              bne pumpStatusDone
-              lda a:.loword(rowValue)
-              and #8
-              ora a:.loword(rowDeferred)
-              sta a:.loword(rowDeferred)
-pumpStatusDone:
-              rep #$20
-              rts
+  .a8
+  lda a:.loword(rowValue)
+  and #ADB_REPLY_FOLLOWS|ADB_REPLY_BITS
+  bne @done
+  lda a:.loword(rowValue)
+  and #ADB_KEY_REQUEST          ; a keyboard request waits for the end
+  ora a:.loword(rowDeferred)
+  sta a:.loword(rowDeferred)
+@done:
+  a16
+  rts
 pumpValidReply:
-              rep #$20
-              jsr a:.loword(queueRoom)
-              bcs pumpHaveRoom
-              brl pumpFinished
-pumpHaveRoom: lda a:.loword(rowGeneration)
-              cmp a:.loword(j13Generation)
-              beq pumpCurrentGeneration
-              brl pumpFinished              ; reply predates a newly pressed key
-pumpCurrentGeneration:
-              stz a:.loword(sampleTimed)
-              ldy #0
-rowRelease:   lda a:.loword(j13Keys),y
-              cmp #64
-              bcs rowReleaseNext
-              tax
-              lda f:pumpRows,x
-              and #255
-              cmp a:.loword(rowAddress)
-              bne rowReleaseNext
-              lda f:pumpMasks,x
-              and a:.loword(rowValue)
-              and #255
-              beq rowReleaseNext
-              txa
-              ora #128
-              jsr a:.loword(queue)
-              lda #NONE
-              sta a:.loword(j13Keys),y
-              dec a:.loword(knownCount)
-              inc a:.loword(j13Generation)
+  a16
+  jsr .loword(queueRoom)
+  bcs @room
+  brl pumpFinished
+@room:
+  lda a:.loword(rowGeneration)
+  cmp a:.loword(j13Generation)
+  beq @current
+  brl pumpFinished              ; a key was pressed after the read started
+@current:
+  stz a:.loword(sampleTimed)
+  ldy #0
+rowRelease:
+  lda a:.loword(j13Keys),y
+  cmp #MATRIX_KEYS
+  bcs rowReleaseNext
+  tax
+  lda f:pumpRows,x
+  and #255
+  cmp a:.loword(rowAddress)
+  bne rowReleaseNext
+  lda f:pumpMasks,x
+  and a:.loword(rowValue)
+  and #255
+  beq rowReleaseNext            ; the switch is down
+  txa
+  ora #KEY_RELEASE
+  jsr .loword(queue)
+  lda #NONE
+  sta a:.loword(j13Keys),y
+  dec a:.loword(knownCount)
+  inc a:.loword(j13Generation)
 rowReleaseNext:
-              iny
-              iny
-              cpy #6
-              bcc rowRelease
-batchReadDone:dec a:.loword(rowsLeft)
-              beq pumpFinished
-              jmp a:.loword(continueHeldRows)
+  iny
+  iny
+  cpy #2*J13_KEY_SLOTS
+  bcc rowRelease
+batchReadDone:
+  dec a:.loword(rowsLeft)
+  beq pumpFinished
+  jmp .loword(continueHeldRows)
 pumpFinished:
-              jsr a:.loword(releaseOwner)
+  jsr .loword(releaseOwner)
 pumpDone:
-              rep #$20
-              rts
+  a16
+  rts
 
-;;; C025 stays at its character's modifier state while ordinary keys remain
-;;; down. Firmware P3 ($E8) supplies live independent switches; bits 0..2 are
-;;; active low and Apple bits 6/7 active high. P3 is read only on validated ROM.
+; pumpPhysicalReply: the P3 reply: the live modifiers (KEYMODREG keeps the
+; state of its character while other keys stay down), unless a new
+; character or a release came after the read started. Then, with two or
+; more held keys, the next row read; else the GLU goes back.
 pumpPhysicalReply:
-              ; An intervening character/all-up transition owns newer state.
-              lda a:.loword(knownCount)
-              beq physicalReturn
-              lda a:.loword(rowGeneration)
-              cmp a:.loword(j13Generation)
-              bne physicalReturn
-              lda a:.loword(rowValue)
-              eor #7
-              and #$c7
-              sta a:.loword(physicalMods)
-              sta a:.loword(nextMods)
-              .a16
-              lda #1
-              sta a:.loword(physicalValid)
-              lda a:.loword(sampleRecover)
-              bne physicalRecovery
-              sep #$20
-              stz a:.loword(sampleUnchanged+1)
-              rep #$20
-physicalRecovery:
-              lda a:.loword(nextMods)
-              cmp a:.loword(j13Mods)
-              beq physicalNoRoom
-              jsr a:.loword(queueRoom)
-              bcc physicalNoRoom
-              stz a:.loword(sampleTimed)
-              jsr a:.loword(updateModifiers)
+  lda a:.loword(knownCount)
+  beq physicalReturn
+  lda a:.loword(rowGeneration)
+  cmp a:.loword(j13Generation)
+  bne physicalReturn
+  lda a:.loword(rowValue)
+  eor #P3_LOW_BITS
+  and #KMOD_KEYS
+  sta a:.loword(physicalMods)
+  sta a:.loword(nextMods)
+  .a16
+  lda #1
+  sta a:.loword(physicalValid)
+  lda a:.loword(nextMods)
+  cmp a:.loword(j13Mods)
+  beq physicalNoRoom
+  jsr .loword(queueRoom)
+  bcc physicalNoRoom
+  stz a:.loword(sampleTimed)
+  jsr .loword(updateModifiers)
 physicalNoRoom:
 continueHeldRows:
-              lda a:.loword(knownCount)
-              .a16
-              cmp #2
-              bcc physicalDone
-              jsr a:.loword(scheduleTwoKeys)
-              sep #$20
-              lda a:.loword(rowEnables)
-              and #$40
-              sta f:ADBSTATUS
-              jmp a:.loword(pumpCommand)
-physicalDone: jmp a:.loword(releaseOwner)
-physicalReturn:jmp a:.loword(releaseOwner)
+  lda a:.loword(knownCount)
+  .a16
+  cmp #2
+  bcc physicalReturn
+  jsr .loword(scheduleTwoKeys)
+  a8
+  lda a:.loword(rowEnables)
+  and #KM_MOUSE_IRQ
+  sta f:KMSTATUS
+  jmp .loword(pumpCommand)
+physicalReturn:
+  jmp .loword(releaseOwner)
 
- ; One foreground service step. The parameter alarm and DATA IRQ complete
- ; owned commands asynchronously; a busy raw ADB transaction defers capture.
+; serviceController: one service step of a play sample: J13Pump; a read that
+; waits for its reply after rowDeadline stops the row reads (j13Matrix 0)
+; and gives the GLU back. JSR; A16.
 serviceController:
-              jsr a:.loword(J13Pump)
-              lda a:.loword(j13State)
-              .a16
-              cmp #4
-              bcc serviceDone
-              bra serviceDeadline
+  jsr .loword(J13Pump)
+  lda a:.loword(j13State)
+  .a16
+  cmp #JS_REPLY
+  bcc serviceDone
+  lda a:.loword(controllerTime)
+  sec
+  sbc a:.loword(rowDeadline)
+  bmi serviceDone
 serviceTimeout:
-              inc a:.loword(j13Timeouts)
-              stz a:.loword(j13Matrix)
-              jmp a:.loword(releaseOwner)
-serviceDeadline:
-              lda a:.loword(controllerTime)
-              sec
-              sbc a:.loword(rowDeadline)
-              bpl serviceTimeout
-serviceDone:  rts
+  stz a:.loword(j13Matrix)
+  jmp .loword(releaseOwner)
+serviceDone:
+  rts
 
+; releaseOwner: the GLU goes back to the ADB capture: CaptureInput reads
+; DATAREG again, a keyboard request seen during the read waits
+; (keyPending), the interrupts are as before, JS_IDLE. JSR; returns A16.
 releaseOwner:
-              sep #$20
-              lda #$20
-              sta f:captureStatusMask+1
-              lda #0
-              sta f:keyTalk
-              sta a:.loword(j13Owner)
-              lda a:.loword(rowDeferred)
-              beq releaseNoPending
-              lda #1
-              sta f:keyPending
-releaseNoPending:
-              stz a:.loword(rowDeferred)
-              lda a:.loword(rowEnables)
-              sta f:ADBSTATUS
-              rep #$20
-              stz a:.loword(j13State)
-              jsr a:.loword(removeOwnerIRQ)
-              jsr a:.loword(stopSendTimer)
-              rts
-;;; Transition cleanup may wait. Never abandon a partially sent $09 command
-;;; and let the ADB parser consume its reply. A timeout disables future rows
-;;; after allowing the validated firmware to finish its bounded receive wait.
-finishOwner:  lda a:.loword(j13Owner)
-              beq finishIdle
-              ldy #16384
-finishWait:   phy
-              jsr a:.loword(J13Pump)
-              ply
-              lda a:.loword(j13Owner)
-              beq finishIdle
-              dey
-              bne finishWait
-              inc a:.loword(j13Timeouts)
-              stz a:.loword(j13Matrix)
-              jmp a:.loword(releaseOwner)
-finishIdle:   stz a:.loword(j13State)
-              rts
+  a8
+  lda #KM_DATA_FULL
+  sta f:captureStatusMask+1
+  lda #0
+  sta f:keyTalk
+  sta a:.loword(j13Owner)
+  lda a:.loword(rowDeferred)
+  beq @none
+  lda #1
+  sta f:keyPending
+@none:
+  stz a:.loword(rowDeferred)
+  lda a:.loword(rowEnables)
+  sta f:KMSTATUS
+  a16
+  stz a:.loword(j13State)
+  stz a:.loword(j13SendTimer)
+  rts
+; finishOwner: before a mode change an owned read finishes: a half-sent
+; GLU_READ_MEMORY would leave its reply to the ADB capture. After
+; FINISH_TRIES steps the row reads stop. Then JS_IDLE. JSR; A16.
+finishOwner:
+  lda a:.loword(j13Owner)
+  beq @idle
+  ldy #FINISH_TRIES
+@wait:
+  phy
+  jsr .loword(J13Pump)
+  ply
+  lda a:.loword(j13Owner)
+  beq @idle
+  dey
+  bne @wait
+  stz a:.loword(j13Matrix)
+  jmp .loword(releaseOwner)
+@idle:
+  stz a:.loword(j13State)
+  rts
 
- ; Private command replies use the existing ADB interrupt. Its parser
- ; remains displaced only while this owner holds C026; mouse service follows
- ; normally and pending raw keyboard SRQs are replayed when ownership ends.
- ; Caller masks IRQs and has A8. Restore the original LDA long instruction.
-installOwnerIRQ:
-              rts
-removeOwnerIRQ:
-              rts
-
-;;; 1943 uses its existing 238.55 Hz DOC clock for parameter delivery.
-;;; Only an owned batch enables this bounded service. No oscillator or
-;;; permanently active extra interrupt is added. Measure release latency
-;;; against Wolf before accepting the 4.19 ms delivery interval.
-;;; The IRQ entry has saved all registers. Do not sample keys on this alarm.
+; sendAlarm: the DOC timer interrupt while a read owns the GLU
+; (j13SendTimer): the next address byte goes out when the GLU is free, or a
+; reply byte goes to J13Pump. After SEND_BUDGET calls the read times out. It
+; does not sample the keys. JSR; A16.
 sendAlarm:
-              .a16
-              lda a:.loword(j13State)
-              .a8
-              .a16
-              cmp #2
-              bcc sendIRQDone
-              dec a:.loword(sendBudget)
-              beq sendIRQTimeout
-              .a16
-              cmp #4
-              bcs sendIRQDone
-              sep #$20
-              lda f:ADBSTATUS
-              bit #$20
-              bne sendIRQData
-              lsr a
-              bcs sendIRQWide
-              lda a:.loword(j13State)
-              cmp #2
-              bne sendIRQHigh
-              lda a:.loword(rowAddress)
-              sta f:ADBDATA
-              ; $C05F is a Second Sight event; never inject it into DMA1.
-              inc a:.loword(j13State)
-              bra sendIRQWide
-sendIRQHigh:  lda #0
-              sta f:ADBDATA
-              ; $C05F is a Second Sight event; never inject it into DMA1.
-              inc a:.loword(j13State)
-              lda a:.loword(rowEnables)
-              sta f:ADBSTATUS
-sendIRQWide:
-              rep #$20
-sendIRQDone:  rts
-sendIRQTimeout:
-              jmp a:.loword(serviceTimeout)
-sendIRQData:
-              rep #$20
-              jmp a:.loword(J13Pump)
+  .a16
+  lda a:.loword(j13State)
+  .a8
+  .a16
+  cmp #JS_ADDRESS
+  bcc @done
+  dec a:.loword(sendBudget)
+  beq @timeout
+  .a16
+  cmp #JS_REPLY
+  bcs @done
+  a8
+  lda f:KMSTATUS
+  bit #KM_DATA_FULL
+  bne @data
+  lsr a                         ; KM_COMMAND_FULL: busy
+  bcs @wide
+  lda a:.loword(j13State)
+  cmp #JS_ADDRESS
+  bne @high
+  lda a:.loword(rowAddress)
+  sta f:DATAREG
+  inc a:.loword(j13State)       ; JS_HIGH
+  bra @wide
+@high:
+  lda #0
+  sta f:DATAREG
+  inc a:.loword(j13State)       ; JS_REPLY
+  lda a:.loword(rowEnables)
+  sta f:KMSTATUS
+@wide:
+  a16
+@done:
+  rts
+@timeout:
+  jmp .loword(serviceTimeout)
+@data:
+  a16
+  jmp .loword(J13Pump)
 
+; startSendTimer: sendAlarm runs from now, SEND_BUDGET times at most. JSR;
+; A16.
 startSendTimer:
-              lda #16                     ; bounded P3 plus up to three distinct rows
-              sta a:.loword(sendBudget)
-              .a16
-              lda #1
-              sta a:.loword(j13SendTimer)
-              rts
-stopSendTimer:
-              stz a:.loword(j13SendTimer)
-              rts
-ensureTimer:
-stopTimer:
-              rts                          ; 1943's DOC clock always runs
+  lda #SEND_BUDGET
+  sta a:.loword(sendBudget)
+  .a16
+  lda #1
+  sta a:.loword(j13SendTimer)
+  rts
 
-;;; UI reset discards consumer events, not the identities of switches still
-;;; held on J13. Refresh them before the consumer resets; game entry validates
-;;; and republishes bindings. Raw/off mode still releases J13 ownership.
-J13Reset:     php
-              sei
-              rep #$30
-              phb
-              phk
-              plb
-              jsr a:.loword(finishOwner)
-              jsr a:.loword(removeOwnerIRQ)
-              lda a:.loword(j13Mode)
-              beq resetClearHeld
-              jsr a:.loword(J13Sample)
-              bra resetDone
-resetClearHeld:
-              jsr a:.loword(clearHeld)
-resetDone:
-              plb
-              plp
-              rtl
-clearHeld:    jsr a:.loword(restoreHeldSample)
-              lda #NONE
-              sta a:.loword(j13Keys)
-              sta a:.loword(j13Keys+2)
-              sta a:.loword(j13Keys+4)
-              stz a:.loword(j13Mods)
-              stz a:.loword(knownCount)
-              stz a:.loword(physicalValid)
-              stz a:.loword(sampleRecover)
-              inc a:.loword(j13Generation)
-              ; Remove only J13's held bit from the merged consumer state.
-              ldx #127
-              sep #$20
-clearSource:  lda f:keyHeld,x
-              and #1
-              sta f:keyHeld,x
-              dex
-              bpl clearSource
-              lda f:AKD
-              sta a:.loword(sampleAKD)
-              lda f:KBD
-              .a8
-              and #127
-              sta a:.loword(j13LastAscii)
-              rep #$20
-              rts
+; clearHeld: forget the held identities and modifiers, keep only the ADB
+; bits of keyHeld, and take the KBDSTRB and KBD state of now as known. JSR;
+; A16.
+clearHeld:
+  lda #NONE
+  sta a:.loword(j13Keys)
+  sta a:.loword(j13Keys+2)
+  sta a:.loword(j13Keys+4)
+  stz a:.loword(j13Mods)
+  stz a:.loword(knownCount)
+  stz a:.loword(physicalValid)
+  stz a:.loword(sampleRecover)
+  inc a:.loword(j13Generation)
+  ldx #KEY_CODES-1
+  a8
+@source:
+  lda f:keyHeld,x
+  and #HELD_ADB
+  sta f:keyHeld,x
+  dex
+  bpl @source
+  lda f:KBDSTRB
+  sta a:.loword(sampleAKD)
+  lda f:KBD
+  .a8
+  and #<~KBD_STROBE
+  sta a:.loword(j13LastAscii)
+  a16
+  rts
+.assert J13_KEY_SLOTS = 3, error
 
-J13Stop:      jsl J13Benchmark
-              php
-              sei
-              rep #$30
-              phb
-              phk
-              plb
-              ; Finish outstanding raw Talk before sending firmware commands.
-              ldy #16384
-stopTalk:     phy
-              phb
-              sep #$20
-              lda #^input_native
-              pha
-              plb
-              rep #$20
-              jsl CaptureInput
-              plb
-              ply
-              lda f:keyTalk
-              beq stopRestore
-              dey
-              bne stopTalk
-              bra stopDone
-stopRestore:
-              sep #$20
-              jsr a:.loword(restoreFirmwareRepeat)
-              lda a:.loword(modesValid)
-              beq stopDone
-              lda #5
-              jsr a:.loword(sendBounded)
-              bcs stopDone
-              lda #$11
-              jsr a:.loword(sendBounded)
-              bcs stopDone
-              lda #4
-              jsr a:.loword(sendBounded)
-              bcs stopDone
-              lda a:.loword(savedModes)
-              and #$11
-              jsr a:.loword(sendBounded)
-stopDone:
-              rep #$20
-              plb
-              plp
-              rtl
+; The J13 state.
+j13Enabled: .word 0             ; J13_ON: the play reads the J13 keyboard
+j13AdbPresent: .word 1          ; 1: an ADB keyboard answers (raw keys)
+j13Available: .word 0           ; 1: a ROM 00/01 machine
+j13Matrix: .word 0              ; 1: the known microcontroller ROM: the row reads work
+j13Mode: .word 0                ; J13_ESCAPE, J13_MENU or J13_PLAY
+j13NextMode: .word 0            ; setMode: the new mode
+j13MenuSeen: .word 0            ; 1: a menu use was seen (or a choice by hand)
+j13Manual: .word 0              ; J13_CHOSEN: the menu choice was made by hand
+j13Owner: .word 0               ; 1: a row read owns the GLU
+j13State: .word 0               ; JS_*
+j13SendTimer: .word 0           ; 1: doc_tick runs sendAlarm
+sendBudget: .word 0             ; sendAlarm calls left before the read times out
+j13Keys: .word NONE,NONE,NONE   ; the held key identities
+j13Mods: .word 0                ; the modifier bits (KMOD_KEYS) of the last events
+knownCount: .word 0             ; the held identities in j13Keys
+controllerTime: .word 0         ; GAME_CLOCK at the service
+physicalMods: .word 0           ; the modifier bits of the last P3 read
+physicalValid: .word 0          ; 1: physicalMods is newer than KEYMODREG
+rowDeadline: .word 0            ; GAME_CLOCK: the read times out after this
+nextMods: .word 0               ; updateModifiers: the new modifier bits
+newKey: .word 0                 ; the identity of the new character
+j13Generation: .word 0          ; changes with each change of j13Keys
+rowGeneration: .word 0          ; j13Generation when the read started
+rowNext: .word 0                ; scheduleTwoKeys: the rowList offset of the row
+rowFrame: .word NO_FRAME        ; scheduleRow: GAME_UPDATES of the last call
+rowArmFrame: .word NO_FRAME     ; deferRows: GAME_UPDATES of the last arm
+rowWakeBudget: .word 0          ; j13Irq: the DOC wakes left before the batch
+maskGeneration: .word NO_FRAME  ; j13Generation of rowMasks and rowList
+rowMasks: .byte 0,0,0,0,0,0,0,0,0,0  ; each MCU row: the switch bits of the held keys
+rowList: .word 0,0,0            ; the rows to read: the address, then the bits
+rowListSize: .word 0            ; the bytes of rowList
+cacheMask: .byte 0              ; J13CacheRows: the switch bit
+rowsLeft: .word 0               ; the rows of the batch still to read
+rowAddress: .word 0             ; the MCU address of the read: MCU_P3 or a row
+rowExpected: .word 0            ; the switch bits of the held keys in the row
+rowValue: .word 0               ; the reply byte
+rowEnables: .word 0             ; the KMSTATUS interrupt bits before the read
+rowStatus: .word 0              ; the KMSTATUS byte of this J13Pump step
+rowDeferred: .word 0            ; ADB_KEY_REQUEST: the keyboard asked in the read
+lastRowTime: .word 0            ; controllerTime of the last batch
+sampleAscii: .word 0            ; the KBD byte; KBD_STROBE: a new character
+sampleMods: .word 0             ; the KEYMODREG byte of the character
+sampleAKD: .word 0              ; the last KBDSTRB byte; KBD_STROBE: a key is down
+sampleRecover: .word 0          ; 1: a key went down with no new character
+recoverTime: .word 0            ; GAME_CLOCK: the recovery reads after this
+j13LastAscii: .word 0           ; the last character (7 bits)
+sampleTime: .word 0             ; the time of the events of this sample
+sampleTimed: .word 0            ; 1: sampleTime is set for this sample
 
-j13Enabled:   .word 0
-j13AdbPresent:.word 1
-j13Available: .word 0
-j13Matrix:    .word 0
-j13Mode:      .word 0
-j13NextMode:  .word 0
-j13MenuSeen:  .word 0
-j13Manual:    .word 0                      ; saved bit 1: explicit On/Off
-j13Owner:     .word 0
-j13State:     .word 0
-j13Timeouts:  .word 0
-j13Samples:   .word 0
-j13Events:    .word 0
-j13Timer:     .word 0
-j13SendTimer: .word 0
-sendBudget:   .word 0
-j13Keys:      .word NONE,NONE,NONE
-j13Mods:      .word 0
-knownCount:   .word 0
-controllerTime:.word 0
-physicalMods: .word 0
-physicalValid:.word 0
-rowDeadline:  .word 0
-nextMods:     .word 0
-newKey:       .word 0
-j13Generation:.word 0
-rowGeneration:.word 0
-rowNext:      .word 0
-rowFrame:     .word $ffff
-rowArmFrame:  .word $ffff
-rowWakeBudget:.word 0
-maskGeneration:.word $ffff
-rowMasks:     .byte 0,0,0,0,0,0,0,0,0,0
-rowList:      .word 0,0,0
-rowListSize:  .word 0
-cacheMask:    .byte 0
-rowsLeft:     .word 0
-rowAddress:   .word 0
-rowExpected:  .word 0
-rowValue:     .word 0
-rowEnables:   .word 0
-rowStatus:    .word 0
-rowDeferred:  .word 0
-lastRowTime:  .word 0
-sampleAscii:  .word 0
-sampleMods:   .word 0
-sampleAKD:    .word 0
-sampleRecover:.word 0
-recoverTime:  .word 0
-j13LastAscii: .word 0
-sampleTime:   .word 0
-sampleTimed:  .word 0
-savedModes:   .byte 0
-modesValid:   .byte 0
-
+; sendBounded: write A8 to DATAREG when the GLU command register is free;
+; carry 1 after GLU_WAIT busy reads. No delay after the write: a $C05F (Zip
+; delay) write is a Second Sight event that would corrupt DMA1. JSR; Y
+; changed.
 sendBounded:
-              .a8
+  .a8
   pha
-              ldy     #16384
-sendBounded_local_1:           lda     f:ADBSTATUS
-              and     #1
-              beq     sendBounded_local_2
-              dey
-              bne     sendBounded_local_1
-              pla
-              sec
-              rts
-sendBounded_local_2:           pla
-              sta     f:ADBDATA
-              ; Stock-speed IIgs has no Zip delay; $C05F would corrupt DMA1.
-              clc
-              rts
+  ldy #GLU_WAIT
+@busy:
+  lda f:KMSTATUS
+  and #KM_COMMAND_FULL
+  beq @free
+  dey
+  bne @busy
+  pla
+  sec
+  rts
+@free:
+  pla
+  sta f:DATAREG
+  clc
+  rts
+; readBounded: A8 = the next DATAREG byte; carry 1 after GLU_WAIT empty
+; reads. JSR; Y changed.
 readBounded:
-              .a8
-  ldy     #16384
-readBounded_local_1:           lda     f:ADBSTATUS
-              and     #$20
-              bne     readBounded_local_2
-              dey
-              bne     readBounded_local_1
-              sec
-              rts
-readBounded_local_2:           lda     f:ADBDATA
-              clc
-              rts
+  .a8
+  ldy #GLU_WAIT
+@empty:
+  lda f:KMSTATUS
+  and #KM_DATA_FULL
+  bne @full
+  dey
+  bne @empty
+  sec
+  rts
+@full:
+  lda f:DATAREG
+  clc
+  rts
 
+; The modifier keys: their KEYMODREG bits and their key codes.
+modifierMasks: .byte KMOD_SHIFT,KMOD_CONTROL,KMOD_CAPS,KMOD_COMMAND,KMOD_OPTION
+modifierKeys: .byte KEY_SHIFT,KEY_CONTROL,KEY_CAPS_LOCK,KEY_COMMAND,KEY_OPTION
 
-modifierMasks: .byte $01, $02, $04, $80, $40
-modifierKeys:  .byte $38, $36, $39, $37, $3a, 0
-
-;;; Translate the low seven ASCII bits to synthetic ADB identities.
-;;; Navigation aliases take precedence (Ctrl-H becomes Left); shifted
-;;; punctuation maps to its unshifted US key. This mapping cannot distinguish
-;;; keys that produce the same character. A NONE entry would be ignored by
-;;; the caller; release information comes from AKD or a validated row.
+; asciiKeys: the key identity (an ADB key code) of each 7-bit character. The
+; arrow characters win (Ctrl-H is LEFT); a shifted sign is its unshifted US
+; key. Keys with the same character look the same. The releases come from
+; KBDSTRB or a row read.
 asciiKeys:
-              .byte   $31, $00, $0b, $08, $02, $0e, $03, $05, $3b, $30, $3d, $3e, $25, $24, $2d, $1f ; $00-$0F
-              .byte   $23, $0c, $0f, $01, $11, $3c, $09, $0d, $07, $10, $06, $35, $2a, $1e, $16, $1b ; $10-$1F
-              .byte   $31, $12, $27, $14, $15, $17, $1a, $27, $19, $1d, $1c, $18, $2b, $1b, $2f, $2c ; $20-$2F
-              .byte   $1d, $12, $13, $14, $15, $17, $16, $1a, $1c, $19, $29, $29, $2b, $18, $2f, $2c ; $30-$3F
-              .byte   $13, $00, $0b, $08, $02, $0e, $03, $05, $04, $22, $26, $28, $25, $2e, $2d, $1f ; $40-$4F
-              .byte   $23, $0c, $0f, $01, $11, $20, $09, $0d, $07, $10, $06, $21, $2a, $1e, $16, $1b ; $50-$5F
-              .byte   $32, $00, $0b, $08, $02, $0e, $03, $05, $04, $22, $26, $28, $25, $2e, $2d, $1f ; $60-$6F
-              .byte   $23, $0c, $0f, $01, $11, $20, $09, $0d, $07, $10, $06, $21, $2a, $1e, $32, $33 ; $70-$7F
+  .byte $31,$00,$0b,$08,$02,$0e,$03,$05,$3b,$30,$3d,$3e,$25,$24,$2d,$1f  ; $00-$0F
+  .byte $23,$0c,$0f,$01,$11,$3c,$09,$0d,$07,$10,$06,$35,$2a,$1e,$16,$1b  ; $10-$1F
+  .byte $31,$12,$27,$14,$15,$17,$1a,$27,$19,$1d,$1c,$18,$2b,$1b,$2f,$2c  ; $20-$2F
+  .byte $1d,$12,$13,$14,$15,$17,$16,$1a,$1c,$19,$29,$29,$2b,$18,$2f,$2c  ; $30-$3F
+  .byte $13,$00,$0b,$08,$02,$0e,$03,$05,$04,$22,$26,$28,$25,$2e,$2d,$1f  ; $40-$4F
+  .byte $23,$0c,$0f,$01,$11,$20,$09,$0d,$07,$10,$06,$21,$2a,$1e,$16,$1b  ; $50-$5F
+  .byte $32,$00,$0b,$08,$02,$0e,$03,$05,$04,$22,$26,$28,$25,$2e,$2d,$1f  ; $60-$6F
+  .byte $23,$0c,$0f,$01,$11,$20,$09,$0d,$07,$10,$06,$21,$2a,$1e,$32,$33  ; $70-$7F
 
-
+; readMCU: A8 = the microcontroller byte at X (GLU_READ_MEMORY); carry 1
+; when the GLU does not answer. JSR.
 readMCU:
-              .a8
-      lda     #9
-              jsr     a:.loword(sendBounded)
-              bcs     readMCUDone
-              txa
-              jsr     a:.loword(sendBounded)
-              bcs     readMCUDone
-              rep     #$20
-              txa
-              xba
-              sep     #$20
-              jsr     a:.loword(sendBounded)
-              bcs     readMCUDone
-              jsr     a:.loword(readBounded)
-readMCUDone:  rtl
+  .a8
+  lda #GLU_READ_MEMORY
+  jsr .loword(sendBounded)
+  bcs @done
+  txa
+  jsr .loword(sendBounded)
+  bcs @done
+  a16
+  txa
+  xba
+  a8
+  jsr .loword(sendBounded)
+  bcs @done
+  jsr .loword(readBounded)
+@done:
+  rts
 
-
-;;; Scanner bytes followed by row-update bytes, in identifyLoop read order.
+; matrixROM: the microcontroller ROM bytes of the known ROM: SIGNATURE_PART
+; at MCU_SIGNATURE1 (the scanner), then SIGNATURE_PART at MCU_SIGNATURE2
+; (the row update).
 matrixROM:
-              .byte $3c, $ff, $e4, $a2, $09, $22, $59, $3c, $0a, $48, $c6, $48, $30, $5b, $a5, $48, $aa, $8b, $85, $e4, $b5, $31, $45, $e2, $3c, $ff, $e4, $f0, $ed, $a0, $08, $88
-              .byte $22, $b4, $f7, $4c, $05, $15, $31, $95, $31, $60, $8f, $0a, $e7, $0f, $06, $49, $ff, $35, $31, $95, $31, $22, $c5, $33, $1c, $f3, $1a, $a6, $4c, $e0, $37, $f0
+  .byte $3c,$ff,$e4,$a2,$09,$22,$59,$3c,$0a,$48,$c6,$48,$30,$5b,$a5,$48,$aa,$8b,$85,$e4,$b5,$31,$45,$e2,$3c,$ff,$e4,$f0,$ed,$a0,$08,$88
+  .byte $22,$b4,$f7,$4c,$05,$15,$31,$95,$31,$60,$8f,$0a,$e7,$0f,$06,$49,$ff,$35,$31,$95,$31,$22,$c5,$33,$1c,$f3,$1a,$a6,$4c,$e0,$37,$f0
 
-;;; Indexed by the synthetic ADB identity from asciiKeys: MCU RAM row and
-;;; active-low switch mask. Row $FF/mask 0 means no supported matrix entry.
-;;; Same-row keys share one read; the cached row list merges their masks.
+; pumpRows, pumpMasks: for each key identity below MATRIX_KEYS, its row in
+; the microcontroller RAM and its switch bit there (0 = down). Row $FF and
+; bit 0: no row. The keys of one row share one read (rowList).
 pumpRows:
-              .byte $31, $33, $32, $35, $34, $36, $31, $32, $33, $34, $ff, $35, $32, $33, $34, $35
-              .byte $36, $37, $32, $33, $34, $35, $36, $37, $38, $3a, $38, $3a, $39, $39, $3a, $3a
-              .byte $38, $39, $39, $38, $37, $3a, $37, $3a, $38, $39, $37, $38, $3a, $36, $37, $39
-              .byte $31, $39, $37, $37, $ff, $31, $ff, $ff, $ff, $ff, $ff, $39, $3a, $38, $38, $ff
+  .byte $31,$33,$32,$35,$34,$36,$31,$32,$33,$34,$ff,$35,$32,$33,$34,$35
+  .byte $36,$37,$32,$33,$34,$35,$36,$37,$38,$3a,$38,$3a,$39,$39,$3a,$3a
+  .byte $38,$39,$39,$38,$37,$3a,$37,$3a,$38,$39,$37,$38,$3a,$36,$37,$39
+  .byte $31,$39,$37,$37,$ff,$31,$ff,$ff,$ff,$ff,$ff,$39,$3a,$38,$38,$ff
 pumpMasks:
-              .byte $04, $04, $04, $04, $04, $04, $08, $08, $08, $08, $00, $08, $02, $02, $02, $02
-              .byte $02, $02, $01, $01, $01, $01, $01, $01, $10, $01, $01, $10, $01, $10, $20, $02
-              .byte $02, $20, $02, $20, $40, $04, $04, $40, $04, $04, $10, $08, $08, $08, $08, $08
-              .byte $02, $40, $20, $80, $00, $01, $00, $00, $00, $00, $00, $80, $80, $80, $40, $00
+  .byte $04,$04,$04,$04,$04,$04,$08,$08,$08,$08,$00,$08,$02,$02,$02,$02
+  .byte $02,$02,$01,$01,$01,$01,$01,$01,$10,$01,$01,$10,$01,$10,$20,$02
+  .byte $02,$20,$02,$20,$40,$04,$04,$40,$04,$04,$10,$08,$08,$08,$08,$08
+  .byte $02,$40,$20,$80,$00,$01,$00,$00,$00,$00,$00,$80,$80,$80,$40,$00
 
-
-
-bufferRestore: .byte 0
+; bufferKeyboard: set the GLU_KEY_BUFFER mode bit, then stop the firmware
+; key repeat. JSR; A8.
 bufferKeyboard:
-              .a8
+  .a8
+  lda #GLU_READ_MODES
+  jsr .loword(sendBounded)
+  bcs @done
+  jsr .loword(readBounded)
+  bcs @done
+  and #GLU_KEY_BUFFER
+  bne @done
+  lda #GLU_SET_MODES
+  jsr .loword(sendBounded)
+  bcs @done
+  lda #GLU_KEY_BUFFER
+  jsr .loword(sendBounded)
+@done:
+  jmp .loword(stopFirmwareRepeat)
 
-              lda     #$0a
-              jsr     a:.loword(sendBounded)
-              bcs     bufferDone
-              jsr     a:.loword(readBounded)
-              bcs     bufferDone
-              and     #$10
-              bne     bufferDone
-              lda     #$10
-              sta     f:bufferRestore
-              lda     #$04
-              jsr     a:.loword(sendBounded)
-              bcs     bufferDone
-              lda     #$10
-              jsr     a:.loword(sendBounded)
-bufferDone:   jsr     a:.loword(stopFirmwareRepeat)
-              ldx     #0                   ; First scanner-signature byte.
-              rts
-
-
-repeatRestore: .byte 0
-keyboardConfig: .res 3,0
+keyboardConfig: .res ::CONFIG_BYTES,0  ; the configuration bytes of the microcontroller
+; stopFirmwareRepeat: read the configuration bytes; when the repeat delay is
+; not CONFIG_NO_REPEAT, write them back with it. JSR; A8.
 stopFirmwareRepeat:
-              .a8
+  .a8
+  lda #GLU_READ_CONFIG
+  jsr .loword(sendBounded)
+  bcs @done
+  ldx #0
+@read:
+  jsr .loword(readBounded)
+  bcs @done
+  sta f:keyboardConfig,x
+  inx
+  cpx #CONFIG_BYTES
+  bcc @read
+  lda f:keyboardConfig+2
+  and #CONFIG_DELAY
+  cmp #CONFIG_NO_REPEAT
+  beq @done
+  jsr .loword(sendKeyboardConfig)
+  bcs @done
+  lda f:keyboardConfig+2
+  and #<~CONFIG_DELAY
+  ora #CONFIG_NO_REPEAT
+  jsr .loword(sendBounded)
+@done:
+  rts
 
-              lda     #$0b
-              jsr     a:.loword(sendBounded)
-              bcs     repeatSetupDone
-              ldx     #0
-readKeyboardConfig:
-              jsr     a:.loword(readBounded)
-              bcs     repeatSetupDone
-              sta     f:keyboardConfig,x
-              inx
-              cpx     #3
-              bcc     readKeyboardConfig
-              lda     f:keyboardConfig+2
-              and     #$70
-              cmp     #$40
-              beq     repeatSetupDone
-              lda     #1
-              sta     f:repeatRestore
-              jsr     a:.loword(sendKeyboardConfig)
-              bcs     repeatSetupDone
-              lda     f:keyboardConfig+2
-              and     #$8f
-              ora     #$40
-              jsr     a:.loword(sendBounded)
-repeatSetupDone:
-              rts
-
-;;; Send the command and unchanged first two bytes. The caller supplies the
-;;; final repeat byte. Carry reports a bounded controller timeout.
+; sendKeyboardConfig: GLU_SET_CONFIG and the first two configuration bytes
+; as they are; stopFirmwareRepeat sends the third. Carry 1: the GLU does not
+; answer. JSR; A8.
 sendKeyboardConfig:
-              .a8
+  .a8
+  lda #GLU_SET_CONFIG
+  jsr .loword(sendBounded)
+  bcs @done
+  lda f:keyboardConfig
+  jsr .loword(sendBounded)
+  bcs @done
+  lda f:keyboardConfig+1
+  jsr .loword(sendBounded)
+@done:
+  rts
 
-              lda     #$06
-              jsr     a:.loword(sendBounded)
-              bcs     configDone
-              lda     f:keyboardConfig
-              jsr     a:.loword(sendBounded)
-              bcs     configDone
-              lda     f:keyboardConfig+1
-              jsr     a:.loword(sendBounded)
-configDone:   rts
-
-restoreFirmwareRepeat:
-              .a8
-
-              lda     f:repeatRestore
-              beq     repeatRestored
-              jsr     a:.loword(sendKeyboardConfig)
-              bcs     repeatRestored
-              lda     f:keyboardConfig+2
-              jsr     a:.loword(sendBounded)
-              bcs     repeatRestored
-              lda     #0
-              sta     f:repeatRestore
-repeatRestored:
-              rts
-
-
-;;; ADB address 2 presence is separate from J13 availability. A missing raw
-;;; keyboard must not create repeated empty Talks on a mouse-only ADB bus.
+; probeADB: Talk register 3 of the ADB keyboard. No keyboard (no reply, or
+; a one-byte reply): j13AdbPresent 0, and CaptureInput never talks to the
+; keyboard (captureTalk becomes JMP withoutRawKeys), so a bus with only a
+; mouse gets no empty talks. JSR; A8.
 probeADB:
-              .a8
-     lda #$f2
-              jsr a:.loword(sendBounded)
-              bcs noADBKeyboard
-              ldx #16
-probeHeader:  jsr a:.loword(readBounded)
-              bcs noADBKeyboard
-              .a8
-              bit #128
-              bne probeReply
-              dex
-              bne probeHeader
-              bra noADBKeyboard
-probeReply:   and #7
-              beq noADBKeyboard
-              rep #$20
-              and #255
-              inc a
-              tax
-              sep #$20
-probeBytes:   jsr a:.loword(readBounded)
-              bcs noADBKeyboard
-              dex
-              bne probeBytes
-              rts
+  .a8
+  lda #GLU_TALK+3*ADB_REGISTER+ADB_KEYBOARD
+  jsr .loword(sendBounded)
+  bcs noADBKeyboard
+  ldx #NOTICE_MAX
+@header:
+  jsr .loword(readBounded)
+  bcs noADBKeyboard
+  .a8
+  bit #ADB_REPLY_FOLLOWS
+  bne @reply
+  dex
+  bne @header
+  bra noADBKeyboard
+@reply:
+  and #ADB_REPLY_BITS
+  beq noADBKeyboard
+  a16
+  and #255
+  inc a                         ; the reply bytes
+  tax
+  a8
+@bytes:
+  jsr .loword(readBounded)
+  bcs noADBKeyboard
+  dex
+  bne @bytes
+  rts
 noADBKeyboard:
-              lda #0
-              sta a:.loword(j13AdbPresent)
-              lda #$4c
-              sta f:captureTalk
-              rep #$20
-              lda #.loword(withoutRawKeys)
-              sta f:captureTalk+1
-              sep #$20
-              rts
+  lda #0
+  sta a:.loword(j13AdbPresent)
+  lda #OPCODE_JMP
+  sta f:captureTalk
+  a16
+  lda #.loword(withoutRawKeys)
+  sta f:captureTalk+1
+  a8
+  rts
 
-queueLong:
-              .a16
-    jsr a:.loword(queue)
-              rtl
-readBoundedLong:
-              .a8
-
-              jsr a:.loword(readBounded)
-              rtl
-updateModifiersLong:
-              .a16
-
-              jsr a:.loword(updateModifiers)
-              rtl
-
-;;; A=raw transition, X=ring offset. Menu repeats use the merged ownership
-;;; too: one keyboard's release cannot stop an arrow held on the other.
-J13MenuKey:
-              .a16
-              phb
-              phx
-              phy
-              phk
-              plb
-              sta a:.loword(menuRaw)
-              lda f:inputRing+2,x
-              lsr a
-              inc a
-              sta a:.loword(menuSource)
-              lda a:.loword(menuRaw)
-              and #127
-              tax
-              lda f:keyHeld,x
-              and #255
-              sta a:.loword(menuWas)
-              lda a:.loword(menuRaw)
-              bit #128
-              bne menuKeyUp
-              lda a:.loword(menuWas)
-              ora a:.loword(menuSource)
-              sep #$20
-              sta f:keyHeld,x
-              rep #$20
-              lda a:.loword(menuWas)
-              bne menuKeyIgnored
-              bra menuKeyReturn
-menuKeyUp:
-              .a16
-              lda a:.loword(menuSource)
-              .a16
-              eor #255
-              and a:.loword(menuWas)
-              sep #$20
-              sta f:keyHeld,x
-              rep #$20
-              and #255
-              bne menuKeyIgnored
-menuKeyReturn:lda a:.loword(menuRaw)
-              bra menuKeyDone
-menuKeyIgnored:
-              lda #$ffff
-menuKeyDone:  ply
-              plx
-              plb
-              rtl
-menuRaw:      .word 0
-menuWas:      .word 0
-menuSource:   .word 0
-
-
-;;; Menu/game transitions retain observed ordinary identities. The UI resets
-;;; its event consumer separately, so gameplay entry verifies those keys and
-;;; republishes only switches still down. Menus retire released identities
-;;; before accepting another character, without manufacturing row presses.
-;;; Caller has IRQs masked, A/X/Y16 and DBR=input bank. No gameplay-frame call.
+; J13ValidateTracked: at a mode change, and before a new character in
+; J13_MENU: read the row of each held identity (readTransition); a key that
+; is up is released. In J13_PLAY a key still down is pressed again when a
+; J13 binding gives it game bits (not a menu action: the ESC that closed the
+; menu); then P3 gives the modifiers. Not in a play frame. JSR; A16;
+; interrupts off; DBR = this bank.
 J13ValidateTracked:
-              lda f:j13Matrix
-              beq validateReturn
-              lda f:knownCount
-              bne validateStart
-              lda f:j13Mode
-              .a16
-              cmp #2
-              bne validateReturn
-              brl validateModifiers
-validateReturn:
-              rtl
+  .a16
+  lda a:.loword(j13Matrix)
+  beq @return
+  lda a:.loword(knownCount)
+  bne validateStart
+  lda a:.loword(j13Mode)
+  cmp #J13_PLAY
+  bne @return
+  brl validateModifiers
+@return:
+  rts
 validateStart:
-              .a16
-              lda #0
-              sta f:sampleTimed
-              ldy #0
-validateSlot: tyx
-              lda f:j13Keys,x
-              cmp #64
-              bcc validateMapped
-              brl validateNext
-validateMapped:
-              tax
-              lda f:pumpRows,x
-              and #255
-              sta f:rowAddress
-              .a16
-              lda #0
-              sta f:rowExpected
-              ldx #0
-validateMask: lda f:j13Keys,x
-              cmp #64
-              bcs validateMaskNext
-              phx
-              tax
-              lda f:pumpRows,x
-              and #255
-              cmp f:rowAddress
-              bne validateMaskDone
-              lda f:pumpMasks,x
-              and #255
-              ora f:rowExpected
-              sta f:rowExpected
-validateMaskDone:
-              plx
-validateMaskNext:
-              inx
-              inx
-              cpx #6
-              bcc validateMask
-              ; The fresh ASCII character is already a known physical down,
-              ; though ordinaryDown has not installed its identity yet. Include
-              ; its bit when checking a shared row. Otherwise Up+new Down makes
-              ; Up's row look like an unrelated status byte and forgets Up.
-              lda f:validateIncoming
-              beq validateExpected
-              lda f:newKey
-              cmp #64
-              bcs validateExpected
-              tax
-              lda f:pumpRows,x
-              and #255
-              cmp f:rowAddress
-              bne validateExpected
-              lda f:pumpMasks,x
-              and #255
-              ora f:rowExpected
-              sta f:rowExpected
+  stz a:.loword(sampleTimed)
+  ldy #0
+validateSlot:
+  tyx
+  lda a:.loword(j13Keys),x
+  cmp #MATRIX_KEYS
+  bcc @mapped
+  brl validateNext
+@mapped:
+  ; rowExpected: the switch bits of all the held keys in this row.
+  tax
+  lda f:pumpRows,x
+  and #255
+  sta a:.loword(rowAddress)
+  stz a:.loword(rowExpected)
+  ldx #0
+validateMask:
+  lda a:.loword(j13Keys),x
+  cmp #MATRIX_KEYS
+  bcs @next
+  phx
+  tax
+  lda f:pumpRows,x
+  and #255
+  cmp a:.loword(rowAddress)
+  bne @done
+  lda f:pumpMasks,x
+  and #255
+  ora a:.loword(rowExpected)
+  sta a:.loword(rowExpected)
+@done:
+  plx
+@next:
+  inx
+  inx
+  cpx #2*J13_KEY_SLOTS
+  bcc validateMask
+  ; The new character is a key that is down already, though ordinaryDown has
+  ; not put it in j13Keys yet. Its bit counts in a shared row; else UP and a
+  ; new DOWN make the row of UP look like a status byte, and UP is lost.
+  lda a:.loword(validateIncoming)
+  beq validateExpected
+  lda a:.loword(newKey)
+  cmp #MATRIX_KEYS
+  bcs validateExpected
+  tax
+  lda f:pumpRows,x
+  and #255
+  cmp a:.loword(rowAddress)
+  bne validateExpected
+  lda f:pumpMasks,x
+  and #255
+  ora a:.loword(rowExpected)
+  sta a:.loword(rowExpected)
 validateExpected:
-              phy
-              lda f:rowAddress
-              tax
-              sep #$20
-              jsl readTransition
-              rep #$20
-              ply
-              bcs validateForget
-              and #255
-              sta f:rowValue
-              .a16
-              eor #255
-              ora f:rowExpected
-              cmp f:rowExpected
-              bne validateForget
-              tyx
-              lda f:j13Keys,x
-              tax
-              lda f:pumpMasks,x
-              and f:rowValue
-              and #255
-              bne validateForget
-              lda f:j13Mode
-              .a16
-              cmp #2
-              bne validateNext
-              txa
-              ; Rebuild gameplay bindings, without reissuing menu/debug
-              ; actions such as the Escape that just closed the menu.
-              pha
-              lda #.loword(boundBits)    ; contiguous key and action tables
-              sec
-              sbc #.loword(boundKeys)
-              dec a
-              dec a
-              tax
-              pla
+  phy
+  lda a:.loword(rowAddress)
+  tax
+  a8
+  jsr .loword(readTransition)
+  a16
+  ply
+  bcs validateForget
+  and #255
+  sta a:.loword(rowValue)
+  eor #255
+  ora a:.loword(rowExpected)
+  cmp a:.loword(rowExpected)
+  bne validateForget            ; an unknown switch is down: the row is not clear
+  tyx
+  lda a:.loword(j13Keys),x
+  tax
+  lda f:pumpMasks,x
+  and a:.loword(rowValue)
+  and #255
+  bne validateForget            ; the key is up
+  lda a:.loword(j13Mode)
+  cmp #J13_PLAY
+  bne validateNext
+  txa
+  ldx #BIND_COUNT*2-2
 validateBound:
-              cmp f:boundKeys,x
-              bne validateBoundNext
-              pha
-              lda f:boundBits,x
-              beq validateNotGame
-              lda f:boundSources,x
-              and #2
-              beq validateNotGame
-              pla
-              bra validatePublish
+  cmp a:.loword(boundKeys),x
+  bne validateBoundNext
+  pha
+  lda a:.loword(boundBits),x
+  beq validateNotGame
+  lda a:.loword(boundSources),x
+  and #SOURCE_J13
+  beq validateNotGame
+  pla
+  bra validatePublish
 validateNotGame:
-              pla
+  pla
 validateBoundNext:
-              dex
-              dex
-              bpl validateBound
-              bra validateNext
+  dex
+  dex
+  bpl validateBound
+  bra validateNext
 validatePublish:
-              jsl queueLong
-              bra validateNext
+  jsr .loword(queue)
+  bra validateNext
 validateForget:
-              tyx
-              lda f:j13Keys,x
-              ora #128
-              jsl queueLong
-              lda #NONE
-              tyx
-              sta f:j13Keys,x
-              lda f:knownCount
-              dec a
-              sta f:knownCount
-validateNext: iny
-              iny
-              cpy #6
-              bcs validateModifiers
-              brl validateSlot
+  tyx
+  lda a:.loword(j13Keys),x
+  ora #KEY_RELEASE
+  jsr .loword(queue)
+  lda #NONE
+  tyx
+  sta a:.loword(j13Keys),x
+  dec a:.loword(knownCount)
+validateNext:
+  iny
+  iny
+  cpy #2*J13_KEY_SLOTS
+  bcs validateModifiers
+  brl validateSlot
 validateModifiers:
-              lda f:j13Mode
-              .a16
-              cmp #2
-              bne validateDone
-              ldx #$e8
-              sep #$20
-              jsl readTransition
-              rep #$20
-              bcs validateDone
-              eor #7
-              and #$c7
-              sta f:physicalMods
-              sta f:nextMods
-              .a16
-              lda #1
-              sta f:physicalValid
-              .a16
-              lda #0
-              sta f:j13Mods
-              jsl updateModifiersLong
-validateDone: rtl
-validateIncoming: .word 0
+  lda a:.loword(j13Mode)
+  cmp #J13_PLAY
+  bne @done
+  ldx #MCU_P3
+  a8
+  jsr .loword(readTransition)
+  a16
+  bcs @done
+  eor #P3_LOW_BITS
+  and #KMOD_KEYS
+  sta a:.loword(physicalMods)
+  sta a:.loword(nextMods)
+  lda #1
+  sta a:.loword(physicalValid)
+  stz a:.loword(j13Mods)
+  jsr .loword(updateModifiers)
+@done:
+  rts
+validateIncoming: .word 0       ; 1: J13ValidateTracked counts newKey as held
 
-
-;;; A8, X16 = a validated MCU address. Finish raw keyboard or mouse
-;;; service before issuing $09. Notifications may precede its one-byte reply;
-;;; preserve keyboard SRQs for the normal ADB parser instead of consuming
-;;; them as row bits. This bounded wait is only used outside gameplay frames.
+; readTransition: A8 = the microcontroller byte at X, outside a play frame.
+; First the ADB capture runs while it has work (TRANSITION_TRIES times at
+; most). The status bytes before the reply are skipped; a keyboard request
+; among them waits (keyPending). Carry 1: no reply. JSR; A8; DBR = this
+; bank.
 readTransition:
-              .a8
+  .a8
+  phx
+  a16
+  ldy #TRANSITION_TRIES
+@wait:
+  lda a:.loword(keyTalk)
+  ora a:.loword(keyPending)
+  bne @capture
+  a8
+  lda f:KMSTATUS
+  bit #KM_MOUSE_FULL|KM_DATA_FULL|KM_COMMAND_FULL
+  a16
+  bne @capture
+  plx
+  a8
+  jsr .loword(readMCU)
+  bcs @return
+  ldx #NOTICE_MAX
+@byte:
+  cmp #ADB_KEY_REQUEST
+  beq @request
+  cmp #ADB_STATUS_ESC
+  beq @notice
+  cmp #ADB_STATUS_ERROR
+  beq @notice
+  clc
+@return:
+  rts
+@request:
+  lda #1
+  sta a:.loword(keyPending)
+@notice:
+  dex
+  beq @timeout
+  jsr .loword(readBounded)
+  bcc @byte
+  rts
+@capture:
+  phy
+  jsl CaptureInput
+  ply
+  dey
+  bne @wait
+  plx
+  a8
+@timeout:
+  sec
+  rts
 
-              phx
-              rep #$20
-              ldy #1024
-transitionWait:
-              lda f:keyTalk
-              ora f:keyPending
-              bne transitionCapture
-              sep #$20
-              lda f:ADBSTATUS
-              bit #$a1
-              rep #$20
-              bne transitionCapture
-              plx
-              sep #$20
-              jsl readMCU
-              bcs transitionReturn
-              ldx #16
-transitionByte:
-              cmp #8
-              beq transitionSRQ
-              cmp #$20
-              beq transitionNotification
-              cmp #$40
-              beq transitionNotification
-              clc
-transitionReturn:
-              rtl
-transitionSRQ:
-              lda #1
-              sta f:keyPending
-transitionNotification:
-              dex
-              beq transitionTimedOut
-              jsl readBoundedLong
-              bcc transitionByte
-              rtl
-transitionCapture:
-              phy
-              phb
-              sep #$20
-              lda #^input_native
-              pha
-              plb
-              rep #$20
-              jsl CaptureInput
-              plb
-              ply
-              dey
-              bne transitionWait
-              plx
-              sep #$20
-transitionTimedOut:
-              sec
-              rtl
-
-;;; Rebuild only when tracked identities change. DBR remains the input bank;
-;;; these long-addressed helpers and immutable tables use existing UiExtra.
+; J13CacheRows: rowMasks = the switch bits of the held keys in each row;
+; rowList = the rows that have bits (the address, then the bits);
+; maskGeneration = A. JSR; A16.
 J13CacheRows:
-              .a16
-              sta a:.loword(maskGeneration)
-              ldx #8
-              .a16
-              lda #0
-cacheRowsClear:
-              sta a:.loword(rowMasks),x
-              dex
-              dex
-              bpl cacheRowsClear
-              ldy #0
-cacheRowKey:  lda a:.loword(j13Keys),y
-              cmp #64
-              bcs cacheRowNext
-              tax
-              sep #$20
-              lda f:pumpMasks,x
-              beq cacheRow8Done
-              sta a:.loword(cacheMask)
-              lda f:pumpRows,x
-              sec
-              sbc #$31
-              tax
-              lda a:.loword(rowMasks),x
-              ora a:.loword(cacheMask)
-              sta a:.loword(rowMasks),x
-cacheRow8Done:
-              rep #$20
-cacheRowNext: iny
-              iny
-              cpy #6
-              bcc cacheRowKey
-              ldx #0
-              ldy #0
-              sep #$20
-cacheList:    lda a:.loword(rowMasks),x
-              beq cacheListNext
-              sta a:.loword(rowList+1),y
-              txa
-              clc
-              adc #$31
-              sta a:.loword(rowList),y
-              iny
-              iny
-cacheListNext:inx
-              cpx #10
-              bcc cacheList
-              rep #$20
-              sty a:.loword(rowListSize)
-              rtl
+  .a16
+  sta a:.loword(maskGeneration)
+  ldx #MCU_ROWS-2
+  .a16
+  lda #0
+@clear:
+  sta a:.loword(rowMasks),x
+  dex
+  dex
+  bpl @clear
+  ldy #0
+@key:
+  lda a:.loword(j13Keys),y
+  cmp #MATRIX_KEYS
+  bcs @next
+  tax
+  a8
+  lda f:pumpMasks,x
+  beq @none
+  sta a:.loword(cacheMask)
+  lda f:pumpRows,x
+  sec
+  sbc #MCU_ROW_FIRST
+  tax
+  lda a:.loword(rowMasks),x
+  ora a:.loword(cacheMask)
+  sta a:.loword(rowMasks),x
+@none:
+  a16
+@next:
+  iny
+  iny
+  cpy #2*J13_KEY_SLOTS
+  bcc @key
+  ldx #0
+  ldy #0
+  a8
+@list:
+  lda a:.loword(rowMasks),x
+  beq @empty
+  sta a:.loword(rowList+1),y
+  txa
+  clc
+  adc #MCU_ROW_FIRST
+  sta a:.loword(rowList),y
+  iny
+  iny
+@empty:
+  inx
+  cpx #MCU_ROWS
+  bcc @list
+  a16
+  sty a:.loword(rowListSize)
+  rts

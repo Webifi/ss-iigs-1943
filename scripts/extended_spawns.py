@@ -8,10 +8,11 @@ import struct
 from roms import load
 from stage_controls import event_tables
 
-EXTENDED_POOL = 0x5A00
 # Flags: camera-relative X, persistent group, four-piece, all attrs/blank tails,
 # difficulty >=9 clears field12.
 RELATIVE, GROUP, QUAD, CLEAR, DIFFICULTY = 1, 2, 4, 8, 16
+# Kinds (the pool of the record): a small object, a core, a turret, a giant.
+KINDS = ("SMALL", "CORE", "TURRET", "GIANT")
 
 
 def collect():
@@ -133,7 +134,23 @@ def collect():
 
 def prepare(out):
     plans = collect()
-    lines = [f"EXTENDED_SPAWN_COUNT = {len(plans)}", "extended_spawn_ids:"]
+    lines = [
+        f"EXTENDED_SPAWN_COUNT = {len(plans)}",
+        "; A plan: the record count, then records of EX_KIND, EX_FLAGS, EX_TEMPLATE.",
+        "EX_KIND = 0",
+        "EX_FLAGS = 1",
+        "EX_TEMPLATE = 2",
+        "EX_RECORD_SIZE = 4",
+        *(f"EX_{name} = {i}" for i, name in enumerate(KINDS)),
+        *(
+            f"EXF_{name} = {value}"
+            for name, value in zip(
+                ("RELATIVE", "GROUP", "QUAD", "CLEAR", "DIFFICULTY"),
+                (RELATIVE, GROUP, QUAD, CLEAR, DIFFICULTY),
+            )
+        ),
+        "extended_spawn_ids:",
+    ]
     roots = []
     lines += [
         "  .word " + ",".join(f"${p:04x}" for bank, p in plans),

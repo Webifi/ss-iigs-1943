@@ -5,51 +5,31 @@ reads; the IIgs never sends sprite pixels during play. Live objects pin cache
 entries until the current picture is drawn.
 """
 
-import os
-import struct
 from scene import ArtPool, Art
-from packed_art import spans
+
+
+def nibbles(data):
+    return bytes(
+        data[i] | ((data[i + 1] if i + 1 < len(data) else 0) << 4) for i in range(0, len(data), 2)
+    )
+
+
+def spans(data):
+    """Four-bit row spans of a 16x16 sprite: per row a header byte, then the pixels."""
+    out = bytearray()
+    for y in range(16):
+        row = data[y * 16 : y * 16 + 16]
+        visible = [x for x, p in enumerate(row) if p]
+        if not visible:
+            out.append(255)
+            continue
+        first, last = visible[0], visible[-1] + 1
+        out.append(first | ((last - first - 1) << 4))
+        out.extend(nibbles(row[first:last]))
+    return bytes(out)
+
 
 SLOTS = 128
-CODE = 0x6000
-KEYS = 0x7400
-USED = 0x7500
-NEXT = 0x7580
-SLOT = 0x7581
-KEY = 0x7582
-SOURCE = 0x7584
-FLAGS = 0x7586
-SIZE = 0x7587
-COLOR = 0x7588
-BOUNDS = 0x7600
-WIRE = 0x7900
-ENTRY = 0x7B00
-PHASE = 0x7B20
-SLOT_PHASES = 0x7C80
-CHAIN = 0x7C00
-SPANPTR = 0x758A
-HASH = 0x2F00
-HASH_KEY = 0x758C
-MATCH = 0x758D
-SOURCE_PHASE = 0x758E
-CLONE_SOURCE = 0x7B24
-CLONE_DEST = 0x7B26
-PREFETCH_NEXT = 0x758F
-HIDDEN_COUNT = 0x7B2A
-HIDDEN_NEXT = 0x7B2B
-BINDING = 0x7B2C
-CLONE_FIRST = 0x7B2F
-PIXEL = 0x7B30
-PIXEL_NEXT = 0x7B32
-MATCH_PIXEL = 0x7B34
-PIXEL_BEST = 0x7B36
-PIXEL_SOURCE = 0x7B38
-PHASE_RECORD = 0xC000
-DIRECT_BANK = 11
-PIN_LIST = 0xCC00
-PIN_COUNT = 0x7B3D
-HEADER_NEXT = 0x7B3E
-STAMP = 0x7B3F
 
 
 class GameArtPool(ArtPool):
@@ -69,7 +49,6 @@ class SpriteCache:
         self.index = [None] * 2048
         self.slots = []
         self.blocks = []
-        self.mask_table = bytes(int(bool(v & 15)) | int(bool(v >> 4)) << 1 for v in range(256))
         # Spans of length 1 or 2 cannot have internal transparent pixels.
         # The unused header codes fit every longer span with holes, so the
         # source itself says whether its mask is an interval. No extra bytes.
@@ -166,7 +145,6 @@ class SpriteCache:
             )
             origin = shared[wire_for(code, pixels, bounds)]
             self.index[code] = self.index[origin]
-        self.source_wire_bytes = sum(map(len, shared))
 
         def directory(source):
             for entry in self.index:
@@ -205,18 +183,15 @@ class SpriteCache:
         prop_masks = pool.vram.table(
             2048, lambda source: source.data(self.prop_masks), 4096, name="sprite_prop_masks"
         )
-        # The card code reads these (src/card/sprite_cache.s).
+        # The card code reads these (src/secondsight/sprite_cache.s).
         index("group16"), index("vseg"), pairs("vseg"), pairs("vbbr4k")
         prop_masks("group16"), prop_masks("vseg")
         archive("vseg"), archive("vbbr4k")
         # Final phase capacity is allocated after every other feature's art.
-        self.requested_slots = int(os.environ.get("SS1943_SPRITE_SLOTS", "512"))
-        if not 128 <= self.requested_slots <= 512:
-            raise ValueError("SS1943_SPRITE_SLOTS must be 128..512")
+        self.requested_slots = 512
         # Code generation needs the cache interface before the HUD and
         # attract programs allocate. Physical slots are placed only after
         # those assets, so a small slot cannot fragment their larger blocks.
-        self.phase_records = bytearray()
         pool.cpu_window = previous
         self.low_palettes = {
             c for c in range(16) if any(a.prom[0x900 + c * 16 + p] & 8 for p in range(1, 16))
@@ -225,7 +200,6 @@ class SpriteCache:
         assert all(
             (a.prom[0x900 + c * 16 + p] & 8) != 0 for c in self.low_palettes for p in range(1, 16)
         )
-        self.slot_records = bytearray(b"\xff" * 1024)
 
     def set_propellers(self, keys):
         """The propeller art among KEYS, (code, pair) of scripts/propellers.py:
@@ -241,7 +215,7 @@ class SpriteCache:
         before any cache descriptor can become live, so no load writes them."""
         assert not self.slots, "Sprite pixels must be allocated once, last"
         from asset_source import Source
-        from card_link import asset
+        from secondsight_link import asset
 
         pool = self.scene.pool
         self.clear_ranges = []
@@ -256,14 +230,13 @@ class SpriteCache:
         records.label("phase_records")
         for slot in self.slots:
             records.word(slot("group16")).byte(slot("vseg"), 0, 255, 255).word(0)
-        self.phase_record_bytes = records.size
         asset("phase_records", records)
         self.set_capacity(len(self.slots))
 
     def boot_clear_source(self):
         """Boot-only DMA fill; no host payload, gameplay code or extra VRAM:
-        build/card/gen/cache_boot_clear_ranges.s."""
-        from card_link import generate, section_sizes
+        build/secondsight/gen/cache_boot_clear_ranges.s."""
+        from secondsight_link import generate
 
         lines = [
             "; Generated by scripts/game_art.py: video RAM ranges of the phase slots.",
@@ -275,36 +248,27 @@ class SpriteCache:
             lines.append(f"        .byte {block('vseg')}")
             lines.append(f"        .word {block('group16')}, {count}")
         lines += ["        .byte 0xFF", "cache_boot_clear_done:"]
-        source = generate("cache_boot_clear_ranges", "\n".join(lines) + "\n")
-        self.clear_code_bytes = (
-            section_sizes("sprite_cache")[".text.cache_boot_clear"]
-            + section_sizes(source)[".rodata.cache_boot_clear_ranges"]
-        )
+        generate("cache_boot_clear_ranges", "\n".join(lines) + "\n")
 
     def set_capacity(self, slots):
         """Link values of the phase record count, for the cache code."""
-        from card_link import define
+        from asset_source import derived
+        from secondsight_link import alias, define
 
         define("phase_clock_passes", slots * 2)
-        define("phase_record_end", 0xC000 + slots * 8)
+        alias("phase_record_end", f"{derived('ptr', 'phase_records')} + {slots * 8}")
         define("phase_record_count", slots)
 
-    def install(self, host):
-        host.upload(0x100000 + KEYS, b"\xff" * 384 + bytes(128))
-        host.upload(0x100000 + HASH, bytes(256))
-        host.upload(0x100000 + CHAIN, bytes(SLOTS))
-        # Build-prepared canonical coverage for uniform terrain rows, in
-        # the existing reserved common-SRAM area beside the row cache.
-        host.upload(0x10B900, bytes(32) + b"\xff" * 32)
-        host.upload(0x117800, self.slot_records)
-        host.upload(0x100000 + PIXEL_NEXT, struct.pack("<H", PHASE_RECORD))
-        host.upload(0x100000 + PIN_COUNT, b"\0\0\1")
-
     def install_directory(self, host):
-        host.upload(0x112000, (bytes(8) + b"\xff" + bytes(5) + b"\xff\xff") * 128)
-        host.upload(0x117000, bytes(2048))
-        host.upload(0x112800, bytes(m << (2 * pair) for pair in range(4) for m in self.mask_table))
-        host.upload(0x112C00, self.span_headers + self.span_masks)
+        """The span tables of the sprite cache (.sprite_headers of
+        secondsight.ld; src/secondsight/sprite_cache.s holds the others)."""
+        from asset_source import Source
+        from secondsight_link import asset
+
+        source = Source("sprite cache span tables (scripts/game_art.py)")
+        source.section(".rodata.span_headers").label("span_headers").data(self.span_headers)
+        source.section(".rodata.span_masks").label("span_masks").data(self.span_masks)
+        asset("sprite_spans", source)
 
     def sources(self):
         """The generated sources of the sprite cache and the code that shares

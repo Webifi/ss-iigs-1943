@@ -6,9 +6,6 @@ restores, masked rectangles, opaque rectangles, sea updates and page flips.
 
 from dataclasses import dataclass
 
-from playfield import GROUPS
-
-W, H = 224, 256
 
 
 @dataclass
@@ -23,20 +20,19 @@ class Art:
 
 class ArtPool:
     """The art and the other video RAM data of the build. Each part is a
-    section that scripts/card_layout.py places in the free video RAM."""
+    section that scripts/secondsight_fit.py places in the free video RAM."""
 
-    def __init__(self, a, sea_size):
+    def __init__(self, a):
         from asset_source import VideoRam
 
         self.a = a
         self.items = {}
         self.vram = VideoRam()
-        self.trimmed_art_bytes = 0
         self.cpu_window = 0x4000
         # Free video RAM (linear addresses) for the placed sections.
         self.free = [
             [0x5C000, 0x80000],
-            [0x80000 + sea_size, 0x100000],
+            [0x80000, 0x100000],
             [0x1C000, 0x20000],
             [0x3C000, 0x40000],
         ]
@@ -44,11 +40,6 @@ class ArtPool:
     def allocate(self, data):
         """A video RAM section of DATA inside one window of cpu_window groups."""
         return self.vram.add(data, self.cpu_window)
-
-    def reserve(self, size, fill=None):
-        """SIZE bytes of video RAM; FILL() makes them at link time, or nothing
-        loads them."""
-        return self.vram.reserve(size, self.cpu_window, fill)
 
     def runtime(self, data, window=None, load=True, name=None):
         """A run-time area of the video RAM map: the host or the card writes it
@@ -100,10 +91,10 @@ class ArtPool:
     def install(self):
         """Give the free video RAM to the allocator and the sections to the
         final link."""
-        import card_layout
-        from card_link import asset_later
+        import secondsight_link
+        from secondsight_link import asset_later
 
-        card_layout.free_vram = lambda: [(lo, hi) for lo, hi in self.free if lo < hi]
+        secondsight_link.free_vram = lambda: [(lo, hi) for lo, hi in self.free if lo < hi]
         asset_later("vram", self.vram.source)
 
     def get(self, cmd):
@@ -154,7 +145,6 @@ class ArtPool:
 
                 # A descriptor reads the occupied rows through one 8 KB window.
                 addr = self.vram.add(data, 0x2000) if data else Vram("vram_null")
-                self.trimmed_art_bytes += len(pixels) - len(data)
                 # The anchor is virtual. Draw commands only address occupied
                 # rows, which start at the actual allocated source address.
                 addr -= first * width
@@ -163,22 +153,9 @@ class ArtPool:
 
 
 class Scene:
-    def __init__(self, a, frames, pool, cached_foreground=False, window=0x4000):
+    def __init__(self, a, pool, window):
         self.a = a
-        self.frames = frames
         self.pool = pool
-        self.commands = []
-        self.stats = []
         self.window = window
         pool.cpu_window = window
-        self.camera_start = None
-        self.camera_updates = []
-        page_camera = [None, None]
-        previous_scroll = None
-        # Damage belongs to physical rows, including both halves of each ring.
-        # A view crossing row zero must not inherit an old twin's object marks.
-        damaged = [bytearray(GROUPS * 512), bytearray(GROUPS * 512)]
-        self.foreground_cache = None
-        self.packet_data = []
-        self.locations = []
 

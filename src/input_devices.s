@@ -1,27 +1,40 @@
-; Mouse coordinates are a persistent virtual stick, not velocity controls.
-; SNES MAX protocol follows Lukazi's SNES_MAX_ASS5 source. No slot probing.
-; Paddle timing uses the real IIgs video counter rather than CPU loop counts.
+; The input devices: the mouse as a virtual stick (a position, not a
+; speed), the game-port joystick (timed by the video counter, not by CPU
+; loops), and the SNES MAX adapter (as Lukazi's SNES_MAX_ASS5; no slot
+; probe). Each sets its device key states (set_device).
+PAD_SLOT = 1    ; the gamepad adapter slot until input_settings patches the operands
+PADDLE_LOW = 8               ; joy_read: the low and high thresholds, in
+PADDLE_HIGH = 14             ; VERTCNT steps (two 63.6 us lines each)
+PADDLE_ABSENT = 32           ; a stick still high after this is not there
+PADDLE_LOW_LATE = 10         ; a read later than this is not used
+PADDLE_HIGH_LATE = 16
+JOY_READ_NOW = $ffff         ; joyUpdate: read the axes at the next sample
+PAD_BITS = 16                ; bits of one SNES MAX read
+
 .a16
 .i16
+; devices_sample: one input sample: the mouse, the joystick buttons (as the
+; Apple keys of the J13 switches allow), the pad, the joystick axes once an
+; update. JSR; A16.
 devices_sample:
-  sep #$20
+  a8
   jsr .loword(mouse_directions)
   ; ADB reports the keyboard's own Apple keys. J13 has only the shared
-  ; switches: a bound J13 Apple signal belongs to the keyboard; unbinding
-  ; it frees the signal for the joystick. No software can distinguish both
-  ; physical switches being held together on that shared wire.
-  ldx #52
+  ; switches: a bound J13 Apple key belongs to the keyboard; without a
+  ; binding the switch is the joystick's. Both switches held together on
+  ; that wire look the same.
+  ldx #DEV_JOYSTICK+ACT_FIRE
   lda f:BUTN0
   bpl @button0_up
-  lda a:.loword(keyHeld+$37)
+  lda a:.loword(keyHeld+KEY_COMMAND)
   and #1                      ; ADB has its own physical key identity
   bne @button0_up
-  lda a:.loword(keyHeld+$37)
-  and #2
+  lda a:.loword(keyHeld+KEY_COMMAND)
+  and #HELD_J13
   beq @button0_joy
-  lda a:.loword(commandMasks+(128+$37)*4)
-  ora a:.loword(commandMasks+(128+$37)*4+1)
-  ora a:.loword(commandMasks+(128+$37)*4+2)
+  lda a:.loword(commandMasks+(KEYBOARD2+KEY_COMMAND)*MASK_SIZE)
+  ora a:.loword(commandMasks+(KEYBOARD2+KEY_COMMAND)*MASK_SIZE+1)
+  ora a:.loword(commandMasks+(KEYBOARD2+KEY_COMMAND)*MASK_SIZE+2)
   bne @button0_up
 @button0_joy:
   lda #1
@@ -33,15 +46,15 @@ devices_sample:
   inx
   lda f:BUTN1
   bpl @button1_up
-  lda a:.loword(keyHeld+$3a)
+  lda a:.loword(keyHeld+KEY_OPTION)
   and #1
   bne @button1_up
-  lda a:.loword(keyHeld+$3a)
-  and #2
+  lda a:.loword(keyHeld+KEY_OPTION)
+  and #HELD_J13
   beq @button1_joy
-  lda a:.loword(commandMasks+(128+$3a)*4)
-  ora a:.loword(commandMasks+(128+$3a)*4+1)
-  ora a:.loword(commandMasks+(128+$3a)*4+2)
+  lda a:.loword(commandMasks+(KEYBOARD2+KEY_OPTION)*MASK_SIZE)
+  ora a:.loword(commandMasks+(KEYBOARD2+KEY_OPTION)*MASK_SIZE+1)
+  ora a:.loword(commandMasks+(KEYBOARD2+KEY_OPTION)*MASK_SIZE+2)
   bne @button1_up
 @button1_joy:
   lda #1
@@ -50,43 +63,46 @@ devices_sample:
   lda #0
 @button1:
   jsr .loword(set_device)
-  lda a:.loword(settings+9)
+  lda a:.loword(settings+SET_SNES_SLOT)
   beq @no_pad
   jsr .loword(pad_read)
 @no_pad:
-  ; Prefer the update's idle interval. If there was none, the bounded
-  ; threshold read is still required to avoid stale joystick directions.
+  ; The axes once an update: in the idle time when it comes, else here.
   lda a:.loword(joyAbsent)
   bne @done
-  rep #$20
-  lda f:$000068
+  a16
+  lda f:GAME_UPDATES
   cmp a:.loword(joyUpdate)
   beq @done16
-  sep #$20
+  a8
   jsr .loword(joy_read)
 @done:
-  rep #$20
+  a16
 @done16:
   rts
 
+; mouse_directions: the mouse position (mouseX, mouseY) as the four stick
+; directions of DEV_MOUSE. JSR; A8.
 .a8
 mouse_directions:
   lda a:.loword(mouseX)
   jsr .loword(stick_axis)
-  ldx #32
+  ldx #DEV_MOUSE+ACT_RIGHT
   jsr .loword(set_device)
   xba
   inx
   jsr .loword(set_device)
   lda a:.loword(mouseY)
   jsr .loword(stick_axis)
-  ldx #34
+  ldx #DEV_MOUSE+ACT_RIGHT+2     ; down, then up
   jsr .loword(set_device)
   xba
   inx
   jsr .loword(set_device)
   rts
 
+; stick_axis: A = 1 when the signed position A is SET_DEAD_ZONE or more,
+; B = 1 when it is -SET_DEAD_ZONE or less. JSR; A8.
 .a8
 stick_axis:
   pha
@@ -94,14 +110,14 @@ stick_axis:
   xba
   pla
   bmi @negative
-  cmp a:.loword(settings+10)
+  cmp a:.loword(settings+SET_DEAD_ZONE)
   bcc @zero
   lda #1
   rts
 @negative:
-  eor #255
+  eor #$ff
   inc
-  cmp a:.loword(settings+10)
+  cmp a:.loword(settings+SET_DEAD_ZONE)
   bcc @zero
   lda #1
   xba
@@ -109,70 +125,73 @@ stick_axis:
   lda #0
   rts
 
-; Paddles are RC timers on real hardware. Poll only the two direction
-; thresholds, independent of accelerator speed. The counter advances every
-; two 63.6-us lines. A disconnected axis remains high after 32 steps.
+; devices_idle: the joystick axes in the idle time, once an update. The
+; paddles are RC timers: only the two thresholds are read, whatever the CPU
+; speed. JSR; A8.
 .a8
 devices_idle:
   lda a:.loword(joyAbsent)
   bne @done
-  rep #$20
-  lda f:$000068
+  a16
+  lda f:GAME_UPDATES
   cmp a:.loword(joyUpdate)
-  sep #$20
+  a8
   beq @done
   jsr .loword(joy_read)
 @done:
   rts
+; joy_read: start the paddle timers; at PADDLE_LOW read the X paddle, at
+; PADDLE_HIGH both; a read too late (an interrupt in the wait) keeps the
+; directions before. A stick still high after PADDLE_ABSENT is not there:
+; input_poll stops. Then the four directions of DEV_JOYSTICK. JSR.
 joy_read:
-  lda f:$e0c02e
+  lda f:VERTCNT
   sta a:.loword(joyBeam)
-  lda f:$e0c070
-  lda #8
+  lda f:PTRIG
+  lda #PADDLE_LOW
   jsr .loword(joy_wait)
   php
   sei
   jsr .loword(joy_elapsed)
-  cmp #10
+  cmp #PADDLE_LOW_LATE
   bcc :+
   plp
   jmp .loword(@stamp)
 :
-  lda f:$e0c064
+  lda f:PADDL0
   sta a:.loword(joyLowX)
-  lda f:$e0c065
-  sta a:.loword(joyLowY)
   plp
-  lda #14
+  lda #PADDLE_HIGH
   jsr .loword(joy_wait)
   php
   sei
   jsr .loword(joy_elapsed)
-  cmp #16
+  cmp #PADDLE_HIGH_LATE
   bcc :+
   plp
   jmp .loword(@stamp)
 :
-  lda f:$e0c064
+  lda f:PADDL0
   sta a:.loword(joyHighX)
-  lda f:$e0c065
+  lda f:PADDL1
   sta a:.loword(joyHighY)
   plp
   lda a:.loword(joyHighX)
   and a:.loword(joyHighY)
   bpl @connected
-  ; Check absence only when both axes exceed the high threshold.
-  lda #32
+  ; Both axes high past the high threshold: is there a stick?
+  lda #PADDLE_ABSENT
   jsr .loword(joy_wait)
-  lda f:$e0c064
-  and f:$e0c065
+  lda f:PADDL0
+  and f:PADDL1
   bpl @connected
   lda #1
   sta a:.loword(joyAbsent)
-  lda #$60                    ; no timer work on an absent game-port stick
-  sta f:input_poll            ; raw ADB/J13 capture belongs to IRQ, not idle
+  lda #OPCODE_RTS               ; no stick: no more timer work (the ADB and J13
+  sta f:input_poll              ; capture is in the interrupt)
 @connected:
-  ldx #48
+  ; Right/down: still high at PADDLE_HIGH; left/up: low at PADDLE_LOW.
+  ldx #DEV_JOYSTICK
   ldy #0
 @axis:
   lda a:.loword(joyHighX),y
@@ -182,7 +201,7 @@ joy_read:
   jsr .loword(set_device)
   inx
   lda a:.loword(joyLowX),y
-  eor #128
+  eor #$80
   asl
   lda #0
   rol
@@ -193,19 +212,20 @@ joy_read:
   bcc @axis
   lda a:.loword(joyAbsent)
   beq @stamp
-  ldx #48
+  ldx #DEV_JOYSTICK
   lda #0
 @clear_absent:
   jsr .loword(set_device)
   inx
-  cpx #52
+  cpx #DEV_JOYSTICK+ACT_FIRE
   bcc @clear_absent
 @stamp:
-  rep #$20
-  lda f:$000068
+  a16
+  lda f:GAME_UPDATES
   sta a:.loword(joyUpdate)
-  sep #$20
+  a8
   rts
+; joy_wait: wait until A VERTCNT steps since joyBeam. JSR.
 joy_wait:
   sta a:.loword(joyThreshold)
 @wait:
@@ -213,11 +233,11 @@ joy_wait:
   cmp a:.loword(joyThreshold)
   bcc @wait
   rts
-; IRQs remain enabled during the RC wait. A sound service may pass the
-; sampling deadline: keep the previous direction in that case. Only the
-; counter check and two paddle reads are atomic, never the millisecond wait.
+; joy_elapsed: A = the VERTCNT steps since joyBeam (with the wrap at
+; beamPeriod). The interrupts stay on in the wait; only the step check and
+; the paddle reads are made with them off. JSR.
 joy_elapsed:
-  lda f:$e0c02e
+  lda f:VERTCNT
   sec
   sbc a:.loword(joyBeam)
   bcs :+
@@ -226,8 +246,10 @@ joy_elapsed:
 :
   rts
 
-; User-selected slot only: card has no identifying ROM/signature. Bytes
-; $C0n0 latch/read; $C0n1 clocks both controllers. First eight bits also NES.
+; pad_read: read the SNES MAX adapter in the slot of the settings (the card
+; has no ROM to find): $C0n0 latches and reads, $C0n1 clocks both pads.
+; PAD_BITS bits each (the first 8 also NES); bits 0-7 to DEV_PAD1/DEV_PAD2
+; actions 0-7, bits 8-11 to actions 8-11. JSR.
 pad_read:
   stz a:.loword(padBits)
   stz a:.loword(padBits+1)
@@ -235,10 +257,10 @@ pad_read:
   stz a:.loword(padBits+3)
   lda #0
 pad_latch:
-  sta f:$e0c090               ; patched from the explicit slot setting
+  sta f:SLOT_DEVICE+PAD_SLOT*16 ; patched from the explicit slot setting
   ldx #0
 pad_bit:
-  cpx #8
+  cpx #8                        ; bits 8-15 go to padBits+2
   bcc @first
   ldy #2
   bra @read
@@ -246,7 +268,7 @@ pad_bit:
   ldy #0
 @read:
 pad_data:
-  lda f:$e0c090
+  lda f:SLOT_DEVICE+PAD_SLOT*16
   sta a:.loword(padSerial)
   asl
   lda a:.loword(padBits),y
@@ -259,21 +281,21 @@ pad_data:
   rol
   sta a:.loword(padBits+1),y
 pad_clock:
-  sta f:$e0c091
+  sta f:SLOT_DEVICE+PAD_SLOT*16+1
   inx
-  cpx #16
+  cpx #PAD_BITS
   bcc pad_bit
   ldx #0
 @pad:
   lda a:.loword(padBits),x
-  eor #255
+  eor #$ff                      ; pressed = 1
   sta a:.loword(padPressed)
   txa
   beq :+
-  lda #16
+  lda #DEV_PAD2-DEV_PAD1
 :
   clc
-  adc #64
+  adc #DEV_PAD1
   tay
   lda #1
   sta a:.loword(padMask)
@@ -296,16 +318,16 @@ pad_clock:
   ldx #0
 @extra:
   lda a:.loword(padBits+2),x
-  eor #255
+  eor #$ff
   sta a:.loword(padPressed)
   txa
   beq :+
-  lda #16
+  lda #DEV_PAD2-DEV_PAD1
 :
   clc
-  adc #72
+  adc #DEV_PAD1+8
   tay
-  lda #128
+  lda #$80
   sta a:.loword(padMask)
 @extra_bit:
   lda a:.loword(padPressed)
@@ -327,15 +349,15 @@ pad_clock:
   bcc @extra
   rts
 
-joyUpdate: .word $ffff
+; The device state.
+joyUpdate: .word JOY_READ_NOW
 joyAbsent: .byte 0
 joyBeam: .byte 0
 joyThreshold: .byte 0
 joyLowX: .byte 0
-joyLowY: .byte 0
 joyHighX: .byte 0
 joyHighY: .byte 0
-beamPeriod: .byte 131
+beamPeriod: .byte 131           ; VERTCNT steps of a picture (PAL: PAL_BEAM_PERIOD)
 padSerial: .byte 0
 padBits: .res 4
 padPressed: .byte 0

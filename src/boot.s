@@ -1,57 +1,65 @@
-; SYSTEM file entry: bootloader/boot0.s loads this file to $2000 and starts
-; it with X = the boot unit. Relocate before loading the native game's low RAM.
+; SYSTEM file entry: bootloader/boot0.s loads this file to SYSTEM_LOAD and
+; starts it with X = the boot unit. Relocate before loading the native game's
+; low RAM.
 .setcpu "65816"
+.include "w65c816.inc"
+.include "iigs.inc"
+.include "second_sight.inc"
+.include "host_memory.inc"
+.include "data_file.inc"
+.include "settings.inc"
 .smart
 .macpack longbranch
 .a8
 .i8
-; Startup-only direct-page scratch.
-probe_ptr = $2c
-probe_bit = $2f
-probe_number = $30
-probe_digit = $32
+; src/boot.cfg places the loader: it must agree with host_memory.inc.
+.import __SYSTEM_START__, __SYSTEM_SIZE__, __LOADER_START__, __LOADER_SIZE__
+.import __LOADERZP_START__, __LOADERZP_SIZE__
+.assert __SYSTEM_START__ = SYSTEM_LOAD && __SYSTEM_SIZE__ = SYSTEM_BOOT_SIZE, error, "boot.cfg SYSTEM"
+.assert __LOADER_START__ = BOOT_LOADER && __LOADER_SIZE__ = BOOT_LOADER_SIZE, error, "boot.cfg LOADER"
+.assert __LOADERZP_START__ = LOADER_ZERO_PAGE && __LOADERZP_SIZE__ = LOADER_ZERO_PAGE_SIZE, error, "boot.cfg LOADERZP"
 .segment "BOOT"
 boot:
 .setcpu "6502"
-  ; Apple IIgs Firmware Reference, IDROUTINE ($FE1F): call with carry
-  ; set; only a IIgs clears it. Keep this entire rejection path 6502-safe.
+  ; Apple IIgs Firmware Reference, IDROUTINE: call with carry set; only a
+  ; IIgs clears it. Keep this entire rejection path 6502-safe.
   stx z:PR_UNIT              ; the boot unit, for pr_init
   cld
   sec
-  jsr $fe1f
+  jsr IDROUTINE
   bcc is_iigs
   lda #0
-  sta $c000                  ; main 40-column text, page 1
-  sta $c002
-  sta $c004
-  sta $c006
-  sta $c00c
-  sta $c00e
-  bit $c051
-  bit $c052
-  bit $c054
+  sta .loword(KBD)                  ; main 40-column text, page 1
+  sta .loword(RDMAINRAM)
+  sta .loword(WRMAINRAM)
+  sta .loword(SETSLOTCXROM)
+  sta .loword(CLR80VID)
+  sta .loword(CLRALTCHAR)
+  bit .loword(TXTSET)
+  bit .loword(MIXCLR)
+  bit .loword(TXTPAGE1)
   ldx #0
-  lda #$a0
+  lda #TEXT_SPACE
 @clear:
-  sta $0400,x
-  sta $0500,x
-  sta $0600,x
-  sta $0700,x
+  sta .loword(TEXT_PAGE1),x
+  sta .loword(TEXT_PAGE1)+$100,x
+  sta .loword(TEXT_PAGE1)+$200,x
+  sta .loword(TEXT_PAGE1)+$300,x
   inx
   bne @clear
-  ldx #3
+  ldx #3                        ; the 4 characters, centred
 @title:
   lda boot_title,x
-  ora #$80
-  sta $0512,x
+  ora #TEXT_NORMAL
+  sta .loword(TEXT_ROW_2)+18,x
   dex
   bpl @title
   ldx #0
 @message:
   lda not_iigs_message,x
   beq @hold
-  ora #$80
-  sta $05ae,x
+  ora #TEXT_NORMAL
+  sta .loword(TEXT_ROW_11)+6,x
   inx
   bne @message
 @hold:
@@ -62,25 +70,64 @@ not_iigs_message: .asciiz "1943 REQUIRES AN APPLE IIGS"
 is_iigs:
   clc
   xce
-  rep #$30
-  ldx #$2100
-  ldy #$a000
+  ax16
+  ldx #.loword(SYSTEM_LOAD+SYSTEM_BOOT_SIZE)
+  ldy #loader
   lda #loader_end-loader-1
-  mvn #0,#0
-  jmp $a000
+  mvn #^SYSTEM_LOAD,#^loader
+  jmp loader
 .segment "LOADER"
 .include "boot_settings.inc"
-.export loaded_bytes,progress_done,mirror_frozen,card_status,memory_banks
-.export boot,is_iigs,check_memory,no_memory,no_card
-.export memory_bitmap,memory_missing,firmware_limit,boot_unit,boot_driver,locate_smartport
+PROBE_TOP_BANK = $7f         ; the top bank of the memory probe
+PROBE_OFFSET = $5a5a         ; the word probe: its address in each bank
+PROBE_WORD = $a55a           ; and its value: two unequal bytes, so an empty bus fails
+MEMORY_BITMAP_SIZE = 16      ; memory_bitmap: a bit for each bank $00-$7F
+UNIT_DEVICE = $f0            ; a ProDOS unit number: bit 7 the drive, bits 4-6 the slot
+UNIT_SLOT = $70
+; A slot ROM page $Cn: a ProDOS block device has $20 at $Cn01, $00 at $Cn03
+; and $03 at $Cn05; a SmartPort also $00 at $Cn07. $CnFF: the offset of the
+; block entry; the SmartPort entry is SMARTPORT_ENTRY after it.
+ID_BYTE1 = $20
+ID_BYTE5 = $03
+SMARTPORT_ENTRY = 3
+BLOCK_ENTRY = $ff
+ROMVER_01 = 1                ; ROMVER: ROM 01 and ROM 03 keep the bank count at
+ROMVER_03 = 3                ; FW_BANKS_ROM03, ROM 00 at FW_BANKS_ROM00
+FW_BANKS_MIN = 2             ; a firmware bank count from this
+FW_BANKS_END = $81           ; up to under this is believed
+NEWVIDEO_SHR = $80           ; NEWVIDEO: super hi-res on
+CLOCKCTL_BORDER = $0f        ; CLOCKCTL: the border colour
+; The progress bar cells: MouseText on the text page, and the codes of the
+; same cells for the card firmware text (draw_progress, card_progress).
+MT_RIGHT_LINE = $5a          ; a line at the right edge of a cell
+MT_LEFT_LINE = $5f           ; a line at the left edge of a cell
+MT_CELL_EMPTY = $5c          ; an outlined empty cell
+MT_CELL_FULL = $4e           ; a filled cell
+CARD_CELL_EMPTY = $dc
+CARD_CELL_FULL = $ce
+; The progress bar: PROGRESS_CELLS (data_file.inc) cells on a text row of the
+; loading screen.
+PROGRESS_ROW = 22
+PROGRESS_COLUMN = 2
+PROGRESS_TEXT = .ident(.sprintf("TEXT_ROW_%d", PROGRESS_ROW))+PROGRESS_COLUMN
+; Loader page-zero variables. The block driver may change any of page zero
+; (bootloader/prodos_read.s), so nothing here lives across a disk read.
+.pushseg
+.segment "LOADERZP": zeropage
+probe_ptr: .res 3            ; check_memory: the probe address
+pr_zp: .res 4                ; the file reader's pointers
+unpack_end: .res 2           ; startup_unpack: the end address of the output
+unpack_length: .res 2        ; startup_unpack: a match: the byte count - 1
+unpack_distance: .res 2      ; startup_unpack: a match: the distance back
+.popseg
 .a16
 .i16
 loader:
   lda #0
   tcd
-  ldx #$01ff
+  ldx #.loword(EMULATION_STACK_TOP)
   txs
-  sep #$30
+  ax8
   sec
   xce
 .a8
@@ -96,34 +143,33 @@ loader:
   ldy #>path
   jsr pr_open
   jcs failed
-  lda #0
+  lda #<DATA_HEADER_SIZE
   sta read_request
-  lda #2
+  lda #>DATA_HEADER_SIZE
   sta read_request+1
   jsr read_block
   jcs failed
-  lda $0800
+  lda DATA_BUFFER+DATA_MAGIC
   cmp #'S'
   jne failed
-  lda $0801
+  lda DATA_BUFFER+DATA_MAGIC+1
   cmp #'S'
   jne failed
-  lda $0806
-  cmp #1
+  lda DATA_BUFFER+DATA_VERSION
+  cmp #DATA_FORMAT
   jne failed
-  lda $0808
+  lda DATA_BUFFER+DATA_SEGMENTS
   jeq failed
   sta segments
-  lda $0809
+  lda DATA_BUFFER+DATA_STARTUP
   sta card_startup
   lda pr_unit
-  and #$f0
+  and #UNIT_DEVICE
   sta boot_unit
   lda pr_driver
   sta boot_driver
   lda pr_driver+1
   sta boot_driver+1
-.if BOOT_D_WORLD
   ; Reject a driver outside the slot ROMs before replacing the text firmware.
   lda #0
   sta f:INPUT_SAVE_SP_UNIT
@@ -131,20 +177,26 @@ loader:
   lda f:INPUT_SAVE_SP_UNIT
   bne :+
   lda boot_driver+1
-  cmp #$c1
+  cmp #>SLOT1_ROM
   jcc unsupported_driver
-  cmp #$c8
+  cmp #>SLOT_ROMS_END
   jcs unsupported_driver
 :
-.endif
   ; Disk use ends when all resident segments have been loaded.
   ldx #0
 @headers:
-  lda $080a,x
+  lda DATA_BUFFER+DATA_TABLE,x
   sta headers,x
   inx
-  cpx #60
+  cpx #MAX_SEGMENTS*SEGMENT_ENTRY
   bne @headers
+  ldx #0
+@thresholds:
+  lda DATA_BUFFER+DATA_PROGRESS,x
+  sta progress_thresholds,x
+  inx
+  cpx #PROGRESS_CELLS*4
+  bne @thresholds
   stz current
 @segment:
   ldx current
@@ -163,10 +215,10 @@ loader:
 @chunk:
   clc
   xce
-  rep #$30
+  ax16
 .a16
 .i16
-  lda #4096
+  lda #DATA_BUFFER_SIZE
   sta amount
   lda dest
   beq @remaining
@@ -176,21 +228,21 @@ loader:
   bcs @remaining
   sta amount
 @remaining:
-  sep #$20
+  a8
 .a8
   lda remaining+2
   bne @amount
-  rep #$20
+  a16
 .a16
   lda remaining
   cmp amount
   bcs @amount
   sta amount
 @amount:
-  rep #$20
+  a16
   lda amount
   sta read_request
-  sep #$30
+  ax8
 .a8
 .i8
   sec
@@ -199,74 +251,74 @@ loader:
   jcs failed_far
   clc
   xce
-  rep #$30
+  ax16
 .a16
 .i16
   lda amount
   cmp read_actual
   jne failed_native
   dec
-  ldx #$0800
+  ldx #.loword(DATA_BUFFER)
   ldy dest
-  sep #$20
+  a8
 .a8
   lda dest+2
   sta @copy+1
   php
   sei
-  lda f:$e0c035
+  lda f:SHADOW
   pha
-  ora #$40                    ; bank-one $C000-$FFFF must be RAM during MVN
-  sta f:$e0c035
-  rep #$20
+  ora #SHADOW_IOLC            ; bank-one $C000-$FFFF must be RAM during MVN
+  sta f:SHADOW
+  a16
 .a16
   lda amount
   dec
 @copy:
-  mvn #0,#0
-  sep #$20
+  mvn #^DATA_BUFFER,#0        ; the destination bank: dest+2
+  a8
 .a8
   pla
-  sta f:$e0c035               ; the normal I/O/LC mapping again
+  sta f:SHADOW               ; the normal I/O/LC mapping again
   plp
   lda #0
   pha
   plb
-  rep #$20
+  a16
 .a16
   lda dest
   clc
   adc amount
   sta dest
-  sep #$20
+  a8
 .a8
   lda dest+2
   adc #0
   sta dest+2
-  rep #$20
+  a16
 .a16
   lda remaining
   sec
   sbc amount
   sta remaining
-  sep #$20
+  a8
 .a8
   lda remaining+2
   sbc #0
   sta remaining+2
-  rep #$20
+  a16
 .a16
   lda remaining
   ora remaining+1
   bne @more
-  sep #$30
+  ax8
 .a8
 .i8
   sec
   xce
   lda current
   clc
-  adc #6
+  adc #SEGMENT_ENTRY
   sta current
   dec segments
   beq @ready
@@ -276,134 +328,112 @@ loader:
 @ready:
   lda card_startup
   beq :+
-  ; The startup decoder uses bank-one $8000 scratch. Do not shadow its
+  ; The startup decoder writes STARTUP_UNPACK_OUTPUT. Do not shadow its
   ; writes into resident slow-bank data; leave text mirroring enabled.
-  lda f:$e0c035
-  ora #$1e
-  sta f:$e0c035
+  lda f:SHADOW
+  ora #SHADOW_GRAPHICS
+  sta f:SHADOW
   jsr load_card
 :
-.if BOOT_D_WORLD
   ; Prevent startup scratch writes in the pool page from shadowing onto the
   ; slow-bank world assets. Text mirroring stays enabled for the card.
-  lda f:$e0c035
-  ora #$1e
-  sta f:$e0c035
+  lda f:SHADOW
+  ora #SHADOW_GRAPHICS
+  sta f:SHADOW
   jsr stage_d_world
   jcs failed_far
-.endif
-.if BOOT_C_WORLD
-  ; Last DATA read. The config read later touches only $0800-$09FF; these
-  ; two staging areas survive until the handoff stub runs.
-  stz read_request
-  lda #$10
-  sta read_request+1
-  jsr read_block
+  ; Last DATA read. The config read later uses only the first 512 bytes of
+  ; DATA_BUFFER; these two staging areas survive until the handoff stub runs.
+  .assert <C_WORLD_SIZE = 0 && C_WORLD_SIZE <= DATA_BUFFER_SIZE, error
+  lda #>C_WORLD_SIZE
+  jsr read_pages
   jcs failed_far
-  lda read_actual
-  jne failed_far
-  lda read_actual+1
-  cmp #$10
-  jne failed_far
   clc
   xce
-  rep #$30
-  ldx #$0800
-  ldy #$8000
-  lda #$0bff
-  mvn #$00,#$00
-  ldx #$1400
-  ldy #$0c00
-  lda #$03ff
-  mvn #$00,#$00
-  sep #$30
+  ax16
+  ldx #.loword(DATA_BUFFER)
+  ldy #.loword(C_WORLD_STAGE0)
+  lda #C_WORLD_PART0_SIZE-1
+  mvn #^DATA_BUFFER,#^C_WORLD_STAGE0
+  ldx #.loword(DATA_BUFFER+C_WORLD_PART0_SIZE)
+  ldy #.loword(C_WORLD_STAGE1)
+  lda #C_WORLD_PART1_SIZE-1
+  mvn #^DATA_BUFFER,#^C_WORLD_STAGE1
+  ax8
   lda #0
   pha
   plb
   sec
   xce
-.endif
   ; The slow video banks now hold resident game data. The settings handoff
   ; writes bank-zero variables in the hi-res address range: stop their
   ; shadow copies before publishing them. Text mirroring remains enabled.
-  lda f:$e0c035
-  ora #$1e
-  sta f:$e0c035
+  lda f:SHADOW
+  ora #SHADOW_GRAPHICS
+  sta f:SHADOW
   jsr load_settings
   jsr locate_smartport
   jsr black_screen
-.if BOOT_LC_WORLD
-  ; The disk reads are done. The temporary $B000 buffer does not overlap the
-  ; loader. Publish the bank-one language-card tail only after the last disk
-  ; call.
+  ; The disk reads are done. LC_WORLD_STAGE does not overlap the loader.
+  ; Publish the bank-one language-card tail only after the last disk call.
   php
   sei
-  lda f:$e0c035
+  lda f:SHADOW
   pha
-  ora #$40
-  sta f:$e0c035
+  ora #SHADOW_IOLC
+  sta f:SHADOW
   clc
   xce
-  rep #$30
-  ; Swap rather than discard the prior bank-one contents: $B000 keeps the
-  ; firmware image for the save bridge while the game owns $01:F400.
-  ldx #$0bfe
+  ax16
+  ; Swap rather than discard the prior bank-one contents: LC_WORLD_STAGE
+  ; keeps the firmware image (FIRMWARE_LC_SAVE) for the save bridge while
+  ; the game owns LC_WORLD.
+  ldx #LC_WORLD_SIZE-2
 @swap_lc:
-  lda f:$00b000,x
+  lda f:LC_WORLD_STAGE,x
   pha
-  lda f:$01f400,x
-  sta f:$00b000,x
+  lda f:LC_WORLD,x
+  sta f:LC_WORLD_STAGE,x
   pla
-  sta f:$01f400,x
+  sta f:LC_WORLD,x
   dex
   dex
   bpl @swap_lc
-  sep #$30
+  ax8
   lda #0
   pha
   plb
   sec
   xce
   pla
-  sta f:$e0c035
+  sta f:SHADOW
   plp
-.endif
   lda #0
-  sta f:$e0c006
-  sta f:$e0c002
-  sta f:$e0c004
-  sta f:$050300
-  sta f:$050301
-  sta f:$050320
-  sta f:$050321
-  lda f:$e0c02d
-  ora #$10
-  sta f:$e0c02d
-  lda #$43
-  sta f:$0503fe
+  sta f:SETSLOTCXROM
+  sta f:RDMAINRAM
+  sta f:WRMAINRAM
+  lda f:SLTROMSEL
+  ora #SLTROMSEL_SLOT4
+  sta f:SLTROMSEL
   ; ROM 1.4 can turn video back on after an Apple display-switch event.
   ; All Apple display setup is now complete; blank once more.
-  lda #4                     ; ScreenOff leaves the prior status unchanged
-  sta $c0b0
-.if BOOT_LC_WORLD
+  lda #SS_SCREEN_OFF         ; leaves the prior status unchanged
+  sta .loword(SS_COMMAND)
   jml GAME_HANDOFF
-.else
-  jml $006000
-.endif
 failed_native:
-  sep #$30
+  ax8
 .a8
 .i8
   sec
   xce
 failed_far:
   jmp failed
-; Read read_request bytes of SS1943.DATA to $0800; read_actual = the bytes
-; read.
+; Read read_request bytes of SS1943.DATA to DATA_BUFFER; read_actual = the
+; bytes read.
 read_block:
-  lda #<$0800
+  lda #<DATA_BUFFER
   sta pr_dest
-  lda #>$0800
+  lda #>DATA_BUFFER
   sta pr_dest+1
   lda read_request
   sta pr_count
@@ -426,84 +456,82 @@ read_block:
 @done:
   rts
 
+; Read A pages of SS1943.DATA to DATA_BUFFER. Carry set: a disk error or a
+; short read.
+read_pages:
+  stz read_request
+  sta read_request+1
+  jsr read_block
+  bcs @done
+  lda read_actual+1
+  eor read_request+1
+  ora read_actual
+  cmp #1                     ; carry clear only when all pages came
+@done:
+  rts
 
-; The $D000-$FAFF trailer uses no permanent high-memory backing. Its
-; pieces occupy startup-only audio, pool, game-state and packet scratch.
-.if BOOT_D_WORLD
+; The D_WORLD parts use no permanent high-memory backing: they wait in
+; startup-only audio, pool, game-state and packet scratch until the handoff.
+D_WORLD_PART23_SIZE = D_WORLD_PART2_SIZE+D_WORLD_PART3_SIZE
+.assert <D_WORLD_PART0_SIZE = 0 && D_WORLD_PART0_SIZE <= DATA_BUFFER_SIZE, error
+.assert <D_WORLD_PART1_SIZE = 0 && D_WORLD_PART1_SIZE <= DATA_BUFFER_SIZE, error
+.assert <D_WORLD_PART23_SIZE = 0 && D_WORLD_PART23_SIZE <= DATA_BUFFER_SIZE, error
 stage_d_world:
-  stz read_request
-  lda #$10
-  sta read_request+1
-  jsr read_block
-  jcs @bad
-  lda read_actual
-  jne @bad
-  lda read_actual+1
-  cmp #$10
-  jne @bad
+  lda #>D_WORLD_PART0_SIZE
+  jsr read_pages
+  bcs @done
   php
   sei
   clc
   xce
-  rep #$30
-  ldx #$0800
-  ldy #$8000
-  lda #$0fff
-  mvn #$00,#$01
-  sep #$30
+  ax16
+  ldx #.loword(DATA_BUFFER)
+  ldy #.loword(D_WORLD_STAGE0)
+  lda #D_WORLD_PART0_SIZE-1
+  mvn #^DATA_BUFFER,#^D_WORLD_STAGE0
+  ax8
   lda #0
   pha
   plb
   sec
   xce
   plp
-  jsr read_block
-  jcs @bad
-  lda read_actual
-  jne @bad
-  lda read_actual+1
-  cmp #$10
-  jne @bad
+  lda #>D_WORLD_PART1_SIZE
+  jsr read_pages
+  bcs @done
   php
   sei
   clc
   xce
-  rep #$30
-  ldx #$0800
-  ldy #$5000
-  lda #$0fff
-  mvn #$00,#$00
-  sep #$30
+  ax16
+  ldx #.loword(DATA_BUFFER)
+  ldy #.loword(D_WORLD_STAGE1)
+  lda #D_WORLD_PART1_SIZE-1
+  mvn #^DATA_BUFFER,#^D_WORLD_STAGE1
+  ax8
   lda #0
   pha
   plb
   sec
   xce
   plp
-  stz read_request
-  lda #$0b
-  sta read_request+1
-  jsr read_block
-  jcs @bad
-  lda read_actual
-  jne @bad
-  lda read_actual+1
-  cmp #$0b
-  jne @bad
+  lda #>D_WORLD_PART23_SIZE
+  jsr read_pages
+  bcs @done
   php
   sei
   clc
   xce
-  rep #$30
-  ldx #$0800
-  ldy #.loword(BOOT_D_STAGE)
-  lda #$06ff
-  mvn #$00,#.bankbyte(BOOT_D_STAGE)
-  ldx #$0f00
-  ldy #$8c00
-  lda #$03ff
-  mvn #$00,#$00
-  sep #$30
+  ax16
+  ldx #.loword(DATA_BUFFER)
+  ldy #.loword(D_WORLD_STAGE2)
+  lda #D_WORLD_PART2_SIZE-1
+  mvn #^DATA_BUFFER,#^D_WORLD_STAGE2
+  ldx #.loword(DATA_BUFFER+D_WORLD_PART2_SIZE)
+  ldy #.loword(D_WORLD_STAGE3)
+  lda #D_WORLD_PART3_SIZE-1
+  mvn #^DATA_BUFFER,#^D_WORLD_STAGE3
+  ax8
   lda #0
   pha
   plb
@@ -511,11 +539,8 @@ stage_d_world:
   xce
   plp
   clc
+@done:
   rts
-@bad:
-  sec
-  rts
-.endif
 
 ; Read the tiny configuration. Its native checksum validator keeps compiled
 ; defaults if the file is corrupt. Saves write its one block in place; with
@@ -538,23 +563,23 @@ load_settings:
   sta f:INPUT_SAVE_DRIVER
   lda boot_driver+1
   sta f:INPUT_SAVE_DRIVER+1
-  lda #<$0800
+  lda #<DATA_BUFFER
   sta pr_dest
-  lda #>$0800
+  lda #>DATA_BUFFER
   sta pr_dest+1
   stz pr_count
-  lda #>512
+  lda #>SETTINGS_SIZE
   sta pr_count+1
   jsr pr_read
   bcs @done
   clc
   xce
-  rep #$30
-  ldx #$0800
+  ax16
+  ldx #.loword(DATA_BUFFER)
   ldy #.loword(INPUT_SETTINGS)
-  lda #511
-  .byte $54,.bankbyte(INPUT_SETTINGS),0
-  sep #$30
+  lda #SETTINGS_SIZE-1
+  mvn #^DATA_BUFFER,#^INPUT_SETTINGS
+  ax8
   lda #0
   pha
   plb
@@ -571,44 +596,44 @@ boot_driver: .word 0
 locate_smartport:
   stz smart_unit
   lda boot_driver+1
-  cmp #$c1
+  cmp #>SLOT1_ROM
   jcc @done
-  cmp #$c8
+  cmp #>SLOT_ROMS_END
   jcs @done
   sec
-  sbc #$c0
+  sbc #>SLOT1_ROM-1             ; the slot
   asl
   asl
   asl
   asl
   sta smart_slot
   lda boot_unit
-  and #$70
+  and #UNIT_SLOT
   cmp smart_slot
   jne @done
   lda boot_driver
   clc
-  adc #3
+  adc #SMARTPORT_ENTRY
   jcs @done
   sta smart_entry
   lda boot_driver+1
   sta smart_entry+1
-  lda #1
+  lda #1                        ; the SmartPort unit: 1, or 2 for drive 2
   bit boot_unit
   bpl :+
   inc
 :
   sta smart_unit
   lda smart_entry+1
-  cmp #$c1
+  cmp #>SLOT1_ROM
   jcc @done
-  cmp #$c8
+  cmp #>SLOT_ROMS_END
   jcs @done
   sta probe_ptr+1
   stz probe_ptr
   ldy #1
   lda (probe_ptr),y
-  cmp #$20
+  cmp #ID_BYTE1
   jne @done
   ldy #3
   lda (probe_ptr),y
@@ -616,16 +641,16 @@ locate_smartport:
   iny
   iny
   lda (probe_ptr),y
-  cmp #3
+  cmp #ID_BYTE5
   jne @done
   iny
   iny
-  lda (probe_ptr),y
+  lda (probe_ptr),y             ; $Cn07: a SmartPort
   jne @done
-  ldy #$ff
+  ldy #BLOCK_ENTRY
   lda (probe_ptr),y
   clc
-  adc #3
+  adc #SMARTPORT_ENTRY
   jcs @done
   cmp smart_entry
   jne @done
@@ -642,126 +667,102 @@ smart_slot: .byte 0
 smart_entry: .word 0
 
 ; Startup only: stream card assets from the open DATA file. The game keeps
-; no duplicate of these immutable VRAM/SRAM uploads in host RAM.
+; no duplicate of these immutable VRAM/SRAM uploads in host RAM. Each record
+; fits DATA_BUFFER (scripts/boot_disk.py boot_uploads).
 .a8
 .i8
 load_card:
-  lda #11
-  sta $c0b0
+  lda #SS_SET_SHADOW
+  sta .loword(SS_COMMAND)
   jsr card_on
-  lda #4
-  sta $c0b1
+  lda #SS_SHADOW_NONE
+  sta .loword(SS_DATA_OUT)
   jsr card_off
   jsr freeze_mirror
-@header:
-  lda #10
+@record:
+  lda #RECORD_HEADER_SIZE
   sta read_request
   stz read_request+1
   jsr read_block
   jcs failed
-  ldx #9
+  ldx #RECORD_HEADER_SIZE-1
 @keep:
-  lda $0800,x
+  lda DATA_BUFFER,x
   sta card_header,x
   dex
   bpl @keep
-  lda card_header+3
-  ora card_header+4
-  ora card_header+5
+  lda card_header+RECORD_SIZE
+  ora card_header+RECORD_SIZE+1
   bne :+
   ; Keep the text timing blanked until the native entry selects the cable's
   ; game mode. A firmware graphics mode here can finish after ScreenOff and
   ; expose the newly loaded art during host/DOC initialization (ROM 1.4 E29).
-  lda #4                     ; ScreenOff has no response or parameter phase
-  sta $c0b0
+  lda #SS_SCREEN_OFF
+  sta .loword(SS_COMMAND)
   rts
 :
-  lda card_header+6
-  and #$80
+  lda card_header+RECORD_CONTROL
+  and #RECORD_FINAL_SRAM
   beq :+
   lda #1
   sta mirror_final
   jsr freeze_mirror
 :
-  lda card_header+6
-  and #$40
+  lda card_header+RECORD_CONTROL
+  and #RECORD_FINAL_VRAM
   beq :+
   lda #1
   sta card_final_video
   jsr freeze_mirror
-  lda #4                     ; text VRAM is about to become game data
-  sta $c0b0                  ; blank only this final, short handoff
+  lda #SS_SCREEN_OFF         ; text VRAM is about to become game data
+  sta .loword(SS_COMMAND)    ; blank only this final, short handoff
 :
-  lda card_header+7
-  sta upload_registers+5
-@chunk:
-  ; Disk firmware may restore Apple video switches. Read the next block
-  ; first, then establish the card's byte-write path before its DMA phase.
-  clc
-  xce
-  rep #$30
-.a16
-.i16
-  lda card_header+3
-  cmp #4096
-  bcc :+
-  lda #4096
-:
+  lda card_header+RECORD_MASK
+  sta upload_map_mask
+  ; Disk firmware may restore Apple video switches. Read the record first,
+  ; then establish the card's byte-write path before its DMA phase.
+  lda card_header+RECORD_SIZE
   sta amount
   sta read_request
-  sep #$30
-.a8
-.i8
-  sec
-  xce
-  lda card_header+6
-  and #$20
+  lda card_header+RECORD_SIZE+1
+  sta amount+1
+  sta read_request+1
+  lda card_header+RECORD_CONTROL
+  and #RECORD_PACKED
   beq @read_upload
-  ; The stored length travels in the record header, avoiding a separate
-  ; read for each compressed block.
-  lda card_header+8
+  lda card_header+RECORD_STORED
   sta read_request
-  lda card_header+9
+  lda card_header+RECORD_STORED+1
   sta read_request+1
   ora read_request
   jeq failed
   lda read_request+1
-  cmp #$10
+  cmp #>DATA_BUFFER_SIZE
   jcs failed
 @read_upload:
   jsr read_block
   jcs failed
-  lda card_header+6
-  and #$20
+  lda card_header+RECORD_CONTROL
+  and #RECORD_PACKED
   beq @upload_ready
-  ; Reassert the shadow state after the firmware read before writing the
-  ; bank-one staging page. Text shadowing remains enabled.
-  lda f:$e0c035
-  ora #$1e
-  sta f:$e0c035
-  ; The regular amount variable is direct page $28, which the decoder
-  ; uses as distance scratch, so retain the output length in loader RAM.
+  ; Reassert the shadow state after the firmware read before writing
+  ; STARTUP_UNPACK_OUTPUT. Text shadowing remains enabled.
+  lda f:SHADOW
+  ora #SHADOW_GRAPHICS
+  sta f:SHADOW
   php
   sei
   clc
   xce
-  rep #$30
+  ax16
   lda read_actual
   cmp read_request
   jne failed_native
   lda amount
-  sta unpacked_length
-  sta $26
-  lda #$0800
-  sta $20
-  sep #$20
-  stz $22
+  sta read_actual            ; the unpacked size, for the check below
+  sta unpack_end
   jsr startup_unpack
-  rep #$20
-  lda unpacked_length
-  sta amount
-  sta read_actual
-  sep #$30
+  ax8
   sec
   xce
   plp
@@ -770,140 +771,120 @@ load_card:
   jsr freeze_mirror
   lda card_final_video
   beq :+
-  lda #4
-  sta $c0b0
+  lda #SS_SCREEN_OFF
+  sta .loword(SS_COMMAND)
 :
-  lda #2
-  sta $c0b0
+  lda #SS_UPLOAD_DATA
+  sta .loword(SS_COMMAND)
   jsr card_on
-  lda #1
-  sta $c0b1
+  lda #SS_UPLOAD_LINEAR
+  sta .loword(SS_DATA_OUT)
   ldx #0
 @address:
-  lda card_header,x
-  sta $c0b1
+  lda card_header+RECORD_ADDRESS,x
+  sta .loword(SS_DATA_OUT)
   inx
   cpx #3
   bne @address
   lda amount
-  sta $c0b1
+  sta .loword(SS_DATA_OUT)
   lda amount+1
-  sta $c0b1
-  lda #0
-  sta $c0b1
-  sta $c0b1
-  sta $c0b1
-  sta $c0b1
+  sta .loword(SS_DATA_OUT)
+  lda #0                     ; the high byte of the length, then the source
+  sta .loword(SS_DATA_OUT)
+  sta .loword(SS_DATA_OUT)
+  sta .loword(SS_DATA_OUT)
+  sta .loword(SS_DATA_OUT)
   jsr card_off
   jsr card_on
   clc
   xce
-  rep #$30
+  ax16
 .a16
 .i16
   lda amount
   cmp read_actual
   jne failed_native
-  and #$fffc
-  sta $2e
+  and #$fffc                    ; the loops below send four bytes at a time
+  sta send_limit
   ldx #0
-  sep #$20
+  a8
 .a8
-  lda card_header+6
-  and #$20
+  lda card_header+RECORD_CONTROL
+  and #RECORD_PACKED
   bne @send_unpacked
-  cpx $2e
+  cpx send_limit
   beq @send_tail
 @send:
 .repeat 4
-  lda f:$000800,x
-  sta f:$e0c0b1
+  lda f:DATA_BUFFER,x
+  sta f:SS_DATA_OUT
   inx
 .endrepeat
-  cpx $2e
+  cpx send_limit
   bcc @send
 @send_tail:
   cpx amount
   beq @sent
 @send_tail_loop:
-  lda f:$000800,x
-  sta f:$e0c0b1
+  lda f:DATA_BUFFER,x
+  sta f:SS_DATA_OUT
   inx
   cpx amount
   bcc @send_tail_loop
   bra @sent
 @send_unpacked:
-  cpx $2e
+  cpx send_limit
   beq @unpacked_tail
 @unpacked_loop:
 .repeat 4
-  lda f:$018000,x
-  sta f:$e0c0b1
+  lda f:STARTUP_UNPACK_OUTPUT,x
+  sta f:SS_DATA_OUT
   inx
 .endrepeat
-  cpx $2e
+  cpx send_limit
   bcc @unpacked_loop
 @unpacked_tail:
   cpx amount
   beq @sent
 @unpacked_tail_loop:
-  lda f:$018000,x
-  sta f:$e0c0b1
+  lda f:STARTUP_UNPACK_OUTPUT,x
+  sta f:SS_DATA_OUT
   inx
   cpx amount
   bcc @unpacked_tail_loop
 @sent:
-  rep #$20
-.a16
-  lda card_header
-  clc
-  adc amount
-  sta card_header
-  sep #$20
-.a8
-  lda card_header+2
-  adc #0
-  sta card_header+2
-  rep #$20
-.a16
-  lda card_header+3
-  sec
-  sbc amount
-  sta card_header+3
-  sep #$30
+  ax8
 .a8
 .i8
   sec
   xce
   jsr card_off
-  lda card_header+3
-  ora card_header+4
-  jne @chunk
   jsr mirror_progress
-  jmp @header
+  jmp @record
 card_on:
-  lda $c0b8
-  cmp #1
+  lda .loword(SS_HANDSHAKE)
+  cmp #SS_READY
   bne card_on
   rts
 card_off:
-  lda $c0b8
+  lda .loword(SS_HANDSHAKE)
   bne card_off
   rts
+send_limit: .res 2           ; amount rounded down to the 4-byte send loop
 
 .include "boot_unpack.s"
 .a8
 .i8
-unpacked_length: .word 0
 
 ; GetStatus is the library's card-presence test: one dummy read and twelve
 ; result bytes. Never open the game file until the five-byte signature agrees.
 detect_card:
-  stz $c0b0
+  stz .loword(SS_COMMAND)    ; SS_GET_STATUS
   ldy #0
   ldx #0
 @wait:
-  lda $c0b8
+  lda .loword(SS_HANDSHAKE)
   cmp #1
   beq @reply
   dex
@@ -913,23 +894,23 @@ detect_card:
   sec
   rts
 @reply:
-  lda $c0b2
+  lda .loword(SS_DATA_IN)
   ldx #0
 @read:
-  lda $c0b2
+  lda .loword(SS_DATA_IN)
   sta card_status,x
   inx
-  cpx #12
+  cpx #SS_STATUS_SIZE
   bne @read
-  ldx #4
+  ldx #card_signature_end-card_signature-1
 @signature:
-  lda card_status,x
+  lda card_status+SS_SIGNATURE,x
   cmp card_signature,x
   bne @absent
   dex
   bpl @signature
-  lda card_status+5
-  cmp #6
+  lda card_status+SS_STATUS_COUNT
+  cmp #SS_STATUS_BYTES
   bne @absent
   clc
   rts
@@ -947,28 +928,28 @@ check_memory:
   sei
   clc
   xce
-  rep #$10
+  x16
 .a8
 .i16
   stz probe_ptr
   stz probe_ptr+1
-  lda #$7f
+  lda #PROBE_TOP_BANK
 @write_byte:
   sta probe_ptr+2
   eor #$ff
   sta [probe_ptr]
   eor #$ff
   dec
-  cmp #2
+  cmp #^PAYLOAD
   bcs @write_byte
-  ldx #15
+  ldx #MEMORY_BITMAP_SIZE-1
 @clear_bitmap:
   stz memory_bitmap,x
   dex
   bpl @clear_bitmap
   lda #3                      ; $00/$01 are motherboard RAM
   sta memory_bitmap
-  lda #$7f
+  lda #PROBE_TOP_BANK
 @read_byte:
   sta probe_ptr+2
   eor #$ff
@@ -982,29 +963,29 @@ check_memory:
 @next_byte:
   lda probe_ptr+2
   dec
-  cmp #2
+  cmp #^PAYLOAD
   bcs @read_byte
-  ldx #$5a5a
+  ldx #PROBE_OFFSET
   stx probe_ptr
-  lda #$7f
+  lda #PROBE_TOP_BANK
 @write_word:
   sta probe_ptr+2
   jsr memory_probe_word
 .a16
   sta [probe_ptr]
-  sep #$20
+  a8
 .a8
   lda probe_ptr+2
   dec
-  cmp #2
+  cmp #^PAYLOAD
   bcs @write_word
-  lda #$7f
+  lda #PROBE_TOP_BANK
 @read_word:
   sta probe_ptr+2
   jsr memory_probe_word
 .a16
   cmp [probe_ptr]
-  sep #$20
+  a8
 .a8
   bne @next_word
   lda probe_ptr+2
@@ -1015,16 +996,16 @@ check_memory:
 @next_word:
   lda probe_ptr+2
   dec
-  cmp #2
+  cmp #^PAYLOAD
   bcs @read_word
-  lda #2
+  lda #^PAYLOAD
 @required:
   jsr memory_bank_found
   bcc @missing
   inc
-  cmp #$10
+  cmp #^PAYLOAD_END
   bcc @required
-  sep #$30
+  ax8
 .a8
 .i8
   sec
@@ -1036,7 +1017,7 @@ check_memory:
 .a8
 .i16
   sta memory_missing
-  sep #$30
+  ax8
 .a8
 .i8
   sec
@@ -1048,10 +1029,10 @@ check_memory:
 .a8
 .i16
 memory_probe_word:
-  rep #$20
+  a16
 .a16
   and #$00ff
-  eor #$a55a                   ; unequal bytes reject an empty bus
+  eor #PROBE_WORD
   rts
 
 .a8
@@ -1069,23 +1050,23 @@ memory_bank_found:
 .i16
 memory_bank_bit:
   pha
-  rep #$20
+  a16
 .a16
   and #7
   tax
-  sep #$20
+  a8
 .a8
   lda memory_bits,x
   sta probe_bit
   lda 1,s
-  rep #$20
+  a16
 .a16
   and #$00ff
   lsr
   lsr
   lsr
   tax
-  sep #$20
+  a8
 .a8
   pla
   rts
@@ -1094,21 +1075,21 @@ memory_bank_bit:
 ; top bank is not proof that every lower required bank exists.
 ; Return the exclusive fast-RAM bank limit, or zero if unknown.
 firmware_banks:
-  lda f:$fffb59
+  lda f:ROMVER
   beq @rom00
-  cmp #1
+  cmp #ROMVER_01
   beq @rom01_03
-  cmp #3
+  cmp #ROMVER_03
   bne @unknown
 @rom01_03:
-  lda f:$e11624
+  lda f:FW_BANKS_ROM03
   bra @check
 @rom00:
-  lda f:$e1161a
+  lda f:FW_BANKS_ROM00
 @check:
-  cmp #2
+  cmp #FW_BANKS_MIN
   bcc @unknown
-  cmp #$81
+  cmp #FW_BANKS_END
   bcc @done
 @unknown:
   lda #0
@@ -1121,10 +1102,10 @@ firmware_banks:
 memory_details:
   clc
   xce
-  rep #$10
+  x16
 .i16
   ldy #2                      ; add slow $E0/$E1 to the bitmap's fast RAM
-  ldx #15
+  ldx #MEMORY_BITMAP_SIZE-1
 @byte:
   lda memory_bitmap,x
 @bit:
@@ -1136,7 +1117,7 @@ memory_details:
   bne @bit
   dex
   bpl @byte
-  rep #$20
+  a16
 .a16
   tya
   sta memory_banks
@@ -1146,7 +1127,7 @@ memory_details:
   jsr firmware_banks
   sta firmware_limit
   beq @no_firmware
-  rep #$20
+  a16
 .a16
   and #$00ff
   inc
@@ -1166,7 +1147,7 @@ memory_details:
   and #15
   jsr memory_hex
   sta missing_value+1
-  sep #$30
+  ax8
 .a8
 .i8
   sec
@@ -1175,8 +1156,8 @@ memory_details:
 @found:
   lda found_text,x
   beq @firmware_start
-  ora #$80
-  sta f:$e006ac,x             ; row 13, column 4
+  ora #TEXT_NORMAL
+  sta f:TEXT_ROW_13+4,x             ; row 13, column 4
   inx
   bne @found
 @firmware_start:
@@ -1184,8 +1165,8 @@ memory_details:
 @firmware:
   lda firmware_text,x
   beq @missing_start
-  ora #$80
-  sta f:$e0072c,x             ; row 14, column 4
+  ora #TEXT_NORMAL
+  sta f:TEXT_ROW_14+4,x             ; row 14, column 4
   inx
   bne @firmware
 @missing_start:
@@ -1193,8 +1174,8 @@ memory_details:
 @missing:
   lda missing_text,x
   beq @done
-  ora #$80
-  sta f:$e007ac,x             ; row 15, column 4
+  ora #TEXT_NORMAL
+  sta f:TEXT_ROW_15+4,x             ; row 15, column 4
   inx
   bne @missing
 @done:
@@ -1202,10 +1183,11 @@ memory_details:
 
 .a8
 .i16
+; memory_hex: A = the hex digit character of A (0-15). JSR.
 memory_hex:
   cmp #10
   bcc :+
-  adc #6
+  adc #'A'-'0'-10-1             ; carry 1 from the CMP
 :
   adc #'0'
   rts
@@ -1235,7 +1217,7 @@ memory_kilobytes:
   bra @subtract
 @digit:
   sta probe_number
-  sep #$20
+  a8
 .a8
   lda probe_digit
   cpy #0
@@ -1243,25 +1225,25 @@ memory_kilobytes:
   cmp #'0'
   beq @next
 @store:
-  sta a:$0000,x
+  sta a:0,x
   inx
 @next:
-  rep #$20
+  a16
 .a16
   iny
   iny
   cpy #8
   bcc @place
-  sep #$20
+  a8
 .a8
   lda #'K'
-  sta a:$0000,x
-  stz a:$0001,x
+  sta a:0,x
+  stz a:1,x
   rts
 
 memory_bits: .byte 1,2,4,8,16,32,64,128
 memory_tens: .word 1000,100,10,1
-memory_bitmap: .res 16
+memory_bitmap: .res MEMORY_BITMAP_SIZE  ; a bit for each bank found
 memory_missing: .byte 0
 memory_banks: .word 0
 firmware_limit: .byte 0
@@ -1276,33 +1258,33 @@ missing_value: .byte "00 IS NOT RAM",0
 
 boot_screen:
   lda #0
-  sta f:$e0c000               ; 80STORE off, main 40-column text page
-  sta f:$e0c00c
-  sta f:$e0c00f               ; alternate characters enable MouseText
-  sta f:$e0c051
-  sta f:$e0c052
-  sta f:$e0c054
-  lda f:$e0c029
-  and #$7f
-  sta f:$e0c029
+  sta f:KBD               ; 80STORE off, main 40-column text page
+  sta f:CLR80VID
+  sta f:SETALTCHAR               ; alternate characters enable MouseText
+  sta f:TXTSET
+  sta f:MIXCLR
+  sta f:TXTPAGE1
+  lda f:NEWVIDEO
+  and #<~NEWVIDEO_SHR
+  sta f:NEWVIDEO
   lda #$60                   ; medium blue text, black background
-  sta f:$e0c022
-  lda f:$e0c034
-  and #$f0
-  sta f:$e0c034
+  sta f:TBCOLOR
+  lda f:CLOCKCTL
+  and #<~CLOCKCTL_BORDER         ; a black border
+  sta f:CLOCKCTL
   jsr clear_text
   ldx #3
 @title:
   lda title,x
-  ora #$80
-  sta f:$e00512,x            ; row 2, centered
+  ora #TEXT_NORMAL
+  sta f:TEXT_ROW_2+18,x            ; row 2, centered
   dex
   bpl @title
-  ldx #6
+  ldx #6                        ; the 7 characters of loading_text
 @label:
   lda loading_text,x
-  ora #$80
-  sta f:$e006e0,x            ; row 21, centered
+  ora #TEXT_NORMAL
+  sta f:TEXT_ROW_21+16,x            ; row 21, centered
   dex
   bpl @label
   jsr draw_progress
@@ -1310,12 +1292,12 @@ boot_screen:
 
 clear_text:
   ldx #0
-  lda #$a0
+  lda #TEXT_SPACE
 @clear:
-  sta f:$e00400,x
-  sta f:$e00500,x
-  sta f:$e00600,x
-  sta f:$e00700,x
+  sta f:TEXT_PAGE1,x
+  sta f:TEXT_ROW_2,x
+  sta f:TEXT_ROW_4,x
+  sta f:TEXT_ROW_6,x
   inx
   bne @clear
   rts
@@ -1331,7 +1313,7 @@ black_screen:
 load_progress:
   clc
   xce
-  rep #$30
+  ax16
 .a16
 .i16
   lda loaded_bytes
@@ -1343,7 +1325,7 @@ load_progress:
   sta loaded_bytes+2
 @threshold:
   lda progress_done
-  cmp #36
+  cmp #PROGRESS_CELLS
   bcs @draw
   asl
   asl
@@ -1359,7 +1341,7 @@ load_progress:
   inc progress_done
   bra @threshold
 @draw:
-  sep #$30
+  ax8
 .a8
 .i8
   sec
@@ -1368,27 +1350,27 @@ load_progress:
   rts
 
 draw_progress:
-  lda #$5a                   ; MouseText line at the cell's right edge
-  sta f:$e00751              ; closes the bar's left end
-  lda #$5f                   ; line at the cell's left edge
-  sta f:$e00776              ; closes the bar's right end
+  lda #MT_RIGHT_LINE
+  sta f:PROGRESS_TEXT-1      ; closes the bar's left end
+  lda #MT_LEFT_LINE
+  sta f:PROGRESS_TEXT+PROGRESS_CELLS   ; closes the bar's right end
   ldx #0
 @cell:
   cpx progress_done
-  lda #$5c                   ; outlined empty cell
+  lda #MT_CELL_EMPTY
   bcs :+
-  lda #$4e                   ; solid filled cell
+  lda #MT_CELL_FULL
 :
-  sta f:$e00752,x
+  sta f:PROGRESS_TEXT,x
   inx
-  cpx #36
+  cpx #PROGRESS_CELLS
   bne @cell
   rts
 
 ; Keep the firmware's completed text image and font visible during uploads.
 ; Re-entering FC/0 clears both text planes before rendering; it must not be
 ; used as a progress refresh. Update only the 36 bar characters in plane 0.
-; ROM 1.4 text40 uses two plane addresses per cell: row 22, column 2 = $06E4.
+; ROM 1.4 text40 uses two plane addresses per cell (SS_TEXT40).
 ; Its alternate font maps MouseText $4E/$5C to VGA glyphs $CE/$DC.
 mirror_progress:
   lda mirror_final
@@ -1398,33 +1380,33 @@ mirror_progress:
   beq @done
   sta mirrored_progress
   lda #1                     ; character plane only; attributes/font stay intact
-  sta upload_registers+5
+  sta upload_map_mask
   stz mirror_frozen
   jsr freeze_mirror
-  lda #2
-  sta $c0b0
+  lda #SS_UPLOAD_DATA
+  sta .loword(SS_COMMAND)
   jsr card_on
   ldx #0
 @parameter:
   lda bar_upload,x
-  sta $c0b1
+  sta .loword(SS_DATA_OUT)
   inx
-  cpx #10
+  cpx #SS_UPLOAD_PARAMETERS
   bne @parameter
   jsr card_off
   jsr card_on
   ldx #0
 @cell:
   cpx progress_done
-  lda #$dc                   ; outlined empty cell
+  lda #CARD_CELL_EMPTY
   bcs :+
-  lda #$ce                   ; solid filled cell
+  lda #CARD_CELL_FULL
 :
-  sta $c0b1
+  sta .loword(SS_DATA_OUT)
   lda #$10                   ; unused odd address, as in the firmware clear
-  sta $c0b1
+  sta .loword(SS_DATA_OUT)
   inx
-  cpx #36
+  cpx #PROGRESS_CELLS
   bne @cell
   jsr card_off
 @done:
@@ -1439,7 +1421,7 @@ freeze_mirror:
   sta mirror_frozen
   lda mirror_disabled
   bne @register_setup
-  lda #1
+  lda #SS_NATIVE             ; also the flag value
   sta mirror_disabled
   jsr text_emulation
 @register_setup:
@@ -1449,42 +1431,43 @@ freeze_mirror:
   ; resetting the complete display mode for each block is unnecessary.
   ldx #0
 @register:
-  lda #12
-  sta $c0b0
+  lda #SS_SET_VGA_REG
+  sta .loword(SS_COMMAND)
   jsr card_on
-  ldy #6
+  ldy #SS_VGA_REG_PARAMETERS
 @byte:
   lda upload_registers,x
-  sta $c0b1
+  sta .loword(SS_DATA_OUT)
   inx
   dey
   bne @byte
   jsr card_off
-  cpx #18
+  cpx #upload_registers_end-upload_registers
   bne @register
 @done:
   rts
 
+; Select 40-column text: A = SS_EMULATION or SS_NATIVE.
 text_emulation:
   pha
-  lda #1
-  sta $c0b0
+  lda #SS_SET_MODE
+  sta .loword(SS_COMMAND)
   jsr card_on
-  lda boot_mode             ; same 40-column timing on either monitor
-  sta $c0b1
+  lda #SS_MODE_TEXT40
+  sta .loword(SS_DATA_OUT)
   pla
-  sta $c0b1
+  sta .loword(SS_DATA_OUT)
   jsr card_off
 @mode:
-  lda $c0b8
-  cmp #$a5
+  lda .loword(SS_HANDSHAKE)
+  cmp #SS_DONE
   bne @mode
   rts
 
 unsupported_driver:
   ; DATA's first read may already have frozen the mirrored loading screen.
   ; Re-enable text emulation so the error is visible on the card display.
-  lda #0
+  lda #SS_EMULATION
   jsr text_emulation
   ldx #<unsupported_driver_message
   ldy #>unsupported_driver_message
@@ -1503,16 +1486,16 @@ requirement_error:
   ldx #3
 @title:
   lda title,x
-  ora #$80
-  sta f:$e00512,x
+  ora #TEXT_NORMAL
+  sta f:TEXT_ROW_2+18,x
   dex
   bpl @title
   ldx #0
 error_text:
-  lda $ffff,x
+  lda a:0,x                  ; the operand is the message address
   beq @details
-  ora #$80
-  sta f:$e005b0,x
+  ora #TEXT_NORMAL
+  sta f:TEXT_ROW_11+8,x
   inx
   bne error_text
 @details:
@@ -1522,61 +1505,68 @@ error_text:
 @hold:
   bra @hold
 failed:
-  lda #$8d
-  jsr $fded
-  ldx #0
-@text:
-  lda message,x
-  beq @hold
-  ora #$80
-  jsr $fded
-  inx
-  bne @text
-@hold:
-  bra @hold
-message: .asciiz "1943 LOAD ERROR"
+  ldx #<load_error_message
+  ldy #>load_error_message
+  bra requirement_error
+load_error_message: .asciiz "1943 LOAD ERROR"
 no_card_message: .asciiz "SECOND SIGHT NOT DETECTED"
 no_memory_message: .asciiz "1943 REQUIRES 1 MB OF MEMORY"
 unsupported_driver_message: .asciiz "UNSUPPORTED BOOT DEVICE DRIVER"
 title: .byte "1943"
 loading_text: .byte "LOADING"
 card_signature: .byte "GSVGA"
-card_status: .res 12
-boot_mode: .byte $fc
+card_signature_end:
+card_status: .res SS_STATUS_SIZE
 card_final_video: .byte 0
 mirror_frozen: .byte 0
 mirror_disabled: .byte 0
 mirror_final: .byte 0
 mirrored_progress: .byte 0
-bar_upload:
-  .byte 1                    ; UploadData, absolute linear destination
-  .byte $e4,$06,0             ; text row 22, column 2, plane 0
-  .byte 72,0,0               ; 36 character bytes and their unused odd addresses
-  .byte 0,0,0                ; unused IIgs source pointer
+bar_upload:                  ; UploadData of the progress bar cells
+  .byte SS_UPLOAD_LINEAR
+  .faraddr SS_TEXT40+(PROGRESS_ROW*40+PROGRESS_COLUMN)*2   ; plane 0
+  .faraddr PROGRESS_CELLS*2  ; each character byte and its unused odd address
+  .faraddr 0                 ; the IIgs source: the card ignores it
 upload_registers:
-  .byte $c4,3,2,$c5,3,15    ; sequencer map mask: all planes
-  .byte $c4,3,4,$c5,3,6     ; unchained, odd/even CPU writes disabled
-  .byte $ce,3,5,$cf,3,0     ; write mode 0, no odd/even read addressing
+  .word VGA_SEQ_INDEX        ; sequencer map mask: the planes of the record
+  .byte SEQ_MAP_MASK
+  .word VGA_SEQ_DATA
+upload_map_mask:
+  .byte $0f
+  .word VGA_SEQ_INDEX        ; unchained, odd/even CPU writes disabled
+  .byte SEQ_MEMORY_MODE
+  .word VGA_SEQ_DATA
+  .byte $06
+  .word VGA_GC_INDEX         ; write mode 0, no odd/even read addressing
+  .byte GC_MODE
+  .word VGA_GC_DATA
+  .byte $00
+upload_registers_end:
 loaded_bytes: .dword 0
 progress_done: .word 0
-.include "boot_progress.inc"
+; The bytes of SS1943.DATA read when each progress cell fills: a copy of the
+; table of the data file header (DATA_PROGRESS, scripts/boot_disk.py).
+progress_thresholds: .res PROGRESS_CELLS*4
 path: .byte 11,"SS1943.DATA"
-read_request: .word 512
-read_actual: .word 0
-segments: .byte 0
-current: .byte 0
-headers: .res 60
-card_startup: .byte 0
-card_header: .res 10
-; The file reader: two block buffers in the free $9000-$93FF.
-PR_ZP = $48
-PR_DBUF = $9000
-PR_IBUF = $9200
+read_request: .res 2
+read_actual: .res 2
+segments: .res 1
+current: .res 1
+headers: .res MAX_SEGMENTS*SEGMENT_ENTRY
+card_startup: .res 1
+card_header: .res RECORD_HEADER_SIZE
+dest: .res 3                 ; the segment loop: the next host address
+remaining: .res 3            ; the segment loop: the bytes left to read
+amount: .res 2               ; the bytes of this block
+probe_bit: .res 1            ; check_memory: the bit of the bank in memory_bitmap
+probe_number: .res 2         ; memory_kilobytes: the value left to print
+probe_digit: .res 1          ; memory_kilobytes: the digit
+; The file reader
+PR_ZP = pr_zp
+PR_DBUF = .loword(READER_BUFFERS)
+PR_IBUF = .loword(READER_BUFFERS)+$200
+.assert READER_BUFFERS+READER_BUFFERS_SIZE <= A_WORLD_STAGE, error
 .a8
 .i8
 .include "prodos_read.s"
-; Direct-page operands are explicit addresses.
-dest = $20
-remaining = $24
-amount = $28
 loader_end:

@@ -1,20 +1,25 @@
-; Prepared lettering segments: target count, preceding delay in arcade frames,
-; flags (bit 0 letter cue, bit 1 immediate, bit 7 end-of-line cue).
-; Only this presentation state is new; packets reuse CAB_ENDING_TEXT.
-CAB_TEXT_PTR = $1548
-CAB_TEXT_WAIT = $154c
-CAB_TEXT_TARGET = $154e
-CAB_TEXT_FLAGS = $154f
-CAB_TEXT_DONE = $1550
-CAB_TEXT_CLOCK = $155c
+; The typed cabinet texts: CAB_ENDING_TEXT counts the letters that show (the
+; packet carries it); the build (arcade_flow.py) makes the segments.
+; A text segment: TS_SIZE bytes.
+TS_TARGET = 0                ; the letter count at its end; TEXT_END ends the text
+TS_DELAY = 1                 ; 2 bytes: arcade frames before it
+TS_FLAGS = 3                 ; TF_* bits
+TS_SIZE = 4
+TEXT_END = 255
+TF_LETTER_SOUND = $01        ; each letter sounds (SND_ENEMY_HIT)
+TF_AT_ONCE = $02             ; all its letters show at once
+TF_LINE_SOUND = $80          ; the segment sounds (SND_TEXT_SEGMENT)
+LETTER_FRAMES = 3            ; arcade frames of each letter
+UPDATE_FRAMES = UPDATE_TICKS/FRAME_TICKS ; arcade frames of one update
 
+; cabinet_text_select: type the cabinet text A (CABINET_TEXT). JSL.
 cabinet_text_select:
 .a8
 .i16
-  rep #$20
+  a16
   and #255
   asl
-  asl
+  asl                           ; dword entries
   tax
   lda f:CABINET_TEXT,x
   sta CAB_TEXT_PTR
@@ -22,23 +27,25 @@ cabinet_text_select:
   sta CAB_TEXT_PTR+2
   bra cabinet_text_init
 
+; cabinet_statistics_select: type the statistics text of the result: four
+; for each band: + 1 without a refill, + 2 with a continue level. JSL.
 cabinet_statistics_select:
 .a8
-  lda CAB_RESULT_DATA+3
+  lda CAB_RESULT_DATA+CRD_BAND
   asl
   asl
-  sta $d4
-  lda CAB_RESULT_DATA+5
+  sta STAT_TEXT
+  lda CAB_RESULT_DATA+CRD_REFILL
   bne :+
-  inc $d4
+  inc STAT_TEXT
 :
-  lda CAB_RESULT_DATA+6
+  lda CAB_RESULT_DATA+CRD_LEVEL
   beq :+
-  inc $d4
-  inc $d4
+  inc STAT_TEXT
+  inc STAT_TEXT
 :
-  rep #$20
-  lda $d4
+  a16
+  lda STAT_TEXT
   and #255
   asl
   asl
@@ -47,58 +54,63 @@ cabinet_statistics_select:
   sta CAB_TEXT_PTR
   lda f:CABINET_STAT_TEXT+2,x
   sta CAB_TEXT_PTR+2
+; cabinet_text_init: the text at CAB_TEXT_PTR (its first byte: the first
+; letter count) starts.
 cabinet_text_init:
 .a16
   lda CAB_TEXT_PTR
-  sta $d4
+  sta TEXT_SEGMENT
   lda CAB_TEXT_PTR+2
-  sta $d6
+  sta TEXT_SEGMENT+2
   stz CAB_TEXT_WAIT
   stz CAB_TEXT_CLOCK
-  sep #$20
+  a8
   stz CAB_TEXT_DONE
-  lda [$d4]
+  lda [TEXT_SEGMENT]
   sta CAB_ENDING_TEXT
-  rep #$20
+  a16
   inc CAB_TEXT_PTR
-  sep #$20
+  a8
   jsr .loword(cabinet_text_segment)
   jmp .loword(cabinet_text_step)
 
+; cabinet_text_tick: one update of the typing. JSL.
 cabinet_text_tick:
 .a8
   lda CAB_TEXT_DONE
   bne @done
-  rep #$20
+  a16
   inc CAB_TEXT_CLOCK
-  inc CAB_TEXT_CLOCK
+  inc CAB_TEXT_CLOCK            ; UPDATE_FRAMES
   lda CAB_TEXT_WAIT
   sec
-  sbc #2                      ; one native update is two arcade frames
+  sbc #UPDATE_FRAMES
   sta CAB_TEXT_WAIT
-  sep #$20
+  a8
   jmp .loword(cabinet_text_step)
 @done:
   rtl
 
+; cabinet_text_step: when the wait is over, the next letter (or all the
+; letters of a TF_AT_ONCE segment), or the next segment; TEXT_END: done.
 cabinet_text_step:
 .a8
 @again:
-  rep #$20
+  a16
   lda CAB_TEXT_WAIT
   bmi @ready
   beq @ready
-  sep #$20
+  a8
   rtl
 @ready:
-  sep #$20
+  a8
   lda CAB_TEXT_TARGET
-  cmp #255
+  cmp #TEXT_END
   beq @end
   cmp CAB_ENDING_TEXT
   beq @segment
   lda CAB_TEXT_FLAGS
-  and #2
+  and #TF_AT_ONCE
   beq @letter
   lda CAB_TEXT_TARGET
   sta CAB_ENDING_TEXT
@@ -106,17 +118,17 @@ cabinet_text_step:
 @letter:
   inc CAB_ENDING_TEXT
   lda CAB_TEXT_FLAGS
-  and #1
+  and #TF_LETTER_SOUND
   beq :+
-  lda #$13
+  lda #SND_ENEMY_HIT
   jsl game_sound_request
 :
-  rep #$20
+  a16
   lda CAB_TEXT_WAIT
   clc
-  adc #3
+  adc #LETTER_FRAMES
   sta CAB_TEXT_WAIT
-  sep #$20
+  a8
   bra @again
 @segment:
   jsr .loword(cabinet_text_segment)
@@ -126,29 +138,32 @@ cabinet_text_step:
   sta CAB_TEXT_DONE
   rtl
 
+; cabinet_text_segment: read the next segment: its delay adds to the wait;
+; its target and flags; TF_LINE_SOUND sounds. JSR.
 cabinet_text_segment:
 .a8
-  rep #$20
+  a16
   lda CAB_TEXT_PTR
-  sta $d4
+  sta TEXT_SEGMENT
   clc
-  adc #4
+  adc #TS_SIZE
   sta CAB_TEXT_PTR
   lda CAB_TEXT_PTR+2
-  sta $d6
-  ldy #1
-  lda [$d4],y
+  sta TEXT_SEGMENT+2
+  ldy #TS_DELAY
+  lda [TEXT_SEGMENT],y
   clc
   adc CAB_TEXT_WAIT
   sta CAB_TEXT_WAIT
-  sep #$20
-  lda [$d4]
+  a8
+  lda [TEXT_SEGMENT]            ; TS_TARGET
   sta CAB_TEXT_TARGET
-  ldy #3
-  lda [$d4],y
+  ldy #TS_FLAGS
+  lda [TEXT_SEGMENT],y
   sta CAB_TEXT_FLAGS
-  bpl @done
-  lda #$11
+  bpl @done                     ; TF_LINE_SOUND
+  lda #SND_TEXT_SEGMENT
   jsl game_sound_request
 @done:
   rts
+.assert TF_LINE_SOUND = $80 .and TS_TARGET = 0 .and UPDATE_FRAMES = 2, error

@@ -4,14 +4,13 @@ No recorded attack or fixed release sample. Both oscillators run the same
 phase/frequency; the even one syncs its odd partner. Pointer changes target
 the muted member, followed by a prepared crossfade.
 """
-import math,struct
+import math
 from pathlib import Path
 import numpy as np
 from audio_config import DOC_RATE
 from sound_model import readwav,quantize
 
 TICK=6e6/(384*262)*4
-TABLE_BYTES=256
 MAX_SNAPSHOTS=12
 SLOT_BYTES=MAX_SNAPSHOTS*256
 TABLE_LIMIT=2048
@@ -104,8 +103,6 @@ def convert(row,common_peak):
     raw,rate=readwav(row['file'])
     env=dict(np.load(row['envelope_file']))
     gain=np.interp(np.arange(len(raw))/rate,np.arange(len(env['envelope']))/float(env['rate']),env['envelope'])
-    # The divisor is the actual YM carrier EG, not a fitted output gain.
-    unit=np.divide(raw,gain,out=np.zeros_like(raw),where=gain>max(gain)*1e-4)
     base=pitch(row['fnum']);period=rate/base
     # A half-rate operator repeats over two fundamental cycles. The source
     # patch's multiplier data chooses this; retaining two periods for every

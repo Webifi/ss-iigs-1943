@@ -7,7 +7,7 @@ def compile(chars, variable, pool, scene):
     """The fixed HUD as programs of latch pattern stores, in banked SRAM
     records. Returns (handler, (BBR, pointer), offset, None) per program."""
     from asset_source import Records
-    from card_link import asset
+    from secondsight_link import asset
 
     programs = Records("hud_pattern", "fixed HUD pattern programs (scripts/pattern_hud.py)")
     groups = []

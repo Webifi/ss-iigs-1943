@@ -7,62 +7,14 @@ and no curve fitting; it steps the same integers as scripts/fm_voice.py.
 
 import json, math, struct
 from collections import Counter
-from harness import HostData
-from fm_voice import native_model, Curve, REGISTER, WEIGHT, BOOST, SILENT, hold_volumes
-from music_score import read_event, NOTE, LOOP, END, OFF
+from iigs_payload import HostData
+from fm_voice import native_model, Curve, REGISTER, WEIGHT, BOOST, SILENT, VISIT, hold_volumes
+from music_score import read_event, NOTE, LOOP, END, OFF, SHARED, DELAY_LONG
 
 from sound_files import BANK
 RECORD_HEAD = 33
 REGISTER_LOW = 64
 # Incoming $2E page alternatives covering every checked $29 current-note set.
-FM_ALT29_CAPS = (35, 44, 56, 58, 59, 64, 65, 67)
-FM_ALT29_PHASED_FIRST = 31
-FM_ALT29_PAGES = (
-    (114, 131, 138, 233, 192, 212, 240, 180),
-    (220, 212, 234, 182, 191, 168, 128, 240),
-    (240, 217, 168, 124, 116, 132, 176, 204),
-    (126, 192, 198, 237, 246, 208, 112, 180),
-    (226, 123, 114, 108, 192, 180, 240, 132),
-    (204, 236, 246, 230, 216, 180, 136, 114),
-    (132, 204, 223, 214, 246, 232, 168, 120),
-    (218, 239, 246, 233, 123, 132, 112, 204),
-    (180, 214, 200, 232, 108, 132, 192, 220),
-    (180, 132, 230, 238, 246, 108, 208, 216),
-    (120, 225, 232, 108, 210, 132, 216, 240),
-    (196, 209, 138, 246, 115, 216, 128, 234),
-    (226, 195, 120, 218, 238, 180, 136, 206),
-    (216, 192, 126, 184, 210, 132, 176, 230),
-    (240, 231, 216, 225, 204, 132, 184, 108),
-    (174, 168, 210, 233, 186, 240, 136, 218),
-    (132, 178, 235, 225, 216, 184, 168, 114),
-    (240, 114, 130, 225, 122, 168, 136, 204),
-    (232, 218, 178, 226, 212, 196, 168, 120),
-    (120, 233, 108, 219, 226, 180, 136, 240),
-    (234, 126, 216, 192, 246, 132, 184, 108),
-    (180, 138, 132, 192, 126, 212, 232, 240),
-    (216, 246, 230, 237, 192, 204, 136, 180),
-    (210, 204, 178, 114, 233, 240, 168, 126),
-    (234, 126, 246, 216, 222, 108, 136, 204),
-    (216, 246, 138, 240, 108, 204, 232, 126),
-    (180, 114, 233, 138, 192, 212, 128, 240),
-    (230, 108, 120, 192, 246, 180, 136, 216),
-    (126, 138, 216, 225, 108, 240, 232, 186),
-    (240, 233, 114, 216, 222, 196, 208, 126),
-    (210, 204, 126, 108, 225, 132, 232, 240),
-    (126, 138, 216, 114, 234, 240, 184, 180),
-    (226, 180, 192, 186, 216, 240, 128, 126),
-    (216, 204, 180, 210, 230, 240, 136, 186),
-    (240, 126, 120, 216, 233, 132, 112, 108),
-    (204, 239, 216, 222, 233, 180, 128, 126),
-    (120, 230, 222, 212, 238, 132, 184, 186),
-    (114, 132, 233, 126, 216, 240, 168, 172),
-    (114, 233, 216, 184, 192, 168, 240, 240),
-    (138, 132, 211, 152, 246, 108, 160, 234),
-    (138, 155, 186, 192, 180, 216, 240, 240),
-    (144, 171, 178, 126, 162, 240, 208, 210),
-    (144, 216, 162, 156, 239, 116, 128, 226),
-    (216, 108, 126, 238, 246, 180, 136, 132),
-)
 # Stable pages for the 76 capture IDs, from an offline placement search;
 # checked against every actual plan below.
 FM_STABLE_PAGES = (
@@ -301,7 +253,7 @@ def record(item, table_source, packed=False, hold_ticks=None):
         0
         <= min(s["att"] for s in n["stages"]) - max(s["boost"] for s in n["stages"]) + REGISTER_LOW
     ), "register table offset"
-    assert n["every"] in (2, 4, 8), "fm_visit passes 2-, 4- or 8-tick windows"
+    assert n["every"] == VISIT, "fm_voice_tick visits each part every VISIT ticks"
     head = struct.pack(
         "<BBHhHBBBBH",
         n["size"],
@@ -461,7 +413,6 @@ def native_score(items):
     pool = bytearray()
     seen = {}
     parts = []
-    plays = {}
     for sg in songs:
         for part in sg["parts"]:
             events = part["events"]
@@ -561,7 +512,7 @@ def pack_notes(pool, parts):
             kind, _, nxt, args = read_event(data, at)
             if kind == NOTE and data[nxt - 4 : nxt] in index:
                 new.extend(
-                    bytes([data[at] | 0xE0])
+                    bytes([data[at] | SHARED << 5])
                     + data[at + 1 : nxt - 4]
                     + bytes([index[data[nxt - 4 : nxt]]])
                 )
@@ -592,11 +543,11 @@ def pack_notes(pool, parts):
 
 
 def read_native_event(data, pc, dictionary):
-    if data[pc] >> 5 != 7:
+    if data[pc] >> 5 != SHARED:
         return read_event(data, pc)
-    delay = data[pc] & 31
+    delay = data[pc] & DELAY_LONG
     pc += 1
-    if delay == 31:
+    if delay == DELAY_LONG:
         delay = struct.unpack_from("<H", data, pc)[0]
         pc += 2
     ident = data[pc]
@@ -774,13 +725,7 @@ def assets(host):
     """Place every native FM asset with host.blob_at. Returns the assembler
     equates (audio_data.inc lines) and a receipt. All song tables are read
     with long addressing, so they may sit in any bank."""
-    import fm_voice
-
     items = models()
-    # Continuous builds link the large song-plan routine into its own
-    # reserved payload space, keeping it disjoint from input and game data.
-    host.fm_extra_size = 2304
-    host.fm_extra_source = host.blob_at_bank(bytes(host.fm_extra_size), "fm_extra_code")
     pool, info = native_score(items)
     assert not info["misses"], info["misses"][:5]
     # For each song, inspect the model's tightest ticks-per-byte warning.
@@ -821,31 +766,11 @@ def assets(host):
         for i, (it, v) in enumerate(zip(items, encoded))
     ]
     assert sum(packed) == len(chosen)
-    # Fit capture blobs into the already available space before the bank-5
-    # reserved range. Record order stays unchanged; source pointers retain
-    # the identity of each capture. The subset-sum leaves no referenced
-    # feature allocation in the hole and never writes into the reserved bank.
+    # The capture blobs, read with long addressing: the host fitter puts
+    # each one where there is room. Source pointers keep the identity of each
+    # capture.
     blobs = [v if use else it["data"] for it, v, use in zip(items, encoded, packed)]
-    before = 0x20000 + len(host.blob)
-    capacity = max(0, 0x50000 - before)
-    order = list(range(len(blobs)))
-    if capacity and sum(map(len, blobs)) > capacity:
-        mask = (1 << (capacity + 1)) - 1
-        history = [1]
-        for data in blobs:
-            history.append((history[-1] | (history[-1] << len(data))) & mask)
-        target = history[-1].bit_length() - 1
-        prefix = []
-        for i in range(len(blobs) - 1, -1, -1):
-            if not (history[i] >> target) & 1:
-                prefix.append(i)
-                target -= len(blobs[i])
-        assert target == 0
-        first = set(prefix)
-        order = sorted(first) + [i for i in order if i not in first]
-    sources = [0] * len(blobs)
-    for i in order:
-        sources[i] = host.blob_at(blobs[i])
+    sources = [host.blob_at(data) for data in blobs]
     holds = hold_lengths(pool, info["parts"], info["dictionary"])
     records = [
         host.blob_at(record(it, src, use, holds.get(i)))
@@ -892,8 +817,29 @@ def assets(host):
     import stage_controls
 
     stage_tables, _ = stage_controls.event_tables()
-    for stage, offset, callback in ((2, 972, 0x690A), (8, 1656, 0x6924), (13, 1764, 0x693E)):
-        assert int.from_bytes(stage_tables[stage][offset + 2 : offset + 4], "little") == callback
+    # fm_stage_hint: the lookahead windows before the boss cues, from 129
+    # event records before the record after the cue up to it. They count
+    # 6-byte arcade records, but CAMERA_STAGE_OFFSET counts the 4-byte packed
+    # records (stage_controls.install): the windows start late.
+    hints = []
+    for name, stage, callback in (
+        ("CAMERA3", 2, 0x690A),
+        ("CAMERA9", 8, 0x6924),
+        ("CAMERA14", 13, 0x693E),
+        ("RESULT6", 5, 0x6A11),
+        ("RESULT11", 10, 0x6A11),
+    ):
+        data = stage_tables[stage]
+        at = next(
+            o
+            for o in range(0, len(data) - 5, 6)
+            if int.from_bytes(data[o + 2 : o + 4], "little") == callback
+        )
+        hints += [
+            f"FM_HINT_{name}_STAGE = {stage}",
+            f"FM_HINT_{name}_FIRST = {at + 6 - 129 * 6}",
+            f"FM_HINT_{name}_END = {at + 6}",
+        ]
     # Quiet-time boss $29 preloads must be disjoint from every capture in
     # the outgoing stage-$30 song; no live or future old voice is evicted.
     old = set(cache[(0x30 - 32) * 2][2::2])
@@ -1126,10 +1072,16 @@ def assets(host):
     host.blob_at(struct.pack(f"<{len(entries)}H", *entries), "music_entries")
     host.blob_at(struct.pack(f"<{len(offsets)}H", *offsets), "music_part_offsets")
     host.blob_at(bytes(first), "fm_first_captures")
+    # The score tokens (music_score.py) for src/music_player.s.
+    tokens = (("NOTE", NOTE), ("OFF", OFF), ("LOOP", LOOP), ("END", END), ("SHARED", SHARED))
     lines = [
-        "AUDIO_FM = 1",
-        *(["FM_FIXED_VISIT = 1"]),
-        f"FM_WEIGHT_VISITS = {fm_voice.WEIGHT_VISITS}",
+        *(f"SCORE_{name} = ${kind << 5:02x}" for name, kind in tokens),
+        f"SCORE_DELAY_LONG = {DELAY_LONG}",
+        f"MUSIC_SONGS = {len(entries) // 2}",
+        f"FM_VISIT = {VISIT}",
+        f"FM_PAGE_CAP37 = ${post28[37]:02x}",
+        f"FM_PAGE_CAP67 = ${FM_STABLE_PAGES[67]:02x}",
+        *hints,
         f"FM_BASE_PAGE = ${base >> 8:02x}",
         f"FM_BOSS_RESTORE_PAGE = ${FM_BOSS_PAGES[23]:02x}",
         f"FM_POST28_RESTORE_COUNT = {len(post28_restore)}",

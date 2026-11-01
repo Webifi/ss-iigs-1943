@@ -1,145 +1,195 @@
-; Own 65816 port of the US normal-flight movement and banking/roll animation.
-; Reference: US bank 1 $8657-$8714 and $8741-$879A. Tables are ROM data,
-; decoded/selected during the build. No Z80 code is executed by the port.
-; PLAYER is a native object-state record; $40=input (active low), $41=speed.
-; Enters/exits M=8, X=16, DBR=0. Sound, firing, collision and energy are separate.
-PLAYER = $1000
+; The flight of a live player: the stick moves the plane, the plane banks
+; towards the pose of the stick direction, and a hit makes it roll.
+; A 65816 port of the US arcade code at bank 1 $8657-$8714 and $8741-$879A.
+; The build decodes the tables from the ROM (scripts/flight.py).
+; PLAYER is a native player record (src/records.inc). Enter and exit with
+; A8, X16, DBR = 0. Sound, firing, collisions and energy are elsewhere.
+PLAYER2 = PLAYER+PLAYER_SIZE    ; the record of player 2
+; The hit roll (flight_roll) in ANIM_WORK of the body.
+ROLL_TIME = ANIM_WORK+1      ; updates left of this roll step
+ROLL_TURN = ANIM_WORK+2      ; the pose change of each step, less one
+ROLL_STEP = ANIM_WORK+3      ; roll steps done; the roll ends at ROLL_STEPS
+ROLL_STEP_TIME = 2           ; updates of each roll step
+ROLL_TOP_POSE = 4            ; at this pose the roll turns back
+ROLL_BACK = $fe              ; ROLL_TURN after the top pose: steps of -1
+ROLL_STEPS = $18             ; the steps of one roll
+; flight_moves: for each speed table (FLIGHT_SPEED), two halves; each half has
+; one FLIGHT_STEP_SIZE entry for each of the 16 stick directions.
+FLIGHT_STEP_SIZE = 3         ; cross move, along move, the pose of the direction
+FLIGHT_HALF = 16*FLIGHT_STEP_SIZE ; the half of the updates with an even PL_DRAIN
+; The field of the plane (the left half sprite).
+FLIGHT_CROSS_MIN = $10
+FLIGHT_CROSS_MAX = $d0
+FLIGHT_ALONG_MIN = $12
+FLIGHT_ALONG_MAX = $d0
+BODY2_CROSS = 16             ; the right half sprite is 16 pixels to the right
+POSE_CODE = $20              ; the sprite code of pose 0; each pose has two codes
 
+; flight_step: one flight update of the player in PLAYER_CURSOR
+; (game_players_tick). D points at the player record during the update.
 flight_step:
-  rep #$20
-  lda $40
+  phd
+  a16
+  lda PLAYER_CURSOR
+  clc
+  adc #PLAYER
+  tcd
+  a8
+  jsr live_flight_step
+  pld
+  rts
+
+; live_flight_step: D = the player record, FLIGHT_INPUT = its input.
+; X, A: changed.
+live_flight_step:
+  a16
+  ; FLIGHT_STICK = the stick bits, 1 = pressed (the input is active low).
+  lda a:FLIGHT_INPUT
   eor #$ffff
-  and #15
-  sta $44
-  lda $41
+  and #INPUT_STICK
+  sta a:FLIGHT_STICK
+  ; FLIGHT_TABLE = the speed table, then its half for this update.
+  lda a:FLIGHT_SPEED
   and #255
   asl
   tax
   lda f:flight_speed_offsets,x
-  sta $42
-  lda PLAYER+$0d
+  sta a:FLIGHT_TABLE
+  lda z:PL_DRAIN
   and #1
   bne @odd
-  lda $42
+  lda a:FLIGHT_TABLE
   clc
-  adc #48
-  sta $42
+  adc #FLIGHT_HALF
+  sta a:FLIGHT_TABLE
 @odd:
-  lda $44
+  ; X = the entry of the stick direction: FLIGHT_TABLE + stick * 3.
+  lda a:FLIGHT_STICK
   asl
   clc
-  adc $44
-  adc $42
+  adc a:FLIGHT_STICK
+  adc a:FLIGHT_TABLE
   tax
-  sep #$20
-  lda $44
-  cmp PLAYER+$0c
+  a8
+  ; A new direction restarts the banking delay.
+  lda a:FLIGHT_STICK
+  cmp z:PL_DIRECTION
   beq @direction_same
-  sta PLAYER+$0c
+  sta z:PL_DIRECTION
   jsr flight_delay_reset
 @direction_same:
-  lda PLAYER+$02
+  ; Move across, inside FLIGHT_CROSS_MIN to FLIGHT_CROSS_MAX.
+  lda z:SPR_CROSS
   clc
   adc f:flight_moves,x
-  cmp #$10
+  cmp #FLIGHT_CROSS_MIN
   bcs @left_inside
-  lda #$10
+  lda #FLIGHT_CROSS_MIN
 @left_inside:
-  cmp #$d0
+  cmp #FLIGHT_CROSS_MAX
   bcc @right_inside
-  lda #$d0
+  lda #FLIGHT_CROSS_MAX
 @right_inside:
-  sta PLAYER+$02
+  sta z:SPR_CROSS
   clc
-  adc #16
-  sta PLAYER+$22
+  adc #BODY2_CROSS
+  sta z:PL_BODY2+SPR_CROSS
+  ; Move along, inside FLIGHT_ALONG_MIN to FLIGHT_ALONG_MAX.
   inx
-  lda PLAYER+$03
+  lda z:SPR_ALONG
   clc
   adc f:flight_moves,x
-  cmp #$12
+  cmp #FLIGHT_ALONG_MIN
   bcs @top_inside
-  lda #$12
+  lda #FLIGHT_ALONG_MIN
 @top_inside:
-  cmp #$d0
+  cmp #FLIGHT_ALONG_MAX
   bcc @bottom_inside
-  lda #$d0
+  lda #FLIGHT_ALONG_MAX
 @bottom_inside:
-  sta PLAYER+$03
-  sta PLAYER+$23
-  lda PLAYER+$0e
+  sta z:SPR_ALONG
+  sta z:PL_BODY2+SPR_ALONG
+  lda z:PL_HIT
   bne flight_roll
-  dec PLAYER+$0b
+  ; Bank one pose towards the pose of the direction when the delay ends.
+  dec z:PL_BANK_DELAY
   bne flight_advance_phase
   jsr flight_delay_reset
   inx
-  lda PLAYER+$0a
+  lda z:PL_POSE
   cmp f:flight_moves,x
   beq flight_pose
   bcc @bank_up
-  dec PLAYER+$0a
+  dec z:PL_POSE
   bra flight_pose
 @bank_up:
-  inc PLAYER+$0a
+  inc z:PL_POSE
+; flight_pose: show PL_POSE on the two body sprites.
 flight_pose:
-  lda PLAYER+$0a
+  lda z:PL_POSE
   asl
   clc
-  adc #$20
-  sta PLAYER+$00
+  adc #POSE_CODE
+  sta z:SPR_CODE
   inc
-  sta PLAYER+$20
+  sta z:PL_BODY2+SPR_CODE
 flight_advance_phase:
-  inc PLAYER+$0d
+  inc z:PL_DRAIN                ; the update count: energy drain and the speed half
   rts
 
+; flight_roll: the hit roll. The plane cannot collide while it rolls. Every
+; ROLL_STEP_TIME updates the pose steps up to ROLL_TOP_POSE, then back down,
+; for ROLL_STEPS steps.
 flight_roll:
-  stz PLAYER+$07
-  lda PLAYER+$1c
+  stz z:PL_COLLIDE
+  lda z:ROLL_TIME
   beq @roll_tick
-  dec PLAYER+$1c
+  dec z:ROLL_TIME
   bra flight_advance_phase
 @roll_tick:
-  lda #2
-  sta PLAYER+$1c
-  lda PLAYER+$0a
-  cmp #4
+  lda #ROLL_STEP_TIME
+  sta z:ROLL_TIME
+  lda z:PL_POSE
+  cmp #ROLL_TOP_POSE
   bne @roll_direction
-  lda #$fe
-  sta PLAYER+$1d
+  lda #ROLL_BACK
+  sta z:ROLL_TURN
 @roll_direction:
-  lda PLAYER+$1d
+  lda z:ROLL_TURN
   inc
   clc
-  adc PLAYER+$0a
-  sta PLAYER+$0a
+  adc z:PL_POSE
+  sta z:PL_POSE
   bne @roll_nonzero
-  stz PLAYER+$1d
+  stz z:ROLL_TURN               ; pose 0: step up again
 @roll_nonzero:
-  dec PLAYER+$1c
-  inc PLAYER+$1e
-  lda PLAYER+$1e
-  cmp #$18
+  dec z:ROLL_TIME
+  inc z:ROLL_STEP
+  lda z:ROLL_STEP
+  cmp #ROLL_STEPS
   bne flight_pose
-  stz PLAYER+$0e
-  stz PLAYER+$1b
-  stz PLAYER+$1c
-  stz PLAYER+$1d
-  stz PLAYER+$1e
-  stz PLAYER+$1f
+  ; The roll is over: clear its work bytes; the plane can collide again.
+  stz z:PL_HIT
+  stz z:ANIM_WORK
+  stz z:ROLL_TIME
+  stz z:ROLL_TURN
+  stz z:ROLL_STEP
+  stz z:ANIM_WORK+4
   lda #1
-  sta PLAYER+$07
+  sta z:PL_COLLIDE
   bra flight_pose
 
+; flight_delay_reset: PL_BANK_DELAY = the flight_delays entry of
+; PL_BANK_INDEX. X is kept.
 flight_delay_reset:
   phx
-  rep #$20
-  lda PLAYER+$09
+  a16
+  lda z:PL_BANK_INDEX
   and #255
   tax
-  sep #$20
+  a8
   lda f:flight_delays,x
-  sta PLAYER+$0b
+  sta z:PL_BANK_DELAY
   plx
   rts
 

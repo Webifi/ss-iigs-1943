@@ -1,66 +1,87 @@
-; Native sixteen-piece object controller, original fixed $6207-$6426.
-; The active head sits 128 bytes into a 512-byte reservation. No record copies.
+; One tick of a giant object (OT_GIANT): sixteen sprite records in a grid of
+; GIANT_ROWS by GIANT_COLUMNS in four large slots (GIANT_SIZE). A native port
+; of the US arcade code at $6207-$6426; the code works on the records in place.
+; The head is the record at GIANT_HEAD (row 0, column GIANT_HEAD_COLUMN).
+; Rows 1 to 3 are each PIECE_RISE further along; the columns are PIECE_RIGHT
+; apart, columns 0 and 1 to the left of the head. The caller is
+; large_loop_tick; it reads LARGE_KIND as for a large object.
 .a8
 .i16
-GIANT_BASE = $1c64
-GIANT_WORD = $1c66
-GIANT_SCRIPT = $1c68
-.macro giant_store row, col, field
-  sta a:0+((row)/2)*256+((row) .mod 2)*64+((col)/2)*128+((col) .mod 2)*32+(field),x
+GIANT_ROWS = 4
+GIANT_COLUMNS = 4
+GIANT_HEAD_COLUMN = 2
+GIANT_CODE_ROW = 8           ; the sprite code of the piece above is the code + 8
+GIANT_ALONG_OUT_MIN = $31    ; past the field (SPR_ALONG_HIGH) and inside
+GIANT_ALONG_OUT_MAX = $ef    ; GIANT_ALONG_OUT_MIN..MAX-1: the giant retires
+; giant_piece: the instruction op on a field of the piece at row, col, with
+; X = GIANT_BASE. Large slot (row/2)*2 + col/2 holds the piece, as record
+; (row mod 2)*2 + col mod 2 of that slot (the large object order). The 0+
+; stops ca65 from reading a first parenthesis as an indirect address.
+.macro giant_piece op, row, col, field
+  op a:0+((row)/2)*2*LARGE_SIZE+((row) .mod 2)*2*SPRITE_SIZE+((col)/2)*LARGE_SIZE+((col) .mod 2)*SPRITE_SIZE+(field),x
 .endmacro
+.assert GIANT_ROWS*GIANT_COLUMNS*SPRITE_SIZE = GIANT_SIZE, error
+.assert GIANT_HEAD = (GIANT_HEAD_COLUMN/2)*LARGE_SIZE, error ; row 0
+
+; giant_object_tick: one tick of the giant whose head is at LARGE_RECORD.
+; Returns LARGE_KIND (0 moved, LK_RETIRED or LK_CALLBACK with
+; LARGE_CALLBACK). JSL; D is kept.
 giant_object_tick:
   phd
-  rep #$20
-  lda #0
+  a16
+  lda #ZERO_PAGE
   tcd
   lda LARGE_RECORD
   sec
-  sbc #128
+  sbc #GIANT_HEAD
   sta GIANT_BASE
   tax
   stz LARGE_CALLBACK
-  sep #$20
+  a8
   stz LARGE_KIND
-  lda LARGE_MODE
-  bne @move
   jsr .loword(giant_object_script)
   lda LARGE_KIND
   bne @done
-@move:
   jsr .loword(giant_object_motion)
 @done:
   pld
   rtl
 
+; giant_object_script: when the step time is over, read the next motion step
+; from OBJ_MOTION+STEP_SIZE, as large_object_script does, and give it to all
+; sixteen pieces. In: X = GIANT_BASE. A step holds the code of the bottom left
+; piece; each column is one code more, each row GIANT_CODE_ROW more. The
+; moves keep the order of large_object_motion: integer byte first.
 giant_object_script:
 .a8
-  lda a:$84,x
+  lda a:GIANT_HEAD+OBJ_DURATION,x
   beq @advance
   rts
 @advance:
-  rep #$20
-  lda a:$8a,x
-  and #$70
+  a16
+  lda a:GIANT_HEAD+OBJ_VARIANT,x
+  and #OBJ_BANK_BITS
   asl
-  asl
+  asl                           ; bank*16*4 = bank*SCRIPT_BANK_ROWS
   sta LARGE_BANK
-  lda a:$9e,x
+  lda a:GIANT_HEAD+OBJ_MOTION,x
   clc
-  adc #7
+  adc #STEP_SIZE
   sta LARGE_SOURCE
 @record:
+  ; Point large_object_read at the step LARGE_SOURCE (see large_object_record).
   lda LARGE_SOURCE
   xba
-  and #255
-  cmp #$80
+  and #255                      ; the arcade page of the step
+  cmp #>ARCADE_BANK_WINDOW
   bcs @banked
-  ora #512
+  ora #SCRIPT_FIXED_ROW
   bra @page
 @banked:
-  and #63
+  and #SCRIPT_BANK_ROWS-1
   ora LARGE_BANK
 @page:
-  sta GIANT_WORD
+  sta GIANT_WORD                ; the row; X = row * 3
   asl
   clc
   adc GIANT_WORD
@@ -69,225 +90,241 @@ giant_object_script:
   and #255
   clc
   adc f:enemy_script_pages,x
-  sta f:large_object_read+1
-  sep #$20
+  sta f:large_object_read+1     ; the host address of the step
+  a8
   lda f:enemy_script_pages+2,x
   adc #0
   sta f:large_object_read+3
-  ldx #0
+  ldx #STEP_DURATION
   jsr .loword(large_object_read)
   bne :+
-  rep #$20
-  ldx #1
+  ; STEP_TAIL: the caller runs the decision of the tail.
+  a16
+  ldx #STEP_CODE
   jsr .loword(large_object_read)
   sta LARGE_CALLBACK
-  sep #$20
-  lda #2
+  a8
+  lda #LK_CALLBACK
   sta LARGE_KIND
   rts
 :
-  cmp #255
+  cmp #STEP_JUMP
   bne :+
-  rep #$20
-  ldx #1
+  ; STEP_JUMP: continue at the step in its word.
+  a16
+  ldx #STEP_CODE
   jsr .loword(large_object_read)
   sta LARGE_SOURCE
   ldx GIANT_BASE
-  sta a:$9e,x
+  sta a:GIANT_HEAD+OBJ_MOTION,x
   jmp .loword(@record)
 :
 .a8
-  cmp #254
+  cmp #STEP_END
   bne :+
   ldx GIANT_BASE
   jmp .loword(giant_object_retire)
 :
+  ; A motion step: copy it to GIANT_SCRIPT.
   ldx #0
 @read:
   jsr .loword(large_object_read)
   sta GIANT_SCRIPT,x
   inx
-  cpx #7
+  cpx #STEP_SIZE
   bne @read
   ldx GIANT_BASE
-  rep #$20
+  a16
   lda LARGE_SOURCE
-  sta a:$9e,x
-  lda GIANT_SCRIPT+3
+  sta a:GIANT_HEAD+OBJ_MOTION,x
+  lda GIANT_SCRIPT+STEP_CROSS_DELTA
   xba
-  sta a:$98,x
-  lda GIANT_SCRIPT+5
+  sta a:GIANT_HEAD+OBJ_CROSS_DELTA,x
+  lda GIANT_SCRIPT+STEP_ALONG_DELTA
   xba
-  sta a:$9a,x
-  sep #$20
-  lda GIANT_SCRIPT
-  sta a:$84,x
-  lda GIANT_SCRIPT+1
-  .repeat 4,R
-    .repeat 4,C
-      giant_store R,C,0
-      .if C<3
+  sta a:GIANT_HEAD+OBJ_ALONG_DELTA,x
+  a8
+  lda GIANT_SCRIPT+STEP_DURATION
+  sta a:GIANT_HEAD+OBJ_DURATION,x
+  ; The sprite codes of the sixteen pieces.
+  lda GIANT_SCRIPT+STEP_CODE
+  .repeat GIANT_ROWS,R
+    .repeat GIANT_COLUMNS,C
+      giant_piece sta, R, C, SPR_CODE
+      .if C<GIANT_COLUMNS-1
         inc
       .endif
     .endrepeat
-    .if R<3
+    .if R<GIANT_ROWS-1
       clc
-      adc #5
+      adc #GIANT_CODE_ROW-(GIANT_COLUMNS-1)
     .endif
   .endrepeat
-  .repeat 4,R
-    lda a:0+(R/2)*256+(R .mod 2)*64+129,x
-    and #16
-    ora GIANT_SCRIPT+2
-    .repeat 4,C
-      giant_store R,C,1
+  ; The colour of each row; its SPR_ALONG_HIGH stays.
+  .repeat GIANT_ROWS,R
+    giant_piece lda, R, GIANT_HEAD_COLUMN, SPR_ATTR
+    and #SPR_ALONG_HIGH
+    ora GIANT_SCRIPT+STEP_ATTR
+    .repeat GIANT_COLUMNS,C
+      giant_piece sta, R, C, SPR_ATTR
     .endrepeat
   .endrepeat
   rts
 
+; giant_object_motion: move by the 8.8 moves (or by the camera move, with
+; OF_CAMERA) and place the sixteen pieces around the head. SPR_ALONG_HIGH is
+; the ninth along bit: a carry in the move direction toggles it on row 0; the
+; upper rows take it from their 9-bit along. Off the field the giant retires.
 giant_object_motion:
 .a8
   ldx GIANT_BASE
-  lda a:$89,x
-  and #4
+  lda a:GIANT_HEAD+OBJ_FLAGS,x
+  and #OF_CAMERA
   beq @x
   lda LARGE_CAM_X
-  sta a:$98,x
-  stz a:$99,x
+  sta a:GIANT_HEAD+OBJ_CROSS_DELTA,x
+  stz a:GIANT_HEAD+OBJ_CROSS_DELTA+1,x
 @x:
-  rep #$20
-  lda a:$98,x
+  ; The cross: (SPR_CROSS:OBJ_CROSS_FRACTION) + the 8.8 move.
+  a16
+  lda a:GIANT_HEAD+OBJ_CROSS_DELTA,x
   xba
   sta GIANT_WORD
-  lda a:$82,x
+  lda a:GIANT_HEAD+SPR_CROSS,x
   and #255
   xba
   sta LARGE_SOURCE
-  lda a:$85,x
+  lda a:GIANT_HEAD+OBJ_CROSS_FRACTION,x
   and #255
   ora LARGE_SOURCE
   clc
   adc GIANT_WORD
-  sep #$20
-  sta a:$85,x
-  xba
-  .repeat 4,R
-    giant_store R,2,2
+  a8
+  sta a:GIANT_HEAD+OBJ_CROSS_FRACTION,x
+  xba                           ; the new cross of the head column
+  .repeat GIANT_ROWS,R
+    giant_piece sta, R, GIANT_HEAD_COLUMN, SPR_CROSS
   .endrepeat
   clc
-  adc #16
-  .repeat 4,R
-    giant_store R,3,2
+  adc #PIECE_RIGHT
+  .repeat GIANT_ROWS,R
+    giant_piece sta, R, GIANT_HEAD_COLUMN+1, SPR_CROSS
   .endrepeat
   sec
-  sbc #48
-  .repeat 4,R
-    giant_store R,0,2
+  sbc #3*PIECE_RIGHT            ; from column 3 back to column 0
+  .repeat GIANT_ROWS,R
+    giant_piece sta, R, 0, SPR_CROSS
   .endrepeat
   clc
-  adc #16
-  .repeat 4,R
-    giant_store R,1,2
+  adc #PIECE_RIGHT
+  .repeat GIANT_ROWS,R
+    giant_piece sta, R, 1, SPR_CROSS
   .endrepeat
-  lda a:$89,x
-  and #4
+  lda a:GIANT_HEAD+OBJ_FLAGS,x
+  and #OF_CAMERA
   beq @y
   lda LARGE_CAM_Y
-  sta a:$9a,x
-  stz a:$9b,x
+  sta a:GIANT_HEAD+OBJ_ALONG_DELTA,x
+  stz a:GIANT_HEAD+OBJ_ALONG_DELTA+1,x
 @y:
-  rep #$20
-  lda a:$9a,x
+  ; The along of row 0: (SPR_ALONG:OBJ_ALONG_FRACTION) + the 8.8 move.
+  a16
+  lda a:GIANT_HEAD+OBJ_ALONG_DELTA,x
   xba
   sta GIANT_WORD
-  lda a:$83,x
+  lda a:GIANT_HEAD+SPR_ALONG,x
   and #255
   xba
   sta LARGE_SOURCE
-  lda a:$86,x
+  lda a:GIANT_HEAD+OBJ_ALONG_FRACTION,x
   and #255
   ora LARGE_SOURCE
   clc
   adc GIANT_WORD
-  sep #$20
-  sta a:$86,x
+  a8
+  sta a:GIANT_HEAD+OBJ_ALONG_FRACTION,x
   xba
-  .repeat 4,C
-    giant_store 0,C,3
+  .repeat GIANT_COLUMNS,C
+    giant_piece sta, 0, C, SPR_ALONG
   .endrepeat
   bcc @no_carry
-  lda a:$9a,x
-  bmi @inside
+  lda a:GIANT_HEAD+OBJ_ALONG_DELTA,x
+  bmi @inside                   ; a negative move with a carry: no wrap
   bra @toggle
 @no_carry:
-  lda a:$9a,x
+  lda a:GIANT_HEAD+OBJ_ALONG_DELTA,x
   bpl @inside
 @toggle:
-  lda a:$81,x
-  eor #16
-  .repeat 4,C
-    giant_store 0,C,1
+  lda a:GIANT_HEAD+SPR_ATTR,x
+  eor #SPR_ALONG_HIGH
+  .repeat GIANT_COLUMNS,C
+    giant_piece sta, 0, C, SPR_ATTR
   .endrepeat
 @inside:
-  lda a:$81,x
-  and #16
+  lda a:GIANT_HEAD+SPR_ATTR,x
+  and #SPR_ALONG_HIGH
   beq @rows
-  lda a:$83,x
-  cmp #$31
+  lda a:GIANT_HEAD+SPR_ALONG,x
+  cmp #GIANT_ALONG_OUT_MIN
   bcc @rows
-  cmp #$ef
+  cmp #GIANT_ALONG_OUT_MAX
   bcs @rows
   jmp .loword(giant_object_retire)
 @rows:
-  rep #$20
-  lda a:$81,x
-  and #16
+  ; GIANT_WORD = the 9-bit along of row 0 (SPR_ALONG_HIGH is bit 8). Row R
+  ; is R*PIECE_RISE less; bit 8 of the result is its SPR_ALONG_HIGH.
+  a16
+  lda a:GIANT_HEAD+SPR_ATTR,x
+  and #SPR_ALONG_HIGH
   asl
   asl
   asl
   asl
   sta GIANT_WORD
-  lda a:$83,x
+  lda a:GIANT_HEAD+SPR_ALONG,x
   and #255
   ora GIANT_WORD
   sta GIANT_WORD
-  .repeat 3,I
+  .repeat GIANT_ROWS-1,I
     .a16
     lda GIANT_WORD
     sec
-    sbc #(I+1)*16
-    sep #$20
-    .repeat 4,C
-      giant_store I+1,C,3
+    sbc #(I+1)*PIECE_RISE
+    a8
+    .repeat GIANT_COLUMNS,C
+      giant_piece sta, I+1, C, SPR_ALONG
     .endrepeat
-    xba
+    xba                         ; bit 8 of the along
     beq :+
-    lda a:0+((I+1)/2)*256+((I+1) .mod 2)*64+129,x
-    ora #16
+    giant_piece lda, I+1, GIANT_HEAD_COLUMN, SPR_ATTR
+    ora #SPR_ALONG_HIGH
     bra :++
 :
-    lda a:0+((I+1)/2)*256+((I+1) .mod 2)*64+129,x
-    and #$ef
+    giant_piece lda, I+1, GIANT_HEAD_COLUMN, SPR_ATTR
+    and #<~SPR_ALONG_HIGH
 :
-    .repeat 4,C
-      giant_store I+1,C,1
+    .repeat GIANT_COLUMNS,C
+      giant_piece sta, I+1, C, SPR_ATTR
     .endrepeat
-    rep #$20
+    a16
   .endrepeat
-  sep #$20
-  dec a:$84,x
+  a8
+  dec a:GIANT_HEAD+OBJ_DURATION,x
   rts
+.assert SPR_ALONG_HIGH = $10, error ; the four ASLs above: bit 4 to bit 8
 
+; giant_object_retire: the giant goes: its type and the cross of all pieces
+; are cleared. In: X = GIANT_BASE.
 giant_object_retire:
 .a8
-  stz a:$88,x
+  stz a:GIANT_HEAD+OBJ_TYPE,x
   lda #0
-  .repeat 4,R
-    .repeat 4,C
-      giant_store R,C,2
+  .repeat GIANT_ROWS,R
+    .repeat GIANT_COLUMNS,C
+      giant_piece sta, R, C, SPR_CROSS
     .endrepeat
   .endrepeat
-  lda #1
+  lda #LK_RETIRED
   sta LARGE_KIND
   rts
-.delmacro giant_store
+.delmacro giant_piece

@@ -1,167 +1,148 @@
-; Native port of original-US $124F-$130D, all eighteen player-shot slots.
-; PLAYER includes both 128-byte player records; SHOTS is eighteen 32-byte slots.
-; Movement, delay, lifetime, paired-hit animation and owner-count retirement.
-; Collision detection is separate. M=8/X=16, DBR=DP=0, scratch $d0.
+; The player shots: move each live shot, end it at the field edge or when its
+; life runs out, and run the impact animation of a shot that hit.
+; A native port of the US arcade code at $124F-$130D, for all SHOT_COUNT shot
+; records (SHOTS). Collisions are elsewhere (src/enemy_collision.s,
+; src/bullet_intercept.s, src/large_contact.s). A8, X16, DBR = 0, D = 0.
 .a8
 .i16
+SHOT_GROUP = 6               ; shot records of one unrolled pass
+SHOT_CROSS_MIN = $10         ; a shot ends outside SHOT_CROSS_MIN..SHOT_CROSS_MAX-1
+SHOT_CROSS_MAX = $e0
+SHOT_ANIM_END = 255          ; the time byte that ends shot_animation
 
-.ifdef CONTINUOUS_GAME
+; projectiles_step: one step of every shot (flight_weapons). A, X: changed.
 projectiles_step:
   jsl projectiles_step_fast
   rts
 .pushseg
 .segment "SOUND_EXTRA"
+; projectiles_step_fast: test SHOT_GROUP records in each unrolled pass and
+; call projectile_one for each live one (X = its offset, A = its state).
 projectiles_step_fast:
   phy
   ldy #0
 @group:
-  .repeat 6,I
-    lda SHOTS+I*32+8,y
+  .repeat SHOT_GROUP,I
+    lda SHOTS+I*SHOT_SIZE+SHOT_STATE,y
     beq :+
     pha
-    rep #$20
+    a16
     tya
     clc
-    adc #I*32
+    adc #I*SHOT_SIZE
     tax
-    sep #$20
+    a8
     pla
     jsl projectile_one
 :
   .endrepeat
-  rep #$20
+  a16
   tya
   clc
-  adc #192
+  adc #SHOT_GROUP*SHOT_SIZE
   tay
-  sep #$20
-  cpy #18*32
+  a8
+  cpy #SHOT_COUNT*SHOT_SIZE
   beq :+
   jmp .loword(@group)
 :
   ply
-  ldx #18*32
-  cpx #18*32
   rtl
 .popseg
-.else
-projectiles_step:
-  ldx #0
-@slot:
-  lda SHOTS+8,x
-  beq @next
-  jsr projectile_one
-@next:
-  rep #$20
-  txa
-  clc
-  adc #32
-  tax
-  sep #$20
-  cpx #18*32
-  bne @slot
-  rts
+.assert SHOT_COUNT .mod SHOT_GROUP = 0, error
 
-.endif
-
-.ifdef CONTINUOUS_GAME
-.macro projectile_return
-  rtl
-.endmacro
-.else
-.macro projectile_return
-  rts
-.endmacro
-.endif
-.ifdef CONTINUOUS_GAME
 .pushseg
 .segment "INPUT_LATE"
-.endif
+; projectile_one: one step of the shot at SHOTS+X. A = its SHOT_STATE.
+; X is kept. A: changed.
 projectile_one:
-  cmp #4
+  cmp #SHOT_IMPACT
   beq @explosion
-  lda SHOTS+$0b,x
+  ; A flying shot: wait SHOT_DELAY updates, then move by its steps.
+  lda SHOTS+SHOT_DELAY,x
   beq @move
   dec
-  sta SHOTS+$0b,x
+  sta SHOTS+SHOT_DELAY,x
   bne @done
 @move:
-  lda SHOTS+4,x
+  lda SHOTS+SHOT_CROSS_STEP,x
   clc
-  adc SHOTS+2,x
-  cmp #$10
+  adc SHOTS+SPR_CROSS,x
+  cmp #SHOT_CROSS_MIN
   bcc @dead
-  cmp #$e0
+  cmp #SHOT_CROSS_MAX
   bcs @dead
-  sta SHOTS+2,x
-  lda SHOTS+5,x
+  sta SHOTS+SPR_CROSS,x
+  lda SHOTS+SHOT_ALONG_STEP,x
   clc
-  adc SHOTS+3,x
-  bcs @dead
-  sta SHOTS+3,x
-  dec SHOTS+$0a,x
+  adc SHOTS+SPR_ALONG,x
+  bcs @dead                     ; past the top of the field
+  sta SHOTS+SPR_ALONG,x
+  dec SHOTS+SHOT_LIFE,x
   beq @dead
 @done:
-  projectile_return
+  rtl
+  ; An impact. A paired shot (two records) passes the impact to its other
+  ; half once: the next record (SHOT_LINK 0) or the previous one.
 @explosion:
-  lda SHOTS+$0e,x
+  lda SHOTS+SHOT_PAIRED,x
   beq @animate
-  stz SHOTS+$0e,x
-  lda SHOTS+$0f,x
+  stz SHOTS+SHOT_PAIRED,x
+  lda SHOTS+SHOT_LINK,x
   bne @previous
-  lda #4
-  sta SHOTS+$28,x
-  stz SHOTS+$2e,x
+  lda #SHOT_IMPACT
+  sta SHOTS+SHOT_SIZE+SHOT_STATE,x
+  stz SHOTS+SHOT_SIZE+SHOT_PAIRED,x
   bra @animate
 @previous:
-  lda #4
-  sta SHOTS-$18,x
-  stz SHOTS-$12,x
+  lda #SHOT_IMPACT
+  sta SHOTS-SHOT_SIZE+SHOT_STATE,x
+  stz SHOTS-SHOT_SIZE+SHOT_PAIRED,x
+  ; The impact animation: shot_animation holds (updates, sprite code) pairs;
+  ; a time of SHOT_ANIM_END ends it.
 @animate:
-  lda SHOTS+$1b,x
+  lda SHOTS+SHOT_ANIM_TIME,x
   beq @animation_next
-  dec SHOTS+$1b,x
-  projectile_return
+  dec SHOTS+SHOT_ANIM_TIME,x
+  rtl
 @animation_next:
-  lda SHOTS+$1c,x
-  asl
-  adc #0
-  inc SHOTS+$1c,x
+  lda SHOTS+SHOT_ANIM_STEP,x
+  asl                           ; two bytes for each frame
+  inc SHOTS+SHOT_ANIM_STEP,x
   phx
-  rep #$20
+  a16
   and #255
   tax
-  sep #$20
+  a8
   lda f:shot_animation,x
-  sta $d0
-  cmp #255
+  sta SHOT_FRAME_TIME
+  cmp #SHOT_ANIM_END
   beq @animation_end
   lda f:shot_animation+1,x
   plx
-  sta SHOTS,x
-  lda $d0
-  sta SHOTS+$1b,x
-  projectile_return
+  sta SHOTS+SPR_CODE,x
+  lda SHOT_FRAME_TIME
+  sta SHOTS+SHOT_ANIM_TIME,x
+  rtl
 @animation_end:
   plx
-  stz SHOTS+$1b,x
-  stz SHOTS+$1c,x
+  stz SHOTS+SHOT_ANIM_TIME,x
+  stz SHOTS+SHOT_ANIM_STEP,x
+  ; The shot ends: free its record and take one from its owner's live shots.
 @dead:
-  stz SHOTS,x
-  stz SHOTS+8,x
-  lda SHOTS+9,x
+  stz SHOTS+SPR_CODE,x
+  stz SHOTS+SHOT_STATE,x        ; SHOT_FREE
+  lda SHOTS+SHOT_OWNER,x
   bne @owner_two
-  lda PLAYER+$53
+  lda PLAYER+PL_SHOTS
   beq @retired
-  dec PLAYER+$53
+  dec PLAYER+PL_SHOTS
 @retired:
-  projectile_return
+  rtl
 @owner_two:
-  lda PLAYER+$d3
+  lda PLAYER2+PL_SHOTS
   beq @retired
-  dec PLAYER+$d3
-  projectile_return
-
-.ifdef CONTINUOUS_GAME
+  dec PLAYER2+PL_SHOTS
+  rtl
 .popseg
-.endif
+.assert SHOT_FREE = 0, error    ; @dead frees the record with STZ

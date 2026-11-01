@@ -6,10 +6,7 @@ Both display pages use the same prepared pixels and the same allocation.
 """
 
 PITCH = 32
-SHIFT = 5
 BYTES = 256 * PITCH * 4
-SEGMENT = 0x2EED
-CODE = 0xA6C0
 
 
 def prepare(scene, pool):
@@ -35,9 +32,9 @@ def boss_columns(world):
 
 
 def bases_source(scene):
-    """build/card/gen/ship_alignment_bases.s: the video RAM bases of the
+    """build/secondsight/gen/ship_alignment_bases.s: the video RAM bases of the
     three alignments."""
-    from card_link import generate
+    from secondsight_link import generate
 
     lines = [
         '        .section .rodata.ship_alignment_bases,"a"',

@@ -1,6 +1,5 @@
 """Prepare native ordinary-weapon patterns from the original US data tables."""
 
-import json
 from roms import load
 
 # Slot operation: find one, find a pair, or second half of the previous pair.
@@ -8,7 +7,7 @@ SINGLE, PAIR, NEXT = 0, 1, 2
 
 
 def prepare(out):
-    regions, receipt = load()
+    regions, _ = load()
     rom = regions["maincpu"]
     base = 0x14000 - 0x8000
     addresses = list(range(0x97FA, 0x9940, 13))
@@ -18,27 +17,34 @@ def prepare(out):
     def item(a, dx=0, code=0, link=0xFF, slot=SINGLE):
         return (offsets[a], dx & 255, code, link, slot)
 
+    # The shot patterns of each weapon (src/weapons.s), named by the arcade
+    # labels of the weapon modes.
     plans = {
-        "basic": [item(0x97FA)],
-        "basic_pair": [
+        "standard": [item(0x97FA)],
+        "standard_pair": [
             item(0x97FA, -16, link=0x80, slot=PAIR),
             item(0x97FA, 16, link=0x81, slot=NEXT),
         ],
-        "rapid": [
+        "auto": [
             item(0x9807, code=0x94, link=0, slot=PAIR),
             item(0x9814, code=0x94, link=1, slot=NEXT),
         ],
-        "rapid_pair": [item(0x9807, -8, 0x90, 0, PAIR), item(0x9814, 8, 0x90, 1, NEXT)],
-        "spread": [item(a) for a in range(0x982E, 0x9863, 13)],
-        "spread_pair": [item(a) for a in range(0x9821, 0x9870, 13)],
-        "wide": [item(a) for a in range(0x9889, 0x98BE, 13)],
-        "wide_pair": [item(a) for a in range(0x987C, 0x98CB, 13)],
-        "shell": [item(a) for a in (0x98FE, 0x990B, 0x9918)],
-        "laser": [item(0x98D7)],
-        "laser_pair": [item(0x98E4), item(0x98F1)],
-        "fire": [item(a) for a in (0x9925, 0x9932, 0x993F)],
+        "auto_pair": [item(0x9807, -8, 0x90, 0, PAIR), item(0x9814, 8, 0x90, 1, NEXT)],
+        "shotgun": [item(a) for a in range(0x982E, 0x9863, 13)],
+        "shotgun_pair": [item(a) for a in range(0x9821, 0x9870, 13)],
+        "shotgun_up": [item(a) for a in range(0x9889, 0x98BE, 13)],
+        "shotgun_up_pair": [item(a) for a in range(0x987C, 0x98CB, 13)],
+        "3way": [item(a) for a in (0x98FE, 0x990B, 0x9918)],
+        "shell": [item(0x98D7)],
+        "shell_pair": [item(0x98E4), item(0x98F1)],
+        "laser": [item(a) for a in (0x9925, 0x9932, 0x993F)],
     }
     lines = [
+        f"WP_TEMPLATE_SIZE = {12}",
+        "WP_ENTRY_SIZE = 6",
+        f"WP_SLOT_SINGLE = {SINGLE}",
+        f"WP_SLOT_PAIR = {PAIR}",
+        f"WP_SLOT_NEXT = {NEXT}",
         "weapon_templates:",
         "  .byte " + ",".join(f"${v:02x}" for v in templates),
         "weapon_patterns:",
@@ -57,5 +63,4 @@ def prepare(out):
         plans=len(plans),
         sprite_codes=codes,
     )
-    (out / "weapon-data.json").write_text(json.dumps(meta, indent=2) + "\n")
     return meta

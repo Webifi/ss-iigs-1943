@@ -1,15 +1,77 @@
-; Paused foreground UI. Capture and the DOC clock keep running. Game state,
-; world residency and VRAM art stay resident; only a display page is repainted.
-; Selection marker in the layout buffer. menu_publish flips bit 7, so it
-; reaches the text page as $55, the MouseText right arrow (ALTCHAR: boot,
-; and mirror_open for the card); every text character becomes normal text.
+; The pause menu (ESC): the controls, the devices, the sound and the
+; display settings. The game stops; the capture and the DOC clock go on.
+; The game state, the world and the VRAM art stay: the menu writes only the
+; text page, which the card shows (mirror_open). The menu draws a page in
+; MENU_TEXT (MENU_ROWS x MENU_COLUMNS characters); menu_publish copies it
+; to the centre of the 40-column text page.
+; MENU_MARK: the choice marker. menu_publish flips bit 7, so it becomes $55,
+; the MouseText right arrow (ALTCHAR: boot, and mirror_open for the card).
 MENU_MARK = $d5
+MENU_COLOURS = $f0           ; TBCOLOR: white text on black
+MENU_WAIT = 8                ; GAME_CLOCK ticks between two menu samples
+MENU_PITCH = 2*MENU_COLUMNS  ; a list: a choice on each second row
+MENU_LIST = 3*MENU_COLUMNS   ; the row of the first choice
+MENU_FOOTER = 22*MENU_COLUMNS  ; the row of the message
+NAME_SIZE = 10               ; a name of menu_actions, menu_key_names, ...
+SOURCE_NAME_SIZE = 14        ; a name of menu_sources
+LEVEL_TEXT_SIZE = 3          ; a number of menu_audio_numbers
+KEY_NO_NAME = 255            ; menu_key_index: no name; the menu shows the code
+NO_BINDING = BINDINGS_BYTES  ; menu_find_binding: the action has no binding
+ACTION_COLUMN = 2            ; MP_ACTIONS: the action name
+KEY_COLUMN = 14              ; MP_ACTIONS: the name of the bound key
+BINDING_COLUMN = 12          ; MP_BINDING: the name of the bound key
+DEVICE_COLUMN = 19           ; MP_DEVICES: the values
+SOUND_COLUMN = 22            ; MP_SOUND: the values
+LEVEL_COLUMN = 2             ; MP_LEVEL: the levels
+; menuPage: the page that shows.
+MP_MAIN = 0
+MP_GROUPS = 1                ; P1, P2, the start and coins
+MP_DEVICES = 2
+MP_SOUND = 3
+MP_BINDING = 4               ; the binding of one action
+MP_LEVEL = 5                 ; a volume
+MP_ACTIONS = 6               ; the actions of a group
+MP_DIPS = 7                  ; the DIP switches of the arcade
+MP_MONITOR = 8               ; from this page on: display_control.s: the
+                             ; monitor found at the start (display_apply)
+MP_HORIZONTAL = 9            ; its horizontal timing
+MP_VERTICAL = 10             ; its vertical timing
+MP_EDIT = 11                 ; the numeric editor of one field
+MP_PRESET = 12               ; the preset list
+; menuAction: the choice on the page.
+MAIN_DISPLAY = 3             ; MP_MAIN: 0-2 open MP_GROUPS-MP_SOUND
+MAIN_DIPS = 4
+MAIN_SAVE = 5
+MAIN_RESUME = 6
+MAIN_CHOICES = 7
+GROUP_BACK = 3
+GROUP_CHOICES = 4
+DEVICE_BACK = 7              ; MP_DEVICES: menu_device has the choices
+DEVICE_CHOICES = 8
+SOUND_EFFECTS = 1            ; MP_SOUND: 0 the music volume
+SOUND_DEMO = 2
+SOUND_BACK = 3
+SOUND_CHOICES = 4
+BINDING_BACK = 5             ; MP_BINDING (menuChoice)
+BINDING_CHOICES = 6
+DIP_BACK = 7                 ; MP_DIPS: dip_items has the switches
+DIP_CHOICES = 8
+DIP_VALUE = MENU_COLUMNS+4   ; MP_DIPS: the value goes on the row under its switch
+LISTEN_CHANGE = 1            ; menuListen: the next key replaces the binding
+LISTEN_ADD = 2               ; menuListen: the next key is a new binding
+PAD_SLOT_SKIP = 3            ; the SNES MAX slot choice: 1, 2, 4, 5, 6, then
+PAD_SLOT_END = 7             ; 0 (none)
 .a8
 .i16
+; menu_check (native_input_menu): open the menu on a new ESC press
+; (SYSTEM_MENU, 0 = pressed); menuWasDown keeps a held ESC from opening it
+; again. The menu runs here until RESUME, or ESC on the main page: each
+; MENU_WAIT ticks a sample, the key, and a new picture after a change. JSL;
+; the registers stay.
 menu_check:
   php
   lda f:INPUT_SYSTEM
-  and #16
+  and #SYSTEM_MENU
   beq @down
   lda #0
   sta f:menuWasDown
@@ -21,7 +83,7 @@ menu_check:
   plp
   rtl
 @open:
-  rep #$30
+  ax16
   phx
   phy
   phb
@@ -33,28 +95,27 @@ menu_check:
   lda #1
   sta a:.loword(menuMode)
   sta a:.loword(menuDirty)
-  stz a:.loword(menuPage)
+  stz a:.loword(menuPage)       ; MP_MAIN
   stz a:.loword(menuAction)
   stz a:.loword(menuAlias)
   stz a:.loword(menuListen)
   stz a:.loword(menuMessage)
-  stz a:.loword(menuResumeReady)
   lda a:.loword(inputSerial)
   sta a:.loword(menuSerial)
   jsl J13Menu
   jsl mirror_open
-  sep #$20
-  lda f:$e0c022
+  a8
+  lda f:TBCOLOR
   sta a:.loword(menu_saved_color)
-  lda #$f0
-  sta f:$e0c022
-  rep #$20
+  lda #MENU_COLOURS
+  sta f:TBCOLOR
+  a16
   jsr .loword(menu_clear_apple)
 @loop:
-  lda #$ffff
+  lda #JOY_READ_NOW             ; the joystick at each sample
   sta a:.loword(joyUpdate)
   jsl sample
-  rep #$30
+  ax16
   lda a:.loword(menuDirty)
   beq @input
   stz a:.loword(menuDirty)
@@ -63,15 +124,13 @@ menu_check:
   lda a:.loword(inputSerial)
   cmp a:.loword(menuSerial)
   bne :+
-  jmp .loword(@wait)
+  jmp .loword(@wait)            ; no new key
 :
   sta a:.loword(menuSerial)
   lda a:.loword(keyAction)
-  cmp #$35
+  cmp #KEY_ESC                  ; a device action is 0-15: never KEY_ESC
   bne @key
-  lda a:.loword(actionSource)
-  cmp #4
-  bcs @key
+  ; ESC: the wait for a key stops; else the page before shows.
   lda a:.loword(menuListen)
   beq :+
   stz a:.loword(menuListen)
@@ -79,38 +138,38 @@ menu_check:
 :
   lda a:.loword(menuPage)
   bne :+
-  jmp .loword(@resume)
+  jmp .loword(@resume)          ; MP_MAIN
 :
-  cmp #8
+  cmp #MP_MONITOR
   bcc :+
   jsl display_back
   bra @changed
 :
-  cmp #4
+  cmp #MP_BINDING
   bne :+
   jsr .loword(menu_binding_back)
   bra @changed
 :
-  cmp #6
+  cmp #MP_ACTIONS
   bne :+
-  lda #1
+  lda #MP_GROUPS
   sta a:.loword(menuPage)
   stz a:.loword(menuAction)
   bra @changed
 :
-  cmp #3
+  cmp #MP_SOUND
   bne :+
   jsr .loword(mix_apply)
   bra @main_back
 :
-  cmp #5
+  cmp #MP_LEVEL
   bne :+
-  lda #3
+  lda #MP_SOUND
   sta a:.loword(menuPage)
   bra @changed
 :
 @main_back:
-  stz a:.loword(menuPage)
+  stz a:.loword(menuPage)       ; MP_MAIN
   stz a:.loword(menuAction)
   bra @changed
 @key:
@@ -126,37 +185,39 @@ menu_check:
   lda #1
   sta a:.loword(menuDirty)
 @wait:
-  ; This is a menu, not a game logic update. Consume the next captured
-  ; event frontier once per DOC tick; no busy ADB transactions here.
-  lda f:$001e96
+  ; The menu is not a game update: it waits MENU_WAIT ticks for the next
+  ; sample and sends the sound uploads (DBR = 0) in the wait. It makes no
+  ; ADB transactions itself.
+  lda f:GAME_CLOCK
   sta a:.loword(menuTime)
 @tick:
-  sep #$20
+  a8
   phb
   lda #0
   pha
   plb
   jsl audio_game_upload
   plb
-  rep #$20
-  lda f:$001e96
+  a16
+  lda f:GAME_CLOCK
   sec
   sbc a:.loword(menuTime)
-  cmp #8
+  cmp #MENU_WAIT
   bcc @tick
   jmp .loword(@loop)
 @resume:
   stz a:.loword(menuMode)
-  sep #$20
+  a8
   lda a:.loword(menu_saved_color)
-  sta f:$e0c022
-  rep #$20
+  sta f:TBCOLOR
+  a16
   jsl display_apply
   jsl mirror_close
   lda #1
   sta a:.loword(menuWasDown)
-  ; Paused wall time is not game debt. Keep the independent sound clock.
-  lda f:$001e96
+  ; The time in the menu is not owed to the game: the next update is due
+  ; now. The sound clock goes on.
+  lda f:GAME_CLOCK
   jsl game_clock_fraction_step
   sta f:GAME_DUE
   pld
@@ -166,104 +227,120 @@ menu_check:
   plp
   rtl
 
+; menu_key: a key on a menu page. A device gives its directions as the
+; arrow keys and its buttons as RETURN. The display pages go to
+; display_key. JSR; A16.
 .a16
 menu_key:
   lda a:.loword(actionSource)
-  cmp #4
+  cmp #SOURCE_DEVICE_FIRST
   bcc @keyboard
   lda a:.loword(keyAction)
-  cmp #4
+  cmp #ACT_FIRE
   bcs @button
   asl
   tax
   lda a:.loword(menu_direction_keys),x
   bra @dispatch
 @button:
-  lda #$24
+  lda #KEY_RETURN
   bra @dispatch
 @keyboard:
   lda a:.loword(keyAction)
 @dispatch:
   ldx a:.loword(menuPage)
-  cpx #7
+  cpx #MP_MONITOR
   bcc :+
   jsl display_key
   rts
 :
-  cpx #4
+  cpx #MP_BINDING
   bne :+
   jmp .loword(@binding_menu)
 :
-  cpx #5
+  cpx #MP_LEVEL
   bne :+
   jmp .loword(menu_level_key)
 :
-  cmp #$3e
+  cmp #KEY_UP
   beq :+
-  cmp #$7e
+  cmp #KEY_MAC_UP
   bne :++
 :
   jmp .loword(@up)
 :
-  cmp #$3d
+  cmp #KEY_DOWN
   beq :+
-  cmp #$7d
+  cmp #KEY_MAC_DOWN
   bne :++
 :
   jmp .loword(@down)
 :
-  cpx #3
+  cpx #MP_DIPS
+  bne :+
+  jmp .loword(menu_dip_key)
+:
+  cpx #MP_SOUND
   beq @audio
-  cmp #$24
+  cmp #KEY_RETURN
   beq @enter
-  cmp #$3c
+  cmp #KEY_RIGHT
   beq @right
-  cmp #$7c
+  cmp #KEY_MAC_RIGHT
   beq @right
   rts
 @audio:
   jmp .loword(menu_audio_key)
 @right:
-  cpx #2
+  cpx #MP_DEVICES               ; RIGHT changes a device value
   bne :+
   jmp .loword(@device)
 :
   rts
 @enter:
-  cpx #0
+  cpx #MP_MAIN
   beq @main
-  cpx #1
+  cpx #MP_GROUPS
   beq @control_group
-  cpx #6
+  cpx #MP_ACTIONS
   beq @controls
-  cpx #2
-  beq @device
+  cpx #MP_DEVICES
+  bne :+
+  jmp .loword(@device)
+:
   rts
 @main:
   lda a:.loword(menuAction)
-  cmp #3
+  cmp #MAIN_DISPLAY
   bcc @open_page
   bne :+
-  lda #8                      ; the detected monitor's display page
+  lda #MP_MONITOR               ; the page of the monitor found at the start
   sta a:.loword(menuPage)
   stz a:.loword(menuAction)
   rts
 :
-  cmp #4
+  cmp #MAIN_DIPS
+  bne :+
+  lda #MP_DIPS
+  sta a:.loword(menuPage)
+  stz a:.loword(menuAction)
+  rts
+:
+  cmp #MAIN_SAVE
   beq @save
-  stz a:.loword(menuMode)
+  stz a:.loword(menuMode)       ; MAIN_RESUME
   rts
 @save:
-  jmp .loword(menu_save)
+  jmp .loword(settings_save)
 @open_page:
-  inc
+  inc                           ; MP_GROUPS, MP_DEVICES or MP_SOUND
   sta a:.loword(menuPage)
   stz a:.loword(menuAction)
   stz a:.loword(menuAlias)
   rts
 @control_group:
   lda a:.loword(menuAction)
-  cmp #3
+  cmp #GROUP_BACK
   beq @back
   asl
   tax
@@ -271,7 +348,7 @@ menu_key:
   sta a:.loword(menuBase)
   lda a:.loword(menu_group_limits),x
   sta a:.loword(menuLimit)
-  lda #6
+  lda #MP_ACTIONS
   sta a:.loword(menuPage)
   stz a:.loword(menuAction)
   stz a:.loword(menuAlias)
@@ -279,26 +356,26 @@ menu_key:
 @controls:
   lda a:.loword(menuAction)
   cmp a:.loword(menuLimit)
-  beq @group_back
+  beq @group_back               ; BACK
   clc
   adc a:.loword(menuBase)
-  sta a:.loword(menuAction)
-  lda #4
+  sta a:.loword(menuAction)     ; the BIND_ACTION
+  lda #MP_BINDING
   sta a:.loword(menuPage)
   stz a:.loword(menuChoice)
   rts
 @group_back:
-  lda #1
+  lda #MP_GROUPS
   sta a:.loword(menuPage)
   stz a:.loword(menuAction)
   rts
 @back:
-  stz a:.loword(menuPage)
+  stz a:.loword(menuPage)       ; MP_MAIN
   stz a:.loword(menuAction)
   rts
 @device:
   lda a:.loword(menuAction)
-  cmp #7
+  cmp #DEVICE_BACK
   beq @back
   jmp .loword(menu_device)
 @up:
@@ -311,25 +388,30 @@ menu_key:
 @down:
   lda a:.loword(menuPage)
   beq @main_limit
-  cmp #1
+  cmp #MP_GROUPS
   beq @group_limit
-  cmp #6
+  cmp #MP_ACTIONS
   beq @controls_limit
-  cmp #2
+  cmp #MP_DEVICES
   beq @device_limit
-  lda #3
+  cmp #MP_DIPS
+  bne :+
+  lda #DIP_BACK
+  bra @limit
+:
+  lda #SOUND_BACK
   bra @limit
 @main_limit:
-  lda #5
+  lda #MAIN_RESUME
   bra @limit
 @group_limit:
-  lda #3
+  lda #GROUP_BACK
   bra @limit
 @controls_limit:
   lda a:.loword(menuLimit)
   bra @limit
 @device_limit:
-  lda #7
+  lda #DEVICE_BACK
 @limit:
   cmp a:.loword(menuAction)
   beq @done
@@ -337,16 +419,18 @@ menu_key:
   stz a:.loword(menuAlias)
   rts
 @binding_menu:
-  cmp #$3e
+  cmp #KEY_UP
   beq @choice_up
-  cmp #$7e
+  cmp #KEY_MAC_UP
   beq @choice_up
-  cmp #$3d
+  cmp #KEY_DOWN
   beq @choice_down
-  cmp #$7d
+  cmp #KEY_MAC_DOWN
   beq @choice_down
-  cmp #$24
+  cmp #KEY_RETURN
   bne @done
+  ; RETURN: 0 change, 1 add, 2 remove, 3 the next binding, 4 both
+  ; keyboards, 5 back.
   lda a:.loword(menuChoice)
   beq @replace
   dec
@@ -365,7 +449,7 @@ menu_key:
   rts
 @choice_down:
   lda a:.loword(menuChoice)
-  cmp #5
+  cmp #BINDING_BACK
   beq @done
   inc a:.loword(menuChoice)
   rts
@@ -373,222 +457,230 @@ menu_key:
   inc a:.loword(menuAlias)
   rts
 @replace:
-  lda #1
+  lda #LISTEN_CHANGE
   sta a:.loword(menuListen)
   rts
 @add:
-  lda #2
+  lda #LISTEN_ADD
   sta a:.loword(menuListen)
   rts
 @delete:
   jsr .loword(menu_selected_binding)
-  cpx #256
+  cpx #NO_BINDING
   bcc :+
   rts
 :
-  lda #$00ff
-  sta a:.loword(settings+32),x
-  lda #255
-  sta a:.loword(settings+34),x
+  lda #BIND_NONE                ; BIND_KEY; BIND_SOURCE: SOURCE_NONE
+  sta a:.loword(settings+SET_BINDINGS+BIND_KEY),x
+  sta a:.loword(settings+SET_BINDINGS+BIND_ACTION),x
   jmp .loword(compile_bindings)
 @both:
   jsr .loword(menu_selected_binding)
-  cpx #256
+  cpx #NO_BINDING
   bcc :+
   rts
 :
-  lda a:.loword(settings+33),x
+  lda a:.loword(settings+SET_BINDINGS+BIND_SOURCE),x
   and #255
-  cmp #4
+  cmp #SOURCE_DEVICE_FIRST      ; keys only
   bcc :+
   rts
 :
-  sep #$20
-  lda #3
-  sta a:.loword(settings+33),x
-  rep #$20
+  a8
+  lda #SOURCE_KEYBOARDS
+  sta a:.loword(settings+SET_BINDINGS+BIND_SOURCE),x
+  a16
   jmp .loword(compile_bindings)
 
+; menu_binding_back: from MP_BINDING back to its action on MP_ACTIONS. JSR.
 menu_binding_back:
   lda a:.loword(menuAction)
   sec
   sbc a:.loword(menuBase)
   sta a:.loword(menuAction)
-  lda #6
+  lda #MP_ACTIONS
   sta a:.loword(menuPage)
   rts
 
+; menu_device: RETURN or RIGHT on a choice of MP_DEVICES: 0 J13 on or off,
+; 1 the next pad slot, 2 look for the joystick again, 3 the next dead zone,
+; 4 and 5 the player of the mouse and of the joystick, 6 the default
+; bindings. JSR; A16.
 menu_device:
   lda a:.loword(menuAction)
-  bne @pad
+  bne @slot
   lda a:.loword(j13Available)
   bne :+
   rts
 :
   lda a:.loword(j13Enabled)
-  eor #1
+  eor #J13_ON
   sta a:.loword(j13Enabled)
-  lda #2
+  lda #J13_CHOSEN
   sta a:.loword(j13Manual)
   jsl J13SettingsStore
   rts
-@pad:
+@slot:
   dec
-  bne @joy
-  sep #$20
-  lda a:.loword(settings+9)
+  bne @joystick
+  a8
+  lda a:.loword(settings+SET_SNES_SLOT)
   inc
-  cmp #3
+  cmp #PAD_SLOT_SKIP
   bne :+
   inc
 :
-  cmp #7
+  cmp #PAD_SLOT_END
   bcc :+
   lda #0
 :
-  sta a:.loword(settings+9)
-  rep #$20
+  sta a:.loword(settings+SET_SNES_SLOT)
+  a16
   jmp .loword(compile_bindings)
-@joy:
+@joystick:
   dec
-  bne @mouse
-  sep #$20
+  bne @dead_zone
+  a8
   stz a:.loword(joyAbsent)
-  lda #$a5                    ; restore input_poll's LDA direct-page update
+  lda #OPCODE_LDA_DP            ; input_poll works again (joy_read made it RTS)
   sta f:input_poll
-  rep #$20
-  lda #$ffff
+  a16
+  lda #JOY_READ_NOW
   sta a:.loword(joyUpdate)
   rts
-@mouse:
+@dead_zone:
   dec
-  bne @reset
-  sep #$20
-  lda a:.loword(settings+10)
+  bne @players
+  a8
+  lda a:.loword(settings+SET_DEAD_ZONE)
   clc
-  adc #3
-  cmp #25
+  adc #DEAD_ZONE_STEP
+  cmp #DEAD_ZONE_MAX+1
   bcc :+
-  lda #3
+  lda #DEAD_ZONE_STEP
 :
-  sta a:.loword(settings+10)
-  rep #$20
+  sta a:.loword(settings+SET_DEAD_ZONE)
+  a16
   rts
-@reset:
+@players:
   dec
   beq @mouse_player
   dec
   beq @joy_player
-  stz a:.loword(settings+16)
-  ldx #254
+  stz a:.loword(settings+SET_MOUSE_PLAYER)  ; and SET_JOY_PLAYER: player 2
+  ldx #BINDINGS_BYTES-2
 @copy:
   lda a:.loword(menu_default_bindings),x
-  sta a:.loword(settings+32),x
+  sta a:.loword(settings+SET_BINDINGS+BIND_KEY),x
   dex
   dex
   bpl @copy
-  jsr .loword(compile_bindings)
-  rts
+  jmp .loword(compile_bindings)
 @mouse_player:
-  ldx #0
-  lda #4
+  ldx #0                        ; SET_MOUSE_PLAYER
+  lda #SOURCE_MOUSE
   bra menu_player_change
 @joy_player:
-  ldx #1
-  lda #5
+  ldx #SET_JOY_PLAYER-SET_MOUSE_PLAYER
+  lda #SOURCE_JOYSTICK
+; menu_player_change: the device A (SOURCE_MOUSE or SOURCE_JOYSTICK, its
+; player at SET_MOUSE_PLAYER+X) goes to the other player, and its bindings
+; to player actions move with it. JSR; A16.
 menu_player_change:
   sta a:.loword(menuTemp)
-  sep #$20
-  lda a:.loword(settings+16),x
+  a8
+  lda a:.loword(settings+SET_MOUSE_PLAYER),x
   eor #1
-  sta a:.loword(settings+16),x
-  rep #$20
+  sta a:.loword(settings+SET_MOUSE_PLAYER),x
+  a16
   and #255
   sta a:.loword(menuPlayer)
   ldx #0
 @player_loop:
-  lda a:.loword(settings+33),x
+  lda a:.loword(settings+SET_BINDINGS+BIND_SOURCE),x
   and #255
   cmp a:.loword(menuTemp)
   bne @player_next
-  lda a:.loword(settings+34),x
+  lda a:.loword(settings+SET_BINDINGS+BIND_ACTION),x
   and #255
-  cmp #12
+  cmp #ACTION_SYSTEM
   bcs @player_next
   ldy a:.loword(menuPlayer)
   beq @to_p2
-  cmp #6
+  cmp #ACTION_P2
   bcc @player_next
   sec
-  sbc #6
+  sbc #ACTION_P2
   bra @player_store
 @to_p2:
-  cmp #6
+  cmp #ACTION_P2
   bcs @player_next
   clc
-  adc #6
+  adc #ACTION_P2
 @player_store:
-  sep #$20
-  sta a:.loword(settings+34),x
-  rep #$20
+  a8
+  sta a:.loword(settings+SET_BINDINGS+BIND_ACTION),x
+  a16
 @player_next:
   inx
   inx
   inx
-  inx
-  cpx #256
+  inx                           ; BINDING_SIZE
+  cpx #BINDINGS_BYTES
   bcc @player_loop
   jmp .loword(compile_bindings)
-@done:
-  rts
 
+; menu_bind: the key of the wait (keyAction, actionSource) goes to the
+; action menuAction: in the selected binding (LISTEN_CHANGE), or in a free
+; record (LISTEN_ADD, or the action has no binding). No free record:
+; MSG_NO_ROOM. JSR; A16.
 menu_bind:
   lda a:.loword(menuListen)
-  cmp #2
+  cmp #LISTEN_ADD
   beq @free
   jsr .loword(menu_selected_binding)
-  cpx #256
+  cpx #NO_BINDING
   bcc @store
 @free:
   ldx #0
 @find:
-  lda a:.loword(settings+34),x
+  lda a:.loword(settings+SET_BINDINGS+BIND_ACTION),x
   and #255
-  cmp #17
+  cmp #BIND_ACTIONS
   bcs @store
   inx
   inx
   inx
   inx
-  cpx #256
+  cpx #BINDINGS_BYTES
   bcc @find
-  lda #2                      ; no empty record: keep every existing binding
+  lda #MSG_NO_ROOM               ; every binding stays
   sta a:.loword(menuMessage)
   stz a:.loword(menuListen)
   rts
 @store:
-  ; A device belongs to one player. Binding it to the other player's
-  ; action moves its existing gameplay bindings along with the choice.
+  ; A device belongs to one player. A binding to an action of the other
+  ; player moves the device and its player bindings to that player.
   lda a:.loword(actionSource)
-  cmp #4
+  cmp #SOURCE_MOUSE
   bcc @write
-  cmp #6
+  cmp #SOURCE_PAD1              ; the mouse and the joystick only
   bcs @write
   lda a:.loword(menuAction)
-  cmp #12
+  cmp #ACTION_SYSTEM
   bcs @write
-  cmp #6
+  cmp #ACTION_P2
   lda #0
   bcs :+
-  inc
+  inc                           ; a P1 action: 1
 :
   sta a:.loword(menuPlayer)
   phx
   lda a:.loword(actionSource)
   sec
-  sbc #4
+  sbc #SOURCE_MOUSE
   tax
-  lda a:.loword(settings+16),x
+  lda a:.loword(settings+SET_MOUSE_PLAYER),x
   and #255
   cmp a:.loword(menuPlayer)
   beq :+
@@ -597,19 +689,22 @@ menu_bind:
 :
   plx
 @write:
-  sep #$20
+  a8
   lda a:.loword(keyAction)
-  sta a:.loword(settings+32),x
+  sta a:.loword(settings+SET_BINDINGS+BIND_KEY),x
   lda a:.loword(actionSource)
-  sta a:.loword(settings+33),x
+  sta a:.loword(settings+SET_BINDINGS+BIND_SOURCE),x
   lda a:.loword(menuAction)
-  sta a:.loword(settings+34),x
-  rep #$20
+  sta a:.loword(settings+SET_BINDINGS+BIND_ACTION),x
+  a16
   stz a:.loword(menuListen)
   stz a:.loword(menuMessage)
   jmp .loword(compile_bindings)
 
-; X returns the chosen 4-byte alias or 256 for an unbound action.
+; menu_selected_binding: X = the offset of the binding menuAlias of the
+; action menuAction (past the last one: the first again), or NO_BINDING.
+; menu_find_binding: the same for menuFindAction and menuFindAlias. JSR;
+; A16.
 menu_selected_binding:
   lda a:.loword(menuAction)
   sta a:.loword(menuFindAction)
@@ -617,13 +712,13 @@ menu_selected_binding:
   sta a:.loword(menuFindAlias)
 menu_find_binding:
   ldx #0
-  ldy #256
+  ldy #NO_BINDING               ; Y: the first binding of the action
 @record:
-  lda a:.loword(settings+34),x
+  lda a:.loword(settings+SET_BINDINGS+BIND_ACTION),x
   and #255
   cmp a:.loword(menuFindAction)
   bne @next
-  cpy #256
+  cpy #NO_BINDING
   bne :+
   txy
 :
@@ -635,60 +730,66 @@ menu_find_binding:
   inx
   inx
   inx
-  cpx #256
+  cpx #BINDINGS_BYTES
   bcc @record
-  tyx                         ; wrap to first alias
+  tyx                           ; past the last binding: the first
 @done:
   rts
 
+; menu_clear_apple: the text page all spaces. JSR; A16.
 menu_clear_apple:
-  sep #$20
-  lda #$a0
-  ldx #1023
+  a8
+  lda #TEXT_SPACE
+  ldx #TEXT_PAGE_SIZE-1
 @clear:
-  sta f:$e00400,x
+  sta f:TEXT_PAGE1,x
   dex
   bpl @clear
-  rep #$20
+  a16
   rts
 
+; menu_draw: draw the page menuPage in MENU_TEXT and publish it. JSR; A16.
 menu_draw:
-  sep #$20
-  lda #32
-  ldx #671
+  a8
+  lda #' '
+  ldx #MENU_ROWS*MENU_COLUMNS-1
 @blank:
-  sta f:$000800,x
+  sta f:MENU_TEXT,x
   dex
   bpl @blank
-  rep #$20
+  a16
   lda a:.loword(menuPage)
   beq @main
-  cmp #1
+  cmp #MP_GROUPS
   beq @controls
-  cmp #2
+  cmp #MP_DEVICES
   beq @devices
-  cmp #3
+  cmp #MP_SOUND
   beq @audio
-  cmp #7
+  cmp #MP_DIPS
+  bne :+
+  jmp .loword(menu_draw_dips)
+:
+  cmp #MP_MONITOR
   bcc :+
   jsl display_draw
   jmp .loword(menu_footer)
 :
-  cmp #5
+  cmp #MP_LEVEL
   bne :+
   jmp .loword(menu_draw_level)
 :
-  cmp #6
+  cmp #MP_ACTIONS
   bne :+
   jmp .loword(menu_draw_controls)
 :
-  jmp .loword(menu_draw_binding)
+  jmp .loword(menu_draw_binding)  ; MP_BINDING
 @main:
   ldx #0
   ldy #.loword(menu_title_main)
   jsr .loword(menu_put)
   ldy #.loword(menu_main_text)
-  lda #6
+  lda #MAIN_CHOICES
   jmp .loword(menu_draw_choices)
 @devices:
   ldx #0
@@ -705,9 +806,11 @@ menu_draw:
   ldy #.loword(menu_title_controls)
   jsr .loword(menu_put)
   ldy #.loword(menu_group_text)
-  lda #4
+  lda #GROUP_CHOICES
   jmp .loword(menu_draw_choices)
 
+; menu_draw_controls: MP_ACTIONS: the title of the group, each action with
+; its selected binding (or UNBOUND), then BACK. JSR; A16.
 menu_draw_controls:
   ldx a:.loword(menuBase)
   cpx #0
@@ -715,7 +818,7 @@ menu_draw_controls:
   ldy #.loword(menu_title_p1)
   bra @title
 :
-  cpx #6
+  cpx #ACTION_P2
   bne :+
   ldy #.loword(menu_title_p2)
   bra @title
@@ -726,7 +829,7 @@ menu_draw_controls:
   jsr .loword(menu_put)
   lda a:.loword(menuBase)
   sta a:.loword(menuFindAction)
-  lda #84
+  lda #MENU_LIST
   sta a:.loword(menuDest)
 @action:
   stz a:.loword(menuFindAlias)
@@ -735,51 +838,50 @@ menu_draw_controls:
   sbc a:.loword(menuBase)
   cmp a:.loword(menuAction)
   bne :+
-  lda a:.loword(menuAlias)
+  lda a:.loword(menuAlias)      ; the selected action: its selected binding
   sta a:.loword(menuFindAlias)
-  sep #$20
+  a8
   ldx a:.loword(menuDest)
   lda #MENU_MARK
-  sta f:$000800,x
-  rep #$20
+  sta f:MENU_TEXT,x
+  a16
 :
   lda a:.loword(menuFindAction)
-  jsr .loword(menu_times10)
+  jsr .loword(menu_name_offset)
   clc
   adc #.loword(menu_actions)
   tay
   ldx a:.loword(menuDest)
   inx
-  inx
-  jsr .loword(menu_copy10)
+  inx                           ; ACTION_COLUMN
+  jsr .loword(menu_copy_name)
   jsr .loword(menu_find_binding)
-  cpx #256
+  cpx #NO_BINDING
   bcs @unbound
-  lda a:.loword(settings+33),x
+  lda a:.loword(settings+SET_BINDINGS+BIND_SOURCE),x
   and #255
   sta a:.loword(menuBindingSource)
-  lda a:.loword(settings+32),x
+  lda a:.loword(settings+SET_BINDINGS+BIND_KEY),x
   and #255
   pha
   lda a:.loword(menuDest)
   clc
-  adc #14
+  adc #KEY_COLUMN
   tax
   pla
   jsr .loword(menu_copy_binding_name)
   bra @next
 @unbound:
-  ldx a:.loword(menuDest)
-  txa
+  lda a:.loword(menuDest)
   clc
-  adc #14
+  adc #KEY_COLUMN
   tax
   ldy #.loword(menu_unbound)
   jsr .loword(menu_put)
 @next:
   lda a:.loword(menuDest)
   clc
-  adc #56
+  adc #MENU_PITCH
   sta a:.loword(menuDest)
   inc a:.loword(menuFindAction)
   lda a:.loword(menuFindAction)
@@ -796,10 +898,12 @@ menu_draw_controls:
   cmp a:.loword(menuLimit)
   bne menu_footer
   ldx a:.loword(menuDest)
-  sep #$20
+  a8
   lda #MENU_MARK
-  sta f:$000800,x
-  rep #$20
+  sta f:MENU_TEXT,x
+  a16
+; menu_footer: the message menuMessage (if any) on the footer row, then
+; publish. JSR; A16.
 menu_footer:
   lda a:.loword(menuMessage)
   beq @publish
@@ -808,19 +912,20 @@ menu_footer:
   tax
   lda a:.loword(menu_messages),x
   tay
-  ldx #616
+  ldx #MENU_FOOTER
   jsr .loword(menu_put)
 @publish:
-  jsr .loword(menu_publish)
-  rts
+  jmp .loword(menu_publish)
+.assert ACTION_COLUMN = 2, error  ; the two INXs above
 
-; Main and action menus use rows separated by one blank row.
+; menu_draw_choices: the A choices from Y (menu_list), then the marker at
+; menuAction. menu_draw_marker: the marker at the choice A, then the footer.
+; JSR; A16.
 menu_draw_choices:
   jsr .loword(menu_list)
   lda a:.loword(menuAction)
 menu_draw_marker:
-  ; row offset = selected index * 56 + 84
-  sta a:.loword(menuTemp)
+  sta a:.loword(menuTemp)       ; X = MENU_LIST + A * MENU_PITCH
   asl
   asl
   asl
@@ -830,31 +935,35 @@ menu_draw_marker:
   asl
   asl
   clc
-  adc #84
+  adc #MENU_LIST
   tax
-  sep #$20
+  a8
   lda #MENU_MARK
-  sta f:$000800,x
-  rep #$20
+  sta f:MENU_TEXT,x
+  a16
   jmp .loword(menu_footer)
+.assert MENU_PITCH = 7*8, error
 
+; menu_draw_binding: MP_BINDING: the action, its selected binding (the key
+; and its source) or UNBOUND, WAITING in a wait for a key, the choices.
+; JSR; A16.
 menu_draw_binding:
   lda a:.loword(menuAction)
-  jsr .loword(menu_times10)
+  jsr .loword(menu_name_offset)
   clc
   adc #.loword(menu_actions)
   tay
   ldx #0
-  jsr .loword(menu_copy10)
+  jsr .loword(menu_copy_name)
   jsr .loword(menu_selected_binding)
-  cpx #256
+  cpx #NO_BINDING
   bcs @no_binding
-  lda a:.loword(settings+33),x
+  lda a:.loword(settings+SET_BINDINGS+BIND_SOURCE),x
   and #255
   sta a:.loword(menuBindingSource)
-  lda a:.loword(settings+32),x
+  lda a:.loword(settings+SET_BINDINGS+BIND_KEY),x
   and #255
-  ldx #12
+  ldx #BINDING_COLUMN
   jsr .loword(menu_copy_binding_name)
   lda a:.loword(menuListen)
   bne @choices
@@ -865,76 +974,61 @@ menu_draw_binding:
   asl
   asl
   sec
-  sbc a:.loword(menuTemp)
+  sbc a:.loword(menuTemp)       ; times SOURCE_NAME_SIZE
   clc
   adc #.loword(menu_sources)
   tay
-  ldx #28
-  lda #14
+  ldx #MENU_COLUMNS             ; row 1
+  lda #SOURCE_NAME_SIZE
   jsr .loword(menu_copy)
   bra @choices
 @no_binding:
-  ldx #12
+  ldx #BINDING_COLUMN
   ldy #.loword(menu_unbound)
   jsr .loword(menu_put)
 @choices:
   lda a:.loword(menuListen)
   beq :+
-  ldx #28
+  ldx #MENU_COLUMNS
   ldy #.loword(menu_waiting)
   jsr .loword(menu_put)
 :
   ldy #.loword(menu_binding_text)
-  lda #6
+  lda #BINDING_CHOICES
   jsr .loword(menu_list)
   lda a:.loword(menuChoice)
   jmp .loword(menu_draw_marker)
+.assert SOURCE_NAME_SIZE = 16-2, error
 
+; menu_draw_devices: MP_DEVICES: the choices, their values in
+; DEVICE_COLUMN and the marker. JSR; A16.
 menu_draw_devices:
   ldy #.loword(menu_device_text)
-  lda #8
+  lda #DEVICE_CHOICES
   jsr .loword(menu_list)
-  lda a:.loword(menuAction)
-  ; Device choices use the same two-row pitch as the other menus.
-  asl
-  sta a:.loword(menuTemp)
-  asl
-  asl
-  asl
-  sec
-  sbc a:.loword(menuTemp)
-  asl
-  asl
-  clc
-  adc #84
-  tax
-  sep #$20
-  lda #MENU_MARK
-  sta f:$000800,x
-  rep #$20
   lda a:.loword(j13Available)
   bne :+
-  ldx #84+19
+  ldx #MENU_LIST+DEVICE_COLUMN
   ldy #.loword(menu_unavailable)
   jsr .loword(menu_put)
   bra @slot_value
 :
   lda a:.loword(j13Enabled)
-  ldx #84+19
+  ldx #MENU_LIST+DEVICE_COLUMN
   jsr .loword(menu_draw_boolean)
 @slot_value:
-  lda a:.loword(settings+9)
+  lda a:.loword(settings+SET_SNES_SLOT)
   and #255
   bne :+
-  ldx #140+19
+  ldx #MENU_LIST+MENU_PITCH+DEVICE_COLUMN
   ldy #.loword(menu_audio_off)
   jsr .loword(menu_put)
   bra @joy_value
 :
   ora #'0'
-  sep #$20
-  sta f:$000800+140+19
-  rep #$20
+  a8
+  sta f:MENU_TEXT+MENU_LIST+MENU_PITCH+DEVICE_COLUMN
+  a16
 @joy_value:
   lda a:.loword(joyAbsent)
   and #255
@@ -944,24 +1038,24 @@ menu_draw_devices:
 :
   ldy #.loword(menu_found)
 @joy_status:
-  ldx #196+19
+  ldx #MENU_LIST+2*MENU_PITCH+DEVICE_COLUMN
   jsr .loword(menu_put)
-  sep #$20
+  a8
   lda #'P'
-  sta f:$000800+308+19
-  sta f:$000800+364+19
-  lda a:.loword(settings+16)
+  sta f:MENU_TEXT+MENU_LIST+4*MENU_PITCH+DEVICE_COLUMN
+  sta f:MENU_TEXT+MENU_LIST+5*MENU_PITCH+DEVICE_COLUMN
+  lda a:.loword(settings+SET_MOUSE_PLAYER)
+  eor #1                        ; 1 player 1, 0 player 2
+  clc
+  adc #'1'
+  sta f:MENU_TEXT+MENU_LIST+4*MENU_PITCH+DEVICE_COLUMN+1
+  lda a:.loword(settings+SET_JOY_PLAYER)
   eor #1
   clc
   adc #'1'
-  sta f:$000800+308+20
-  lda a:.loword(settings+17)
-  eor #1
-  clc
-  adc #'1'
-  sta f:$000800+364+20
-  rep #$20
-  lda a:.loword(settings+10)
+  sta f:MENU_TEXT+MENU_LIST+5*MENU_PITCH+DEVICE_COLUMN+1
+  a16
+  lda a:.loword(settings+SET_DEAD_ZONE)  ; two digits
   and #255
   ldx #0
 @tens:
@@ -973,30 +1067,34 @@ menu_draw_devices:
   bra @tens
 @ones:
   ora #'0'
-  sep #$20
-  sta f:$000800+252+20
+  a8
+  sta f:MENU_TEXT+MENU_LIST+3*MENU_PITCH+DEVICE_COLUMN+1
   txa
   ora #'0'
-  sta f:$000800+252+19
-  rep #$20
-  jmp .loword(menu_footer)
+  sta f:MENU_TEXT+MENU_LIST+3*MENU_PITCH+DEVICE_COLUMN
+  a16
+  lda a:.loword(menuAction)
+  jmp .loword(menu_draw_marker)
 
+; menu_list: A zero-ended texts from Y (one after the other) on the rows
+; of a list from MENU_LIST. JSR; A16.
 menu_list:
   sta a:.loword(menuCount)
-  lda #84
+  lda #MENU_LIST
   sta a:.loword(menuDest)
 @row:
   ldx a:.loword(menuDest)
   jsr .loword(menu_put)
-  iny
+  iny                           ; past the zero
   lda a:.loword(menuDest)
   clc
-  adc #56
+  adc #MENU_PITCH
   sta a:.loword(menuDest)
   dec a:.loword(menuCount)
   bne @row
   rts
 
+; menu_draw_boolean: ON or OFF (the byte A) at X. JSR; A16.
 menu_draw_boolean:
   and #255
   beq :+
@@ -1007,27 +1105,29 @@ menu_draw_boolean:
 @write:
   jmp .loword(menu_put)
 
- ; A=physical identity, X=text destination, source in menuBindingSource.
+; menu_copy_binding_name: at X the name of the key A of the source
+; menuBindingSource: a key name, else KEY and the code in hex; for a device
+; the name of its action (the mouse and joystick, or a pad). JSR; A16.
 menu_copy_binding_name:
   phx
   ldx a:.loword(menuBindingSource)
-  cpx #4
+  cpx #SOURCE_DEVICE_FIRST
   bcs @device
   tax
-  sep #$20
+  a8
   lda a:.loword(menu_key_index),x
-  cmp #255
+  cmp #KEY_NO_NAME
   beq @hex
-  rep #$20
+  a16
   and #255
-  jsr .loword(menu_times10)
+  jsr .loword(menu_name_offset)
   clc
   adc #.loword(menu_key_names)
   bra @copy
 @hex:
-  rep #$20
+  a16
   txa
-  sta a:.loword(menuPlayer)
+  sta a:.loword(menuPlayer)     ; the code
   ldy #.loword(menu_key_prefix)
   plx
   jsr .loword(menu_put)
@@ -1038,23 +1138,23 @@ menu_copy_binding_name:
   lsr
   lsr
   tay
-  sep #$20
+  a8
   lda a:.loword(menu_hex),y
-  sta f:$000800,x
+  sta f:MENU_TEXT,x
   inx
-  rep #$20
+  a16
   pla
-  and #15
+  and #15                       ; the low digit
   tay
-  sep #$20
+  a8
   lda a:.loword(menu_hex),y
-  sta f:$000800,x
-  rep #$20
+  sta f:MENU_TEXT,x
+  a16
   rts
 @device:
-  jsr .loword(menu_times10)
+  jsr .loword(menu_name_offset)
   ldx a:.loword(menuBindingSource)
-  cpx #6
+  cpx #SOURCE_PAD1
   bcs @pad
   clc
   adc #.loword(menu_device_names)
@@ -1065,9 +1165,10 @@ menu_copy_binding_name:
 @copy:
   tay
   plx
-  jmp .loword(menu_copy10)
+  jmp .loword(menu_copy_name)
 
-menu_times10:
+; menu_name_offset: A = A * NAME_SIZE. JSR; A16.
+menu_name_offset:
   asl
   sta a:.loword(menuTemp)
   asl
@@ -1075,40 +1176,45 @@ menu_times10:
   clc
   adc a:.loword(menuTemp)
   rts
+.assert NAME_SIZE = 10, error
 
-; X=flat text offset, Y=bank-local string; strings never exceed a line.
+; menu_put: the zero-ended text at Y (in this bank) to MENU_TEXT+X; it
+; stops with Y at the zero. A text fits on its row. JSR; A16.
 menu_put:
-  sep #$20
+  a8
 @byte:
   lda a:0,y
   beq @done
-  sta f:$000800,x
+  sta f:MENU_TEXT,x
   inx
   iny
   bra @byte
 @done:
-  rep #$20
+  a16
   rts
-menu_copy10:
-  lda #10
+; menu_copy_name: NAME_SIZE bytes from Y to MENU_TEXT+X. menu_copy: A
+; bytes. JSR; A16.
+menu_copy_name:
+  lda #NAME_SIZE
 menu_copy:
   sta a:.loword(menuCount)
-  sep #$20
+  a8
 @byte:
   lda a:0,y
-  sta f:$000800,x
+  sta f:MENU_TEXT,x
   inx
   iny
-  rep #$20
+  a16
   dec a:.loword(menuCount)
-  sep #$20
+  a8
   bne @byte
-  rep #$20
+  a16
   rts
 
+; menu_publish: copy the MENU_ROWS x MENU_COLUMNS layout to the centre of
+; the 40-column text page (menu_apple_rows) with bit 7 flipped. The card
+; shows this page while the game stops. JSR; A16.
 menu_publish:
-  ; Copy the 28-column layout into the centered 40-column Apple text page.
-  ; The card firmware mirrors this page while gameplay is paused.
   stz a:.loword(menuRow)
   stz a:.loword(menuFlat)
 @row:
@@ -1117,31 +1223,28 @@ menu_publish:
   tax
   lda a:.loword(menu_apple_rows),x
   sta a:.loword(menuDest)
-  lda #28
+  lda #MENU_COLUMNS
   sta a:.loword(menuCount)
 @column:
   ldx a:.loword(menuFlat)
-  sep #$20
-  lda f:$000800,x
-  eor #$80
+  a8
+  lda f:MENU_TEXT,x
+  eor #TEXT_NORMAL
   ldx a:.loword(menuDest)
-  sta f:$e00400,x
-  rep #$20
+  sta f:TEXT_PAGE1,x
+  a16
   inc a:.loword(menuFlat)
   inc a:.loword(menuDest)
   dec a:.loword(menuCount)
   bne @column
   inc a:.loword(menuRow)
   lda a:.loword(menuRow)
-  cmp #24
+  cmp #MENU_ROWS
   bcc @row
   rts
 
-; Save is added by the disk bridge below; UI errors never claim success.
-menu_save:
-  jmp .loword(settings_save)
-
-menu_direction_keys: .word $3c,$3b,$3d,$3e
+; The menu texts.
+menu_direction_keys: .word KEY_RIGHT,KEY_LEFT,KEY_DOWN,KEY_UP  ; ACT_RIGHT...
 menu_title_main: .asciiz "1943 OPTIONS"
 menu_title_controls: .asciiz "CONTROLS"
 menu_title_p1: .asciiz "PLAYER 1"
@@ -1156,7 +1259,7 @@ menu_found: .asciiz "FOUND"
 menu_unbound: .asciiz "UNBOUND"
 menu_waiting: .asciiz "WAITING"
 menu_back: .asciiz "  BACK"
-menu_messages: .word .loword(menu_saved),.loword(menu_full),.loword(menu_error)
+menu_messages: .word .loword(menu_saved),.loword(menu_full),.loword(menu_error)  ; MSG_*
 menu_saved: .asciiz "SETTINGS SAVED"
 menu_full: .asciiz "BINDINGS FULL"
 menu_error: .asciiz "SAVE FAILED"
@@ -1165,6 +1268,7 @@ menu_main_text:
   .asciiz "  DEVICES"
   .asciiz "  SOUND"
   .asciiz "  DISPLAY"
+  .asciiz "  DIP SWITCHES"
   .asciiz "  SAVE"
   .asciiz "  RESUME"
 menu_group_text:
@@ -1188,98 +1292,103 @@ menu_device_text:
   .asciiz "  JOYSTICK PLAYER"
   .asciiz "  RESTORE DEFAULT BINDINGS"
   .asciiz "  BACK"
-menu_group_bases: .word 0,6,12
-menu_group_limits: .word 6,6,4
-menu_saved_color: .word 0
-menuResumeReady: .word 0
-menuWasDown: .word 0
-menuDirty: .word 0
-menuPage: .word 0
-menuAction: .word 0
-menuAlias: .word 0
-menuChoice: .word 0
-menuBase: .word 0
-menuLimit: .word 0
-menuPlayer: .word 0
-menuListen: .word 0
-menuMessage: .word 0
-menuSerial: .word 0
-menuTime: .word 0
-menuFindAction: .word 0
-menuFindAlias: .word 0
-menuDest: .word 0
-menuBindingSource: .word 0
+; MP_GROUPS: the first action and the count of actions of each group.
+menu_group_bases: .word 0,ACTION_P2,ACTION_SYSTEM
+menu_group_limits: .word PLAYER_ACTIONS,PLAYER_ACTIONS,SYSTEM_ACTIONS
+; The menu state.
+menu_saved_color: .word 0       ; TBCOLOR before the menu
+menuWasDown: .word 0            ; 1: ESC is held since the menu closed
+menuDirty: .word 0              ; 1: draw the page again
+menuPage: .word 0               ; MP_*
+menuAction: .word 0             ; the choice; on MP_BINDING the action
+menuAlias: .word 0              ; the selected binding of the action
+menuChoice: .word 0             ; the choice on MP_BINDING, the level on MP_LEVEL
+menuBase: .word 0               ; MP_ACTIONS: the first action of the group
+menuLimit: .word 0              ; MP_ACTIONS: the count of actions (BACK)
+menuPlayer: .word 0             ; menu_player_change: 1 player 1, 0 player 2
+menuListen: .word 0             ; LISTEN_*: the menu waits for a key; 0 no
+menuMessage: .word 0            ; MSG_*; 0 none
+menuSerial: .word 0             ; inputSerial at the last key
+menuTime: .word 0               ; GAME_CLOCK at the last sample
+menuFindAction: .word 0         ; menu_find_binding: the action
+menuFindAlias: .word 0          ; menu_find_binding: the binding number
+menuDest: .word 0               ; the MENU_TEXT offset of the next row
+menuBindingSource: .word 0      ; menu_copy_binding_name: the source
 menuTemp: .word 0
-menuCount: .word 0
-menuPacket: .word 0
-menuRow: .word 0
-menuCol: .word 0
-menuFlat: .word 0
-menuPixel: .word 0
+menuCount: .word 0              ; menu_list, menu_copy: the count left
+menuRow: .word 0                ; menu_publish: the row
+menuFlat: .word 0               ; menu_publish: the MENU_TEXT offset
 
+; menu_audio_key: RETURN on MP_SOUND: a volume opens MP_LEVEL at its
+; level; DEMO SOUNDS changes; BACK applies the mix. JSR; A16.
 .a16
 menu_audio_key:
-  cmp #$24
+  cmp #KEY_RETURN
   beq :+
   rts
 :
   ldx a:.loword(menuAction)
-  cpx #3
+  cpx #SOUND_BACK
   beq @back
-  cpx #2
+  cpx #SOUND_DEMO
   beq @demo
-  lda a:.loword(settings+12),x
+  lda a:.loword(settings+SET_MUSIC_LEVEL),x
   and #255
   sta a:.loword(menuChoice)
-  lda #5
+  lda #MP_LEVEL
   sta a:.loword(menuPage)
   rts
 @demo:
-  sep #$20
-  lda a:.loword(settings+14)
-  eor #1
-  sta a:.loword(settings+14)
-  jsl mix_demo
-  rep #$20
+  a8
+  lda a:.loword(settings+SET_MIX_FLAGS)
+  eor #MIX_DEMO_SOUND
+  sta a:.loword(settings+SET_MIX_FLAGS)
+  jsl dip_apply
+  a16
   rts
 @back:
   jsr .loword(mix_apply)
-  stz a:.loword(menuPage)
+  stz a:.loword(menuPage)       ; MP_MAIN
   stz a:.loword(menuAction)
   rts
+.assert SET_EFFECTS_LEVEL = SET_MUSIC_LEVEL+SOUND_EFFECTS, error
 
+; menu_level_key: MP_LEVEL: UP and DOWN move the choice; RETURN sets the
+; volume and goes back to MP_SOUND. A music volume applies at once (with
+; the effects volume in use), an effects volume at BACK. JSR; A16.
 menu_level_key:
-  cmp #$3e
+  cmp #KEY_UP
   beq @up
-  cmp #$7e
+  cmp #KEY_MAC_UP
   beq @up
-  cmp #$3d
+  cmp #KEY_DOWN
   beq @down
-  cmp #$7d
+  cmp #KEY_MAC_DOWN
   beq @down
-  cmp #$24
+  cmp #KEY_RETURN
   bne @done
   ldx a:.loword(menuAction)
   lda a:.loword(menuChoice)
-  sep #$20
-  sta a:.loword(settings+12),x
-  rep #$20
-  cpx #1
+  a8
+  sta a:.loword(settings+SET_MUSIC_LEVEL),x
+  a16
+  cpx #SOUND_EFFECTS
   beq :+
-  ; A pending effects selection must not be uploaded by a music edit.
-  sep #$20
-  lda a:.loword(settings+13)
+  ; A new effects volume (not applied yet) must not go to the mix with
+  ; the music volume.
+  a8
+  lda a:.loword(settings+SET_EFFECTS_LEVEL)
   pha
   lda a:.loword(mixEffects)
-  sta a:.loword(settings+13)
-  rep #$20
+  sta a:.loword(settings+SET_EFFECTS_LEVEL)
+  a16
   jsr .loword(mix_apply)
-  sep #$20
+  a8
   pla
-  sta a:.loword(settings+13)
-  rep #$20
+  sta a:.loword(settings+SET_EFFECTS_LEVEL)
+  a16
 :
-  lda #3
+  lda #MP_SOUND
   sta a:.loword(menuPage)
   rts
 @up:
@@ -1289,12 +1398,14 @@ menu_level_key:
   rts
 @down:
   lda a:.loword(menuChoice)
-  cmp #10
+  cmp #MIX_LEVEL_MAX
   beq @done
   inc a:.loword(menuChoice)
 @done:
   rts
 
+; menu_draw_level: MP_LEVEL: the title, the levels 0-100 on the rows of a
+; list, and the marker at menuChoice. JSR; A16.
 menu_draw_level:
   ldx #0
   ldy #.loword(menu_level_music)
@@ -1311,7 +1422,7 @@ menu_draw_level:
   sta a:.loword(menuTemp)
   txa
   clc
-  adc a:.loword(menuTemp)
+  adc a:.loword(menuTemp)       ; times LEVEL_TEXT_SIZE
   clc
   adc #.loword(menu_audio_numbers)
   tay
@@ -1324,87 +1435,65 @@ menu_draw_level:
   sbc a:.loword(menuTemp)
   asl
   asl
-  asl
+  asl                           ; times MENU_PITCH
   clc
-  adc #86
+  adc #MENU_LIST+LEVEL_COLUMN
   tax
-  lda #3
+  lda #LEVEL_TEXT_SIZE
   jsr .loword(menu_copy)
   plx
   inx
-  cpx #11
+  cpx #MIX_LEVELS
   bcc @row
   lda a:.loword(menuChoice)
-  sta a:.loword(menuTemp)
-  asl
-  asl
-  asl
-  sec
-  sbc a:.loword(menuTemp)
-  asl
-  asl
-  asl
-  clc
-  adc #84
-  tax
-  sep #$20
-  lda #MENU_MARK
-  sta f:$000800,x
-  rep #$20
-  jmp .loword(menu_footer)
+  jmp .loword(menu_draw_marker)
+.assert LEVEL_TEXT_SIZE = 3, error
 
+; menu_draw_audio: MP_SOUND: the choices, the two volumes and the demo
+; sound (ON or OFF) in SOUND_COLUMN, and the marker. JSR; A16.
 menu_draw_audio:
   ldy #.loword(menu_audio_text)
-  lda #4
+  lda #SOUND_CHOICES
   jsr .loword(menu_list)
   ldx #0
 @value:
   phx
-  lda a:.loword(settings+12),x
+  lda a:.loword(settings+SET_MUSIC_LEVEL),x
   and #255
   asl
   clc
-  adc a:.loword(settings+12),x
-  and #255
+  adc a:.loword(settings+SET_MUSIC_LEVEL),x
+  and #255                      ; times LEVEL_TEXT_SIZE
   clc
   adc #.loword(menu_audio_numbers)
   tay
   cpx #0
   bne @second_value
-  ldx #84+22
+  ldx #MENU_LIST+SOUND_COLUMN
   bra @value_pos
 @second_value:
-  ldx #140+22
+  ldx #MENU_LIST+MENU_PITCH+SOUND_COLUMN
 @value_pos:
-  lda #3
+  lda #LEVEL_TEXT_SIZE
   jsr .loword(menu_copy)
   plx
   inx
-  cpx #2
+  cpx #SOUND_DEMO               ; the two volumes
   bcc @value
-  sep #$20
-  lda a:.loword(settings+14)
+  a8
+  lda a:.loword(settings+SET_MIX_FLAGS)
   beq @off
-  rep #$20
+  a16
   ldy #.loword(menu_audio_on)
   bra @demo
 @off:
-  rep #$20
+  a16
   ldy #.loword(menu_audio_off)
 @demo:
-  ldx #196+22
+  ldx #MENU_LIST+2*MENU_PITCH+SOUND_COLUMN
   jsr .loword(menu_put)
   lda a:.loword(menuAction)
-  asl
-  tax
-  lda a:.loword(menu_audio_rows),x
-  tax
-  sep #$20
-  lda #MENU_MARK
-  sta f:$000800,x
-  rep #$20
-  jmp .loword(menu_footer)
-menu_audio_rows: .word 84,140,196,252
+  jmp .loword(menu_draw_marker)
 menu_audio_numbers: .byte "0  10 20 30 40 50 60 70 80 90 100"
 menu_level_music: .asciiz "MUSIC VOLUME"
 menu_level_effects: .asciiz "EFFECTS VOLUME"
@@ -1415,3 +1504,219 @@ menu_audio_text:
   .asciiz "  EFFECTS VOLUME"
   .asciiz "  DEMO SOUNDS"
   .asciiz "  BACK"
+
+; The DIP switches of MP_DIPS: a dip_items entry for each choice before
+; DIP_BACK. The value of a switch is its index (0 to its count - 1) in the
+; order of its names: the bits inverted (a switch is on at 0), shifted down.
+DI_OFFSET = 0                ; .word: the settings byte (SET_DIP_A, ...)
+DI_MASK = 2                  ; the bits of the switch
+DI_COUNT = 3                 ; its values
+DI_SHIFT = 4                 ; .word: the low bit of DI_MASK
+DI_NAMES = 6                 ; .word: the zero-ended value names; 0: the number 1-16
+DIP_ITEM_SIZE = 8
+dip_items:
+  .word SET_DIP_A
+  .byte DIP_A_LEVEL,16
+  .word 0,0
+  .word SET_DIP_A
+  .byte DIP_A_TWO_CREDITS,2
+  .word 4,.loword(dip_players)
+  .word SET_DIP_B
+  .byte DIP_B_COIN_A,8
+  .word 0,.loword(dip_coins)
+  .word SET_DIP_B
+  .byte DIP_B_COIN_B,8
+  .word DIP_B_COIN_B_SHIFT,.loword(dip_coins)
+  .word SET_DIP_B
+  .byte DIP_B_CONTINUE,2
+  .word 6,.loword(menu_audio_on)
+  .word SET_MIX_FLAGS
+  .byte MIX_DEMO_SOUND,2
+  .word 0,.loword(menu_audio_on)
+  .word SET_DIP_A
+  .byte DIP_A_STOP,2
+  .word 6,.loword(dip_off_on)
+.assert *-dip_items = DIP_BACK*DIP_ITEM_SIZE, error
+.assert DIP_A_TWO_CREDITS = 1<<4 .and DIP_B_CONTINUE = 1<<6 .and DIP_A_STOP = 1<<6, error
+.assert DIP_B_COIN_B = DIP_B_COIN_A<<DIP_B_COIN_B_SHIFT .and DIP_A_LEVEL = 15, error
+menu_dip_text:
+  .asciiz "  DIFFICULTY (1-16)"
+  .asciiz "  2 PLAYER GAME"
+  .asciiz "  COIN A"
+  .asciiz "  COIN B"
+  .asciiz "  CONTINUE"
+  .asciiz "  DEMO SOUNDS"
+  .asciiz "  SCREEN STOP"
+  .asciiz "  BACK"
+dip_players:
+  .asciiz "2 PLAYERS COST 2 CREDITS"
+  .asciiz "2 PLAYERS COST 1 CREDIT"
+dip_coins:                    ; the index of the switch value: its bits inverted
+  .asciiz "1 COIN 1 CREDIT"
+  .asciiz "1 COIN 2 CREDITS"
+  .asciiz "1 COIN 3 CREDITS"
+  .asciiz "1 COIN 4 CREDITS"
+  .asciiz "1 COIN 5 CREDITS"
+  .asciiz "2 COINS 1 CREDIT"
+  .asciiz "3 COINS 1 CREDIT"
+  .asciiz "4 COINS 1 CREDIT"
+dip_off_on:
+  .asciiz "OFF"
+  .asciiz "ON"
+.assert menu_audio_off = menu_audio_on+3, error  ; "ON" then "OFF"
+
+; menu_dip_key: the key A on MP_DIPS: RETURN and RIGHT give the switch of
+; the choice its next value, LEFT the one before; RETURN on BACK goes to the
+; main page. The switches apply at once (dip_apply); a new difficulty at the
+; next game start (cabinet_start). JSR; A16.
+.a16
+menu_dip_key:
+  ldx a:.loword(menuAction)
+  cpx #DIP_BACK
+  bne @switch
+  cmp #KEY_RETURN
+  bne @done
+  stz a:.loword(menuPage)       ; MP_MAIN
+  stz a:.loword(menuAction)
+@done:
+  rts
+@switch:
+  ldy #1
+  cmp #KEY_RETURN
+  beq @step
+  cmp #KEY_RIGHT
+  beq @step
+  cmp #KEY_MAC_RIGHT
+  beq @step
+  ldy #$ffff                    ; -1
+  cmp #KEY_LEFT
+  beq @step
+  cmp #KEY_MAC_LEFT
+  bne @done
+@step:
+  sty a:.loword(menuTemp)
+  txa
+  asl
+  asl
+  asl                           ; times DIP_ITEM_SIZE
+  tax
+  a8
+  lda a:.loword(dip_items+DI_COUNT),x
+  sta a:.loword(menuCount)
+  jsr .loword(dip_index)
+  clc
+  adc a:.loword(menuTemp)
+  bpl @up
+  lda a:.loword(menuCount)      ; before the first: the last
+  dec
+  bra @set
+@up:
+  cmp a:.loword(menuCount)
+  bcc @set
+  lda #0                        ; after the last: the first
+@set:
+  ldy a:.loword(dip_items+DI_SHIFT),x
+  beq @placed
+@left:
+  asl
+  dey
+  bne @left
+@placed:
+  eor #$ff                      ; a switch is on at 0
+  and a:.loword(dip_items+DI_MASK),x
+  sta a:.loword(menuTemp)
+  ldy a:.loword(dip_items+DI_OFFSET),x
+  lda a:.loword(dip_items+DI_MASK),x
+  eor #$ff
+  and a:.loword(settings),y
+  ora a:.loword(menuTemp)
+  sta a:.loword(settings),y
+  a16
+  jsl dip_apply
+  rts
+.assert DIP_ITEM_SIZE = 8, error
+
+; dip_index: A8 = the value index of the switch at dip_items+X. JSR; A8.
+.a8
+dip_index:
+  ldy a:.loword(dip_items+DI_OFFSET),x
+  lda a:.loword(settings),y
+  eor #$ff
+  and a:.loword(dip_items+DI_MASK),x
+  ldy a:.loword(dip_items+DI_SHIFT),x
+  beq @done
+@shift:
+  lsr
+  dey
+  bne @shift
+@done:
+  rts
+
+; menu_draw_dips: MP_DIPS: the title, the switches with their values on the
+; row under each, and the marker. JSR; A16.
+.a16
+menu_draw_dips:
+  ldx #0
+  ldy #.loword(menu_title_dips)
+  jsr .loword(menu_put)
+  ldy #.loword(menu_dip_text)
+  lda #DIP_CHOICES
+  jsr .loword(menu_list)
+  lda #MENU_LIST+DIP_VALUE
+  sta a:.loword(menuDest)
+  ldx #0
+@item:
+  phx
+  a8
+  jsr .loword(dip_index)
+  a16
+  and #255
+  ldy a:.loword(dip_items+DI_NAMES),x
+  bne @skip
+  inc                           ; the difficulty: the number 1-16
+  ldx a:.loword(menuDest)
+  cmp #10
+  bcc @ones
+  sbc #10                       ; carry 1
+  pha
+  lda #'1'
+  a8
+  sta f:MENU_TEXT,x
+  a16
+  inx
+  pla
+@ones:
+  ora #'0'
+  a8
+  sta f:MENU_TEXT,x
+  a16
+  bra @next
+@skip:
+  cmp #0                        ; skip A names
+  beq @put
+  a8
+@name:
+  lda a:0,y
+  iny
+  cmp #0
+  bne @name
+  a16
+  dec
+  bra @skip
+@put:
+  ldx a:.loword(menuDest)
+  jsr .loword(menu_put)
+@next:
+  lda a:.loword(menuDest)
+  clc
+  adc #MENU_PITCH
+  sta a:.loword(menuDest)
+  pla
+  clc
+  adc #DIP_ITEM_SIZE
+  tax
+  cpx #DIP_BACK*DIP_ITEM_SIZE
+  bcc @item
+  lda a:.loword(menuAction)
+  jmp .loword(menu_draw_marker)
+menu_title_dips: .asciiz "DIP SWITCHES"

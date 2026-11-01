@@ -62,10 +62,10 @@ def program(scene, phase):
 
 def install(scene):
     """The four programs and their table, in common SRAM
-    (scripts/card_layout.py). The selector is .common.sparse_selector of
-    src/card/sprite_cache.s."""
+    (scripts/secondsight_fit.py). The selector is .common.sparse_selector of
+    src/secondsight/sprite_cache.s."""
     from asset_source import Source
-    from card_link import asset
+    from secondsight_link import asset
 
     source = Source("sparse sprite programs (scripts/sparse_sprite.py)")
     for phase in range(4):

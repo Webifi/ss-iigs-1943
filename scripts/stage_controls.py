@@ -1,23 +1,23 @@
 """Native US stage controls and complete original event data, build-time only."""
 
-from harness import HostData
-import json, struct, os
+from iigs_payload import HostData
+import struct
 from roms import load
 
 # Original callback -> native operation and constant. No arcade instructions
 # are executed by the resulting game.
 CONTROLS = {
     0x6A05: ("pan", 1),
-    0x6A0B: ("flag", 17),
+    0x6A0B: ("flag", "STAGE_CORE_ARMED-STAGE_FLAGS"),
     0x6ADC: ("scroll", 0),
-    0x6AE3: ("scroll", 255),
-    0x6B4A: ("player_2_to_10", 0),
-    0x6B5E: ("flag", 16),
+    0x6AE3: ("scroll", "SCROLL_STOP"),
+    0x6B4A: ("player_loop", 0),
+    0x6B5E: ("flag", "STAGE_FINISH-STAGE_FLAGS"),
     0x6B64: ("boss_hold", 0),
     0x6BE7: ("end", 0),
-    0x6BF7: ("player_active_6", 0),
-    0x6C13: ("player_lock", 255),
-    0x6C2F: ("player_lock", 0),
+    0x6BF7: ("player_respawn", 0),
+    0x6C13: ("player_gate", "GATE_ARMED"),
+    0x6C2F: ("player_gate", 0),
 }
 for n in range(17):
     CONTROLS[0x6C4B + 5 * n] = ("difficulty", n)
@@ -76,11 +76,7 @@ def prepare(out, flow=False):
     controls = CONTROLS | FLOW_CONTROLS
     ids = sorted(controls)
     assert len(ids) < 128
-    text = (
-        "STAGE_CONTROL_COUNT = %d\nstage_control_ids:\n  .word " % len(ids)
-        + ",".join("$%04x" % c for c in ids)
-        + "\n"
-    )
+    text = "STAGE_CONTROL_COUNT = %d\n" % len(ids)
     text += (
         "stage_control_targets:\n  .addr "
         + ",".join("stage_control_" + controls[c][0] for c in ids)
@@ -90,7 +86,6 @@ def prepare(out, flow=False):
     text += "stage_control_values:\n  .word " + ",".join(str(controls[c][1]) for c in ids) + "\n"
     if flow:
         r = load()[0]["maincpu"]
-        text += ".ifndef NATIVE_STAGE_FLOW\nNATIVE_STAGE_FLOW = 1\n.endif\n"
         for name, offset, size in (
             ("stage_difficulty_values", 0x6D11, 256),
             ("stage_weapon_secrets", 0x6E85, 64),
@@ -140,8 +135,45 @@ def event_tables():
     return tables, meta
 
 
+# The control index of an event (the sixth byte of each event record):
+# 0..STAGE_CONTROL_COUNT-1 a stage control, then the enemy spawn kinds from
+# their first index (spawn_index_map), CONTROL_EXTENDED, CONTROL_NONE.
+SPAWN_FIRSTS = {"MEDIUM": 128, "LARGE": 140, "TURRET": 149}
+CONTROL_EXTENDED = 254
+CONTROL_NONE = 255
+
+
+def spawn_index_map():
+    """The control index of each enemy spawn callback (bank, address), and the
+    first index and the count of each spawn kind."""
+    from medium_enemies import SPAWNS as MEDIUM
+    from large_enemies import SPAWNS as LARGE
+    from ship_turrets import SPAWNS as TURRETS
+    from simple_spawns import collect, BASE
+    from extended_spawns import collect as extended_collect
+
+    index, ranges = {}, {}
+
+    def kind(name, first, keys):
+        ranges[name] = (first, len(keys))
+        index.update({key: first + i for i, key in enumerate(keys)})
+
+    kind("MEDIUM", SPAWN_FIRSTS["MEDIUM"], [(MEDIUM[c][0], c) for c in sorted(MEDIUM)])
+    kind("LARGE", SPAWN_FIRSTS["LARGE"], [(4, c) for c in sorted(LARGE)])
+    kind("TURRET", SPAWN_FIRSTS["TURRET"], [(6, c) for c in sorted(TURRETS)])
+    kind("SIMPLE", BASE, list(collect()))
+    index.update({key: CONTROL_EXTENDED for key in extended_collect()})
+    spans = sorted(ranges.values())
+    assert all(a + n <= b for (a, n), (b, _) in zip(spans, spans[1:]))
+    assert spans[-1][0] + spans[-1][1] <= CONTROL_EXTENDED
+    return index, ranges
+
+
 def install(out, host, enemy_spawns=False):
     tables, meta = event_tables()
+    indices = {c: i for i, c in enumerate(sorted(CONTROLS | FLOW_CONTROLS))}
+    assert len(indices) <= SPAWN_FIRSTS["MEDIUM"]
+    spawn_indices, ranges = spawn_index_map() if enemy_spawns else ({}, {})
     pointers = []
     compact = True
     descriptors = {}
@@ -150,31 +182,13 @@ def install(out, host, enemy_spawns=False):
         # Populate the unused sixth byte with the native control index before
         # optionally packing each event for the production build.
         data = bytearray(data)
-        indices = {c: i for i, c in enumerate(sorted(CONTROLS | FLOW_CONTROLS))}
-        if enemy_spawns:
-            from medium_enemies import SPAWNS
-
-            spawn_indices = {(SPAWNS[c][0], c): 128 + i for i, c in enumerate(sorted(SPAWNS))}
-            from large_enemies import SPAWNS as LARGE_SPAWNS
-
-            spawn_indices.update({(4, c): 140 + i for i, c in enumerate(sorted(LARGE_SPAWNS))})
-            from ship_turrets import SPAWNS as TURRET_SPAWNS
-
-            spawn_indices.update({(6, c): 149 + i for i, c in enumerate(sorted(TURRET_SPAWNS))})
-            from simple_spawns import collect, BASE
-
-            spawn_indices.update({key: BASE + i for i, key in enumerate(collect())})
-        if enemy_spawns:
-            from extended_spawns import collect as extended_collect
-
-            spawn_indices.update({key: 254 for key in extended_collect()})
         for offset in range(0, len(data) - 5, 6):
             callback = int.from_bytes(data[offset + 2 : offset + 4], "little")
             bank = data[offset + 4] // 4
             data[offset + 5] = (
-                indices.get(callback, spawn_indices.get((bank, callback), 255))
+                indices.get(callback, spawn_indices.get((bank, callback), CONTROL_NONE))
                 if callback < 0x8000
-                else spawn_indices.get((bank, callback), 255)
+                else spawn_indices.get((bank, callback), CONTROL_NONE)
             )
         if row["first_end_offset"] < row["final_end_offset"]:
             # Retry starts just after the first end. The final end stops the camera;
@@ -209,14 +223,13 @@ def install(out, host, enemy_spawns=False):
     for pointer in pointers:
         table.faraddr(pointer).byte(0)
     host.blob_at(table, "STAGE_TABLE_POINTERS")
-    test_stage = int(os.environ.get("SS1943_START_STAGE", "1"))
-    assert 1 <= test_stage <= 16
-    test_define = ""
-    (out / "stage_data.inc").write_text(
-        test_define
-        + "STAGE_ALL_TABLES = 1\n"
-        + (f"STAGE_COMPACT = 1\nSTAGE_DESCRIPTORS = {descriptor_ptr.label}\n")
-    )
+    # A packed event: the camera word, the STAGE_DESCRIPTORS offset of its
+    # descriptor: the callback word, the bank byte (bank * 4), the control index.
+    lines = [f"STAGE_DESCRIPTORS = {descriptor_ptr.label}"]
+    lines += ["STAGE_EVENT_SIZE = 4", "SD_CALLBACK = 0", "SD_BANK = 2", "SD_CONTROL = 3"]
+    lines += ["STAGE_POINTER_SIZE = 4"]
+    lines += [f"CONTROL_{k}_FIRST = {a}\nCONTROL_{k}_END = {a + n}" for k, (a, n) in ranges.items()]
+    lines += [f"CONTROL_EXTENDED = {CONTROL_EXTENDED}", f"CONTROL_NONE = {CONTROL_NONE}"]
+    (out / "stage_data.inc").write_text("\n".join(lines) + "\n")
     prepare(out, flow=enemy_spawns)
-    (out / "stage-tables.json").write_text(json.dumps(meta, indent=2) + "\n")
     return meta

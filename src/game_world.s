@@ -1,24 +1,26 @@
-; Complete ROM-world assets are prepared by the build. Quiet updates copy one
-; bounded upload batch. There are no disk reads and no runtime art searches.
+; The world: the build prepares all arcade world art; each packet carries
+; one bounded upload batch of the next world section to the card. No disk
+; read, no art search at run time.
 .a8
 .i16
-WORLD_TAGS = $14b4
-WORLD_SIDE = $14b6
-WORLD_LOADING = $14a2
-WORLD_LIST = $14a4
-WORLD_OFFSET = $14a8
-WORLD_OUTPUT = $14aa
-WORLD_SLOT = $14ac
-WORLD_TILE = $14ae
-WORLD_LENGTH = $14b0
-WORLD_CURRENT = $14b2
-WORLD_SKIPS = $14b3
-WORLD_SLOTS = $01b400
+WORLD_NONE = $ff             ; WORLD_LOADING, WORLD_TAGS: no section
+WORLD_REGIONS = 32           ; WORLD_REGION_SIDE, WORLD_DIRECTORY entries
+DECK_ROWS_FIRST = $d0        ; CAMERA_BG1_SCROLL high bytes of the carrier deck:
+DECK_ROWS_END = $d8          ; the upload runs there whatever objects there are
+BUSY_SMALL = 5               ; this many small enemies make an update busy
+BUSY_PICTURES = 4            ; busy: one upload every BUSY_PICTURES pictures
+WORLD_SKIPS_MAX = 32         ; list entries skipped at most in one packet
+; A WORLD_LIST entry: the slot (WORLD_NO_SLOT: none), the tile, the length
+; (bit 15: LZ-packed), the source (4 bytes). WORLD_LIST_END ends the list.
+WORLD_NO_SLOT = $ffff
+WORLD_LIST_END = $fffe
 
 .segment "INPUT"
+; game_world_init: the world state of a game start: the initial slots and
+; tags, no inflate, no special, no section loading. JSL.
 game_world_init:
   jsl special_restore_tick
-  rep #$20
+  a16
   ldx #WORLD_SLOT_COUNT*2-2
 @slot:
   lda f:WORLD_INITIAL_SLOTS,x
@@ -28,10 +30,8 @@ game_world_init:
   bpl @slot
   stz WORLD_OFFSET
   stz D500_INDEX
-  sep #$20
-.ifdef WORLD_LZ
+  a8
   jsl world_inflate_cancel
-.endif
   ldx #1
 @tags:
   lda f:WORLD_INITIAL_TAGS,x
@@ -43,64 +43,73 @@ game_world_init:
   stz SPECIAL_WAVE_READY
   stz SPECIAL_TIMER
   stz SPECIAL_TYPE
-  lda #255
+  lda #WORLD_NONE
   sta WORLD_LOADING
   rtl
 
 .segment "GAMEFLOW"
+; game_world_append: the world trailer of the packet at X (state_packet):
+; the camera cross, the wire mode, player 2's score, energy, weapon, the UI
+; fields, the credits, the result digits, the count, the special flags and
+; the trailer flags, the live fields; then the cabinet layout, a cabinet
+; page, or the next world upload batch. JSL.
 game_world_append:
 .a16
-  sep #$20
-  lda CAMERA+$0e
-  sta a:1,x
+  a8
+  lda CAMERA_CROSS
+  sta a:TRAILER_CROSS,x
   jsl cabinet_wire_mode
-  sta a:0,x
-  stx $d8
+  sta a:TRAILER_MODE,x
+  stx PACKET_HEADER
   inx
   inx
-  rep #$20
-  .repeat 4,I
-    lda PLAYER+$b8+I*2
+  a16
+  .repeat (TRAILER_ENERGY2-TRAILER_SCORE2)/2,I
+    lda PLAYER2+PL_SCORE+I*2
     xba
-    sta a:0+I*2,x
-    lda ENERGY_HUD+28+I*2
+    sta a:TRAILER_SCORE2+I*2,x
+    lda ENERGY_HUD+ENERGY_HUD_ROW+I*2
     xba
-    sta a:8+I*2,x
+    sta a:TRAILER_ENERGY2+I*2,x
   .endrepeat
-  sep #$20
+  a8
   lda AIR_LIFE
   asl
   asl
   asl
-  asl
+  asl                           ; bits 4-7
   ora PLAYER_UI_MODE
-  sta a:17,x
+  sta a:TRAILER_UI_MODE,x
   lda PLAYER_UI_COUNT
-  sta a:16,x
+  sta a:TRAILER_UI_COUNT,x
   lda PLAYER_UI_MODE+1
-  sta a:19,x
+  sta a:TRAILER_UI_MODE2,x
   lda PLAYER_UI_COUNT+1
-  sta a:18,x
-  lda PLAYER+$d1
-  sta a:21,x
-  lda PLAYER+$d7
-  sta a:20,x
+  sta a:TRAILER_UI_COUNT2,x
+  lda PLAYER2+PL_WEAPON
+  sta a:TRAILER_WEAPON2,x
+  lda PLAYER2+PL_WEAPON_TIME
+  sta a:TRAILER_TIME2,x
   lda GAME_CREDITS
-  sta a:23,x
+  sta a:TRAILER_CREDITS,x
+  ; The result digits 1-11 in byte pairs. The last pair puts digit 11 in
+  ; byte 35; its byte 34 is TRAILER_COUNT, written below.
   lda CAB_RESULT_DIGITS
-  sta a:22,x
+  sta a:TRAILER_RESULT,x
   .repeat 6,I
     lda CAB_RESULT_DIGITS+1+I*2
-    sta a:25+I*2,x
+    sta a:TRAILER_RESULT_REST+1+I*2,x
     lda CAB_RESULT_DIGITS+2+I*2
-    sta a:24+I*2,x
+    sta a:TRAILER_RESULT_REST+I*2,x
   .endrepeat
+  ; TRAILER_COUNT: SPECIAL_TIMER in play; CAB_ENDING_TEXT on a cabinet page
+  ; and for the stage result once no special uses the card.
   lda GAME_FLOW
-  cmp #3
+  cmp #CAB_PAGE_FIRST
   bcs @typed
-  lda CAB_RESULT_ACTIVE         ; the stage result types in live play,
+  lda CAB_RESULT_ACTIVE
   beq @special
-  lda SPECIAL_TIMER             ; after a special leaves the card
+  lda SPECIAL_TIMER
   ora SPECIAL_HOOK
   beq @typed
 @special:
@@ -109,10 +118,12 @@ game_world_append:
 @typed:
   lda CAB_ENDING_TEXT
 @count:
-  sta a:34,x
+  sta a:TRAILER_COUNT,x
 special_packet_site:
+  ; special_install_tick patches this LDA to JSR special_packet_trampoline.
   lda SPECIAL_FLAGS
-  sta a:37,x
+  sta a:TRAILER_SPECIAL,x
+  ; TRAILER_FLAGS: bit 0 CAB_ENDING 2, bit 1 the live fields follow.
   lda CAB_ENDING
   cmp #2
   bne :+
@@ -125,22 +136,22 @@ special_packet_site:
   lda CAB_LIVE_LAYOUT
   beq :+
   pla
-  ora #2                      ; extra fields follow the normal world trailer
+  ora #2
   bra :++
 :
   pla
 :
-  sta a:36,x
-  rep #$20
+  sta a:TRAILER_FLAGS,x
+  a16
   txa
   clc
-  adc #38
+  adc #TRAILER_SIZE
   tax
-  sep #$20
+  a8
   lda CAB_LIVE_LAYOUT
   beq @no_live_fields
-  rep #$20
-  .repeat 6,I
+  a16
+  .repeat TRAILER_LIVE_LAYOUT/2,I
     lda CAB_LIVE_VALUES+I*2
     xba
     sta a:I*2,x
@@ -148,12 +159,12 @@ special_packet_site:
   lda CAB_LIVE_LAYOUT
   and #255
   xba
-  sta a:12,x
+  sta a:TRAILER_LIVE_LAYOUT,x
   txa
   clc
-  adc #14
+  adc #TRAILER_LIVE_LAYOUT+2    ; the live fields
   tax
-  sep #$20
+  a8
 @no_live_fields:
   lda GAME_FLOW
   stx WORLD_OUTPUT
@@ -161,51 +172,50 @@ special_packet_site:
   bcc :+
   rtl
 :
-  sep #$20
+  a8
   lda GAME_FLOW
-  cmp #16
+  cmp #PAGE_RANKING
   bne :+
   jmp .loword(world_no_upload)
 :
-  cmp #4
+  cmp #PAGE_TITLE
   beq @cabinet_static
-  cmp #5
+  cmp #PAGE_POWER_ON
   beq @cabinet_static
-  cmp #17
+  cmp #PAGE_ENDING_FIRST
   bcc :+
-  cmp #30
+  cmp #PAGE_ENDING_END
   bcs :+
 @cabinet_static:
-  ; A static page may borrow world-section slot 1. Its tile art survives;
-  ; quiet intro loading must restore the overwritten row metadata.
-  lda #255
+  ; A static page can take world section slot 1. Its tile art stays; the
+  ; quiet loading of the intro writes the row data again.
+  lda #WORLD_NONE
   sta WORLD_TAGS+1
   lda WORLD_SIDE
   cmp #1
   bne @cabinet_no_cancel
-  lda #255
+  lda #WORLD_NONE
   sta WORLD_LOADING
-.ifdef WORLD_LZ
   jsl world_inflate_cancel
-.endif
 @cabinet_no_cancel:
   jsl cabinet_append
   phx
-  ldx $d8
-  sep #$20
+  ldx PACKET_HEADER
+  a8
   lda CAB_PACKET_MODE
-  sta a:0,x
+  sta a:TRAILER_MODE,x
   plx
-  rep #$20
+  a16
   rtl
 :
 @live_world:
 .a8
-  rep #$20
-  lda CAMERA+$10
+  ; The play: the section under the camera must be resident.
+  a16
+  lda CAMERA_BG1_SCROLL+1
   and #255
   tax
-  sep #$20
+  a8
   lda f:WORLD_REGION_MAP,x
   sta WORLD_CURRENT
   cmp #WORLD_INTRO_ID
@@ -214,22 +224,18 @@ special_packet_site:
   beq @route
   cmp WORLD_TAGS+1
   beq @route
-  lda #$ea                    ; never read an unresident map section
-  sta f:$050301
-  jmp .loword(world_no_upload)
+  jmp .loword(world_no_upload)  ; the section is not resident: no upload
 @route:
-.ifdef WORLD_LZ
-  lda f:$018d10
+  lda f:WORLD_LZ_STATE
   beq :+
-  cmp #2
+  cmp #WLS_READY
   beq @ready_lz
   jmp .loword(world_no_upload)
 @ready_lz:
-  rep #$20
-  ; The inflated world batch also needs the transition helper before it.
-  ; Use the actual expanded size in the shared packet-cap check.
-  lda CAMERA+$0f
-  cmp #$d500
+  ; The inflated batch goes now; on the deck the d500 helper goes first.
+  a16
+  lda CAMERA_BG1_SCROLL
+  cmp #DECK_SCROLL
   bne @finish_lz
   lda D500_INDEX
   bmi @finish_lz
@@ -243,184 +249,145 @@ world_lz_finish_call = *
   jmp @after_copy
 .a8
 :
-.endif
+  ; No section loads: choose the next region and its list.
   lda WORLD_LOADING
-  cmp #255
+  cmp #WORLD_NONE
   beq :+
   jmp .loword(@quiet)
 :
-.ifdef WORLD_LZ
   jsl world_choose_region
-  cmp #255
+  cmp #WORLD_NONE
   bne @load
   jmp .loword(world_no_upload)
-.else
-  rep #$20
-  lda CAMERA_STAGE
-  and #15
-  xba
-  lsr
-  lsr
-  sta $d0
-  lda WORLD_CURRENT
-  and #31
-  asl
-  ora $d0
-  tay
-  tax
-  sep #$20
-  lda f:WORLD_ROUTES,x
-  jsl cabinet_world_request
-  sta $d4
-  lda #2
-  sta WORLD_SKIPS
-@candidate:
-  tyx
-  lda f:WORLD_ROUTES,x
-  jsl cabinet_world_request
-  cmp #255
-  beq @none
-  cmp WORLD_TAGS
-  beq @next_candidate
-  cmp WORLD_TAGS+1
-  bne @load
-@next_candidate:
-  iny
-  dec WORLD_SKIPS
-  bne @candidate
-@none:
-  jmp .loword(world_no_upload)
-.endif
 @load:
   sta WORLD_LOADING
-  rep #$20
-  and #31
+  a16
+  and #WORLD_REGIONS-1
   tax
-  sep #$20
+  a8
   lda f:WORLD_REGION_SIDE,x
   sta WORLD_SIDE
-  rep #$20
+  a16
   and #1
   asl
-  asl
-  sta $d0
+  asl                           ; the side: 4 bytes
+  sta DIRECTORY_SIDE
   lda WORLD_LOADING
-  and #31
+  and #WORLD_REGIONS-1
   asl
   asl
-  asl
-  ora $d0
+  asl                           ; the region: 2 sides of 4 bytes
+  ora DIRECTORY_SIDE
   tax
   lda f:WORLD_DIRECTORY,x
   sta WORLD_LIST
   lda f:WORLD_DIRECTORY+2,x
   sta WORLD_LIST+2
   stz WORLD_OFFSET
-  sep #$20
+  a8
 @quiet:
-.ifdef WORLD_LZ
-  ; The report's next region has priority over stale object occupancy.
+  ; The stage result and the deck always upload.
   lda CAB_RESULT_ACTIVE
   bne @work
-.endif
-  lda CAMERA+$10
-  cmp #$d0
+  lda CAMERA_BG1_SCROLL+1
+  cmp #DECK_ROWS_FIRST
   bcc @objects
-  cmp #$d8
+  cmp #DECK_ROWS_END
   bcc @work
 @objects:
-  ; Bosses and crowded waves own the frame. Their art is already resident.
-  ldx #8
+  ; A large object or BUSY_SMALL small enemies make the update busy.
+  ldx #OBJ_TYPE
 @large:
   lda LARGE_POOL,x
   bne @busy
-  rep #$20
+  a16
   txa
   clc
-  adc #128
+  adc #LARGE_SIZE
   tax
-  sep #$20
-  cpx #1536
+  a8
+  cpx #LARGE_COUNT*LARGE_SIZE
   bcc @large
-  ldx #8
-  stz $d0
+  ldx #OBJ_TYPE
+  stz BUSY_COUNT
 @small:
   lda ENEMY_POOL,x
   beq :+
-  inc $d0
-  lda $d0
-  cmp #5
+  inc BUSY_COUNT
+  lda BUSY_COUNT
+  cmp #BUSY_SMALL
   bcs @busy
 :
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #OBJECT_SIZE
   tax
-  sep #$20
-  cpx #512
+  a8
+  cpx #ENEMY_COUNT*OBJECT_SIZE
   bcc @small
   bra @work
 @busy:
-  ; A boss or crowded wave must not starve the next region forever.
-  ; One packet every four submitted pictures keeps the transfer moving.
-  rep #$20
+  ; Busy: one upload every BUSY_PICTURES pictures, so the region still comes.
+  a16
   lda GAME_PICTURE
-  and #3
-  sep #$20
+  and #BUSY_PICTURES-1
+  a8
   beq @work
   jmp .loword(world_no_upload)
 @work:
-  lda #32
+  ; The next list entry whose slot does not hold its tile already.
+  lda #WORLD_SKIPS_MAX
   sta WORLD_SKIPS
 @entry:
-  rep #$20
+  a16
   lda WORLD_LIST
-  sta $d0
+  sta WORLD_POINTER
   lda WORLD_LIST+2
-  sta $d2
+  sta WORLD_POINTER+2
   ldy WORLD_OFFSET
-  lda [$d0],y
-  cmp #$fffe
+  lda [WORLD_POINTER],y
+  cmp #WORLD_LIST_END
   bne :+
   jmp @complete
 :
   sta WORLD_SLOT
   iny
   iny
-  rep #$20
-  lda [$d0],y
+  a16
+  lda [WORLD_POINTER],y
   sta WORLD_TILE
   iny
   iny
-  lda [$d0],y
+  lda [WORLD_POINTER],y
   sta WORLD_LENGTH
   iny
   iny
-  lda [$d0],y
-  sta $d4
+  lda [WORLD_POINTER],y
+  sta WORLD_SOURCE
   iny
   iny
-  lda [$d0],y
-  sta $d6
+  lda [WORLD_POINTER],y
+  sta WORLD_SOURCE+2
   iny
   iny
   sty WORLD_OFFSET
   lda WORLD_SLOT
-  cmp #$ffff
+  cmp #WORLD_NO_SLOT
   beq @copy
   asl
   tax
   lda f:WORLD_SLOTS,x
   cmp WORLD_TILE
   bne @copy
-  sep #$20
+  a8
   dec WORLD_SKIPS
   bne @entry
   jmp .loword(world_no_upload)
 @copy:
 .a16
-.ifdef WORLD_LZ
+  ; A packed entry inflates first (world_lz.s); a raw one goes now, words
+  ; high byte first.
   lda WORLD_LENGTH
   bpl :+
   and #$7fff
@@ -428,12 +395,11 @@ world_lz_finish_call = *
   jsl world_inflate_begin
   jmp .loword(world_no_upload)
 :
-.endif
   jsl d500_stage_world
   ldx WORLD_OUTPUT
   ldy #0
 @word:
-  lda [$d4],y
+  lda [WORLD_SOURCE],y
   xba
   sta a:0,x
   inx
@@ -445,32 +411,32 @@ world_lz_finish_call = *
 @after_copy:
   stx WORLD_OUTPUT
   lda WORLD_SLOT
-  cmp #$ffff
+  cmp #WORLD_NO_SLOT
   beq @copied
   asl
   tax
   lda WORLD_TILE
   sta f:WORLD_SLOTS,x
 @copied:
-.ifdef WORLD_LZ
   jsl world_inflate_prefetch
-.endif
   ldx WORLD_OUTPUT
   rtl
 @complete:
 .a16
-  rep #$20
+  ; The section is resident: its tag, then no section loads.
+  a16
   lda WORLD_SIDE
   and #1
   tax
-  sep #$20
+  a8
   lda WORLD_LOADING
   sta WORLD_TAGS,x
-  lda #255
+  lda #WORLD_NONE
   sta WORLD_LOADING
+; world_no_upload: no upload batch: a 0 word ends the packet.
 world_no_upload:
 .a8
-  rep #$20
+  a16
   jsl d500_stage_empty
   ldx WORLD_OUTPUT
   lda #0
@@ -479,14 +445,13 @@ world_no_upload:
   inx
   rtl
 
-.ifdef WORLD_LZ
 .pushseg
 .segment "INPUT"
 .include "world_lz.s"
 .popseg
-.endif
 
-; Same-bank trampoline is installed only while an attack/suppression runs.
+; special_packet_trampoline: special_install_tick patches special_packet_site
+; to JSR here during a special attack and its quiet time.
 .segment "GAMEFLOW"
 special_packet_trampoline:
   jsl special_packet_flash

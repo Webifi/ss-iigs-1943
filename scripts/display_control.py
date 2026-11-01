@@ -2,7 +2,7 @@
 
 from modes import mode_data
 from display_timing import DEFAULT_VGA, DEFAULT_RGB, CLOCKS, encode
-from dataclasses import astuple
+from dataclasses import astuple, fields
 from fractions import Fraction
 import json
 from pathlib import Path
@@ -29,12 +29,16 @@ def install(host, mode):
     misc = [i for i, r in enumerate(records[0]) if r[1] == 0x3C2 and r[0] == 0]
     assert len(misc) == 1
     lines = [
-        f"DISPLAY_MODE = $0F0000 + card_{mode['register_table_label']}",
-        "DISPLAY_FIRST = $0F0000 + card_first_raster_threshold",
-        "DISPLAY_HALF = $0F0000 + card_half_raster_threshold",
+        f"DISPLAY_MODE = $0F0000 + secondsight_{mode['register_table_label']}",
+        "DISPLAY_FIRST = $0F0000 + secondsight_first_raster_threshold",
+        "DISPLAY_HALF = $0F0000 + secondsight_half_raster_threshold",
         f"DISPLAY_N = {len(records[0])}",
         f"DISPLAY_MISC = {4 * misc[0] + 3}",
         f"DISPLAY_CLOCK = {indexed(0x3DE, 6)}",
+        "DISPLAY_PIXEL_CLOCK = 1",  # record 0 writes the card pixel clock (modes.py)
+        "PIXEL_CLOCK_RGB = $a9",
+        f"DISPLAY_CLOCKS = {len(CLOCKS)}",
+        f"DISPLAY_CLOCK_FALLBACK = {[hz for _, hz in CLOCKS].index(40_000_000)}",
     ]
     lines += [
         f"DISPLAY_CRTC_{i:02X} = {indexed(0x3D4, i)}"
@@ -66,6 +70,10 @@ def install(host, mode):
     byid = {q["id"]: q for q in presets}
     for q, t in ((byid["vga-arcade"], DEFAULT_VGA), (byid["rgb-default"], DEFAULT_RGB)):
         assert timing(q) == t, (q["id"], timing(q), t)
+    # The display records of src/settings.inc hold the Timing fields in order:
+    # the assembler checks the offsets.
+    lines += [f".assert DR_{f.name.upper()} = {2 * i}, error" for i, f in enumerate(fields(Timing))]
+    lines += [f".assert DISPLAY_RECORD_SIZE = {2 * len(fields(Timing))}, error"]
     lines += ["display_defaults:"]
     for name in (
         "vga-arcade",
@@ -98,12 +106,3 @@ def install(host, mode):
         ticks = round(900000 * p["total"] * p["htotal"] * div / clocks[p["clock"]])
         lines += [f"  .word {65535 if p['rgb'] else 65535 - ticks},{65535 - ticks // 2}"]
     (host.out / "display-control.inc").write_text("\n".join(lines) + "\n")
-    host.display_code_size = 0xF00
-    host.display_code_source = host.blob_at_padding_or_bank(bytes(host.display_code_size))
-    host.routines += [
-        '.segment "DISPLAY"',
-        '.include "display_control.s"',
-        '.segment "SPECIAL"',
-        '.include "display_game_clock.s"',
-        '.segment "NATIVE"',
-    ]

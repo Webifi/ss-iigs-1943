@@ -17,22 +17,8 @@ import json
 from arcade import ROOT
 from playfield import sea_pixel
 
-ACTIVE = 0x2E30
-PHASE = 0x2E31
-FORCE = 0x2E32
-BASE = 0x2E33
-END = 0x2E34
-PAGE_PHASE = 0x2E38
-STAGE_PHASE = 0x2E3C
-PAL = 0x10800
-# Cloud flash table (normal, then lit; index R G B per entry) in the sea
-# directory's spare SRAM (game_sea.SEA_SPARE), read at $CE00 through BBR 13.
-CLOUD_TABLE = 0x19E00
 SEA_WATER_COLOURS = (2, 26, 39, 48)
-CLOUD_ENTRIES = 12
-MOD30 = 0xA700
-HIGH30 = 0x1B600
-BG2_DISABLED = 0x7BCE
+CLOUD_ENTRIES = 12  # src/secondsight/water.s CLOUD_ENTRIES
 
 
 def stage(a):
@@ -99,17 +85,22 @@ def prepare(a, world_base=0, period=64):
 
 
 def install(host, a, scene=None):
+    from asset_source import Source
+    from secondsight_link import asset, load
+
     data, palettes = prepare(a)
     if scene is not None:
-        host.upload(0x41E00, scene.ship_seed_data)
-    host.upload(0x100000 + PAL, palettes)
-    _, light_palette = prepare(a, 0x1000, 128)
-    host.upload(0x100000 + PAL + 840, light_palette)
+        load(0x41E00, scene.ship_seed_data)
+    # The stage water palette (src/secondsight/water.s): it stays in one 256-byte
+    # page; the card compares low address bytes with slot counts.
+    source = Source("stage water palette (scripts/game_water.py)").section(".rodata.water_colours")
+    asset("water_colours", source.align(256).label("water_palette_indices").data(palettes))
+    prepare(a, 0x1000, 128)  # the light water colours (palette_include)
     # Cloud-only flash changes shared DAC entries briefly; restore the exact
     # pre-existing RGB values as soon as the lightning flash clears.
-    # Table (CLOUD_TABLE): CLOUD_ENTRIES normal entries (6 clouds, the bolt
-    # slot twice, the sea water colours), then the same number of lit entries;
-    # 4 bytes each (index, R, G, B).
+    # Table: CLOUD_ENTRIES normal entries (6 clouds, the bolt slot twice, the
+    # sea water colours), then the same number of lit entries; 4 bytes each
+    # (index, R, G, B).
     cloud_indices = (22, 33, 34, 32, 30, 29)
     normal = b"".join(bytes([i]) + a.palette[i * 3 : i * 3 + 3] for i in cloud_indices)
 
@@ -142,24 +133,13 @@ def install(host, a, scene=None):
         for i in SEA_WATER_COLOURS
     )
     assert len(normal) == len(cyan) == 4 * CLOUD_ENTRIES
-    cloud_address = 0x100000 + CLOUD_TABLE
-    assert all(
-        cloud_address + 8 * CLOUD_ENTRIES <= p or cloud_address >= p + len(data)
-        for p, data in host.card_startup
-    )
-    host.upload(cloud_address, normal + cyan)
-    host.upload(0x100000 + MOD30, bytes(r % 30 for r in range(256)))
-    host.upload(0x100000 + HIGH30, bytes((r * 256) % 30 for r in range(256)))
-    host.upload(0x100000 + ACTIVE, bytes(0x70))
-    # The first palette commit precedes the first world packet.
-    host.upload(0x100000 + BG2_DISABLED, b"\0")
-    host.upload(0x102E9C, b"\xff\xff")
-    host.upload(0x102EC6, b"\xff\0\0\0")
-    host.upload(0x102EF0, bytes(8))
+    source = Source("cloud flash palette (scripts/game_water.py)").section(".rodata.cloud_palette")
+    asset("cloud_palette", source.label("cloud_palette_normal").data(normal).label("cloud_palette_lit").data(cyan))
+
 
 
 def palette_include(a):
-    """Assembler constants of the water slots, for src/card/water.s."""
+    """Assembler constants of the water slots, for src/secondsight/water.s."""
     light = a.water_slots[:3]
     assert len(a.light_water_colors) == 3 and light == list(range(light[0], light[0] + 3))
     rgb = [v for i in a.light_water_colors for v in a.palette[i * 3 : i * 3 + 3]]
@@ -180,8 +160,8 @@ def palette_include(a):
 
 
 def sources(scene):
-    """build/card/gen/water_palette.inc and the water pattern symbols."""
-    from card_link import alias, generate_include
+    """build/secondsight/gen/water_palette.inc and the water pattern symbols."""
+    from secondsight_link import alias, generate_include
 
     generate_include("water_palette", palette_include(scene.a))
     alias("normal_water_pattern", scene.normal_water_pattern("group"))

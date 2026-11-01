@@ -1,52 +1,50 @@
-; Original bank-six four-piece spawns, shared group helper $30B8-$3116.
+; turret_spawn: a stage event starts a ship turret (bank 6, control indexes
+; CONTROL_TURRET_FIRST to CONTROL_TURRET_END-1; src/stage.s sets
+; TURRET_SPAWN_ID). Each turret is a boss part with its own ledger slot
+; (TURRET_GROUP), as the arcade's group helper at $30B8-$3116. In the boss
+; replay (TURRET_RETRY) a destroyed turret stays away. JSL; A8, X16.
 .a8
 .i16
-TURRET_SPAWN_ID = $1c96
-TURRET_GROUP = $1c98         ; original E560
-TURRET_RETRY = $1c99         ; original E551
-TURRET_DEST = $1c9a
-TURRET_SPAWN_X = $1c9c
-TURRET_TEMPLATE = $1c9e
 
 turret_spawn:
-  rep #$20
+  a16
   lda TURRET_SPAWN_ID
   and #255
   tax
-  sep #$20
+  a8
   lda f:turret_spawn_x,x
   sta TURRET_SPAWN_X
   lda f:turret_spawn_kind,x
-  rep #$20
+  a16
   and #255
   asl
   asl
   asl
   asl
-  asl
+  asl                           ; times OBJECT_SIZE: the template
   sta TURRET_TEMPLATE
-  sep #$20
+  a8
   jsr .loword(large_allocate_turret)
   bcs :+
-  rtl
+  rtl                           ; no free slot
 :
   stx TURRET_DEST
   inc TURRET_GROUP
-  rep #$20
+  a16
   lda TURRET_GROUP
   and #255
   tay
-  sep #$20
+  a8
   lda TURRET_RETRY
   beq @copy
   lda LARGE_GROUPS,y
   bne @copy
   rtl
 @copy:
-  rep #$20
+  a16
   txy
   ldx TURRET_TEMPLATE
-  .repeat 16
+  .repeat OBJECT_SIZE/2
     lda f:turret_spawn_templates,x
     sta LARGE_POOL,y
     inx
@@ -54,25 +52,28 @@ turret_spawn:
     iny
     iny
   .endrepeat
+  ; The ledger slot keeps the HP; LARGE_THRESHOLD grows by it.
   lda TURRET_GROUP
   and #255
   tay
   ldx TURRET_DEST
-  sep #$20
-  sta LARGE_POOL+$0f,x
-  lda LARGE_POOL+$0b,x
+  a8
+  sta LARGE_POOL+OBJ_LEDGER,x
+  lda LARGE_POOL+OBJ_HP,x
   sta LARGE_GROUPS,y
   clc
   adc LARGE_THRESHOLD
   sta LARGE_THRESHOLD
-  lda LARGE_POOL+1,x
-  sta LARGE_POOL+$41,x
-  lda LARGE_POOL+3,x
+  ; The upper piece, and the cross relative to the camera.
+  lda LARGE_POOL+SPR_ATTR,x
+  sta LARGE_POOL+2*SPRITE_SIZE+SPR_ATTR,x
+  lda LARGE_POOL+SPR_ALONG,x
   sec
-  sbc #16
-  sta LARGE_POOL+$43,x
+  sbc #PIECE_RISE
+  sta LARGE_POOL+2*SPRITE_SIZE+SPR_ALONG,x
   lda TURRET_SPAWN_X
   sec
-  sbc CAMERA+$0e
-  sta LARGE_POOL+2,x
+  sbc CAMERA_CROSS
+  sta LARGE_POOL+SPR_CROSS,x
   rtl
+.assert OBJECT_SIZE = 32, error

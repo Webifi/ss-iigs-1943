@@ -1,52 +1,17 @@
-; Game-facing sound requests. Bank-zero entry points never touch the GLU.
-; The timer owns DOC transactions. Uploads run in the main loop.
+; The game side of the sound: the sound command queue, the sound start-up and
+; the start music. The game queues arcade sound commands (sounds.inc) with
+; game_sound_request; the sound interrupt (music_irq.s) takes one command
+; each arcade frame with audio_request_tick. Only the sound interrupt and its
+; start-up touch the DOC; uploads run in the main loop (audio_game_upload).
 .a8
 .i16
-DOC_MASTER = $17f4
-DOC_STREAM_ACTIVE = $17e0
-DOC_STREAM_REFILLS = $17e6
-DOC_STREAM_UNDERRUNS = $17e8
-START_MUSIC_FLAGS = $0187d3  ; bits 7: timer, 6: smooth restart, 5: title preload
-START_MUSIC_DUE = $0187d4    ; DOC tick at which the opening cue repeats
+START_MUSIC_REPEAT = 596     ; DOC timer ticks: 2.498 s at 238.548 Hz
 
-doc_init:
-  jsl audio_game_init
-  rts
-doc_play_gun:
-  lda #1
-  bra doc_play_weapon
-doc_play_hit:
-  cmp #14
-  beq doc_play_weapon
-  lda #19
-  bra doc_play_weapon
-doc_play_player_hurt:
-  lda #2
-  bra doc_play_weapon
-doc_play_player_death:
-  lda #5
-doc_play_weapon:
-.ifdef CONTINUOUS_GAME
-  jsl game_sound_request
-.else
-  sta SSG_PENDING
-.endif
-  rts
-; Read the new channel's control without changing game logic.
-doc_weapon_control:
-  ldx #$ad
-doc_read:
-  jsl audio_game_doc_read
-  rts
-doc_stream_update:
-  jsl audio_game_upload
-  rts
-.ifdef CONTINUOUS_GAME
-; Main-thread producers publish the index last. The IRQ takes one command
-; per arcade frame; its pending byte is only the final hand-off to the player.
+; game_sound_request: queue the sound command A. With no credit, in the demo
+; play and on the cabinet pages (not the ending), a sound plays only with the
+; demo sound switch (GAME_DIP_B bit 7), as in the arcade; SND_STOP_ALL always
+; goes. A full queue drops the command. JSL; A8, X16; X kept.
 game_sound_request:
-  ; The arcade permits demo audio only with DSWB bit 7. Coin/title sounds
-  ; remain audible once a credit exists, as do all real-game requests.
   pha
   lda CAB_START_PENDING
   bne @audible
@@ -55,15 +20,15 @@ game_sound_request:
   lda CAB_DEMO
   bne @demo
   lda GAME_FLOW
-  cmp #3
-  bcc @audible
+  cmp #CAB_PAGE_FIRST
+  bcc @audible                  ; the play of a game
   lda CAB_ENDING
   bne @audible
 @demo:
   lda GAME_DIP_B
-  bmi @audible
+  bmi @audible                  ; bit 7: demo sounds
   pla
-  cmp #0                      ; stop is always effective
+  cmp #SND_STOP_ALL
   beq @enqueue
   rtl
 @audible:
@@ -71,181 +36,163 @@ game_sound_request:
 @enqueue:
   phx
   pha
-  rep #$20
-  lda STAGE_SOUND_WRITE
-  and #31
+  a16
+  lda SOUND_WRITE
+  and #SOUND_QUEUE_SIZE-1
   tax
-  sep #$20
+  a8
   pla
-  sta STAGE_SOUND_QUEUE,x
+  sta SOUND_QUEUE,x
   txa
   inc
-  and #31
-  cmp STAGE_SOUND_READ
+  and #SOUND_QUEUE_SIZE-1
+  cmp SOUND_READ
   bne :+
-  lda #$d8
-  sta f:$050301
-  plx
+  plx                           ; full: the command is not published
   rtl
 :
-  sta STAGE_SOUND_WRITE
+  sta SOUND_WRITE
   plx
   rtl
-.endif
+; music_irq_vector: the IRQ vector (bank 0) jumps to the sound interrupt.
 music_irq_vector:
   jml music_irq_entry
 
 .segment "SOUND"
-audio_game_doc_read:
-  jsr .loword(audio_doc_read)
-  rtl
-
+; audio_game_init: the sound start-up (game.s, once). The queue is empty, the
+; DOC volume comes from the Control Panel, all oscillators halt, GAME_CLOCK
+; starts at 0, then the sound bank and the music interrupt start. JSL.
 audio_game_init:
-.ifdef CONTINUOUS_GAME
-  stz STAGE_SOUND_READ
-  stz STAGE_SOUND_WRITE
+  stz SOUND_READ
+  stz SOUND_WRITE
   lda #0
   sta f:START_MUSIC_FLAGS
-.endif
-  lda f:$e100ca
-  and #15
+  lda f:CP_VOLUME
+  and #CP_VOLUME_BITS
   sta DOC_MASTER
-  sta f:$050500
-  ldx #$a0
+  ldx #DOC_CONTROL
 @halt:
-  lda #3
+  lda #DOC_HALT|DOC_ONE_SHOT
   jsr .loword(audio_doc_write)
   inx
-  cpx #$c0
+  cpx #DOC_CONTROL+DOC_OSCILLATORS
   bne @halt
-  rep #$20
-  stz MUSIC_IRQ_COUNT
-  stz DOC_STREAM_REFILLS
-  stz DOC_STREAM_UNDERRUNS
-  sep #$20
-  stz DOC_STREAM_ACTIVE
+  a16
+  stz GAME_CLOCK
+  a8
   jsl audio_bank_init
-  jsl wave_upload_init
-  ldx #2048
-@initial:
-  phx
-  jsl wave_upload_service
-  plx
-  dex
-  bne @initial
   jsr .loword(music_irq_install)
   rtl
 
+; audio_game_upload: the sound work of the main loop between updates (the
+; game clock wait, the menus and the card stream): the FM uploads, and the
+; start music repeat when it is due. JSL; all registers, P and D kept.
 audio_game_upload:
   php
-  rep #$30
+  ax16
   pha
   phx
   phy
   phd
-  lda #0
+  lda #ZERO_PAGE
   tcd
-  sep #$20
-  jsl wave_upload_service
+  a8
   jsl fm_upload_service
-.ifdef CONTINUOUS_GAME
-  ; Service the start-cue deadline in idle time between game updates too;
-  ; the arcade repeat is timed to the sound clock, not to a picture.
+  ; The start music repeat follows the sound clock, not a picture.
   lda f:START_MUSIC_FLAGS
-  bpl :+
+  bpl :+                        ; SMF_DUE
   jsl audio_start_music_service
 :
-.endif
-  rep #$30
+  ax16
   pld
   ply
   plx
   pla
   plp
   rtl
+.assert SMF_DUE = $80, error ; the BPL above
 
-audio_game_remove:
-  jsr .loword(music_irq_remove)
-  rtl
-.ifdef CONTINUOUS_GAME
-; A title credit can follow an earlier song. Request a fresh opening preload;
-; the IRQ performs it only once the title and FM upload queue are idle.
+; audio_title_preload_request: load the title music again when the sound is
+; idle (a credit after an earlier song; music_title_preload). JSL.
 audio_title_preload_request:
 .a8
   php
-  sei
+  sei                           ; the interrupt changes START_MUSIC_FLAGS too
   lda f:START_MUSIC_FLAGS
-  ora #$20
+  ora #SMF_PRELOAD
   sta f:START_MUSIC_FLAGS
   plp
   rtl
 
-; Start the opening cue as soon as the paid start is accepted, even when
-; the stage picture is still loading. Reissue it after 596 DOC interrupts
-; (2.498 s at the 238.548 Hz music clock), independently of picture loading.
+; audio_start_music_begin: a paid start (cabinet.s) starts the start music at
+; once, also while the stage picture loads, and again START_MUSIC_REPEAT DOC
+; ticks later. The two start music events of stage 0 are then skipped
+; (audio_start_music_stage). JSL.
 audio_start_music_begin:
 .a8
-  lda #$82
+  lda #SMF_DUE|2
   sta f:START_MUSIC_FLAGS
-  rep #$20
-  lda MUSIC_IRQ_COUNT
+  a16
+  lda GAME_CLOCK
   clc
-  adc #596
+  adc #START_MUSIC_REPEAT
   sta f:START_MUSIC_DUE
-  sep #$20
+  a8
   bra audio_start_music_commands
 
+; audio_start_music_service: when START_MUSIC_DUE comes, start the start
+; music again; SND_SMOOTH_STOP keeps the FM notes until the new score starts.
 audio_start_music_service:
   lda f:START_MUSIC_FLAGS
-  bpl @done
-  rep #$20
-  lda MUSIC_IRQ_COUNT
+  bpl @done                     ; SMF_DUE
+  a16
+  lda GAME_CLOCK
   sec
   sbc f:START_MUSIC_DUE
   bmi @not_due
-  sep #$20
+  a8
   lda f:START_MUSIC_FLAGS
-  and #$7f
+  and #<~SMF_DUE
   sta f:START_MUSIC_FLAGS
-  ; Keep the current FM notes sounding until the replacement score starts.
-  ; $3e is an internal queued transition, not an arcade sound command.
-  lda #$3e
+  lda #SND_SMOOTH_STOP
   jsl game_sound_request
-  lda #$19
+  lda #SND_START_EFFECT
   jsl game_sound_request
-  lda #$20
+  lda #SND_START_MUSIC
   jsl game_sound_request
   rtl
 @not_due:
-  sep #$20
+  a8
 @done:
   rtl
 
+; audio_start_music_commands: stop the sound, then start the start music.
 audio_start_music_commands:
-  lda #0
+  lda #SND_STOP_ALL
   jsl game_sound_request
-  lda #$19
+  lda #SND_START_EFFECT
   jsl game_sound_request
-  lda #$20
+  lda #SND_START_MUSIC
   jsl game_sound_request
   rtl
 
-; The first two stage-zero $20 events correspond to the cues already
-; scheduled above. Keep the rest of stage_control_music's work unchanged.
+; audio_start_music_stage: stage_control_music asks with STAGE_MUSIC. Returns
+; carry 1 for a start music event of stage 0 that audio_start_music_begin has
+; played already (SMF_SKIPS counts them down), else carry 0. JSL.
 audio_start_music_stage:
   lda STAGE_MUSIC
-  cmp #$20
+  cmp #SND_START_MUSIC
   bne @keep
   lda CAMERA_STAGE
   bne @keep
   phb
-  lda #$01
+  lda #^START_MUSIC_FLAGS
   pha
   plb
   lda a:.loword(START_MUSIC_FLAGS)
-  and #3
+  and #SMF_SKIPS
   beq @restore_keep
-  ; One atomic read-modify-write preserves the IRQ's smooth-restart bit.
+  ; One read-modify-write keeps the SMF_SMOOTH bit of the interrupt.
   dec a:.loword(START_MUSIC_FLAGS)
   plb
   sec
@@ -256,30 +203,34 @@ audio_start_music_stage:
   clc
   rtl
 
+; audio_request_tick: the sound interrupt takes the next queued command.
+; An SSG effect waits while SSG_PENDING holds one; an FM command waits while
+; MUSIC_PENDING holds one. SND_STOP_ALL stops the effects and the music;
+; SND_SMOOTH_STOP stops the effects and sets SMF_SMOOTH. JSL; X changed.
 audio_request_tick:
 .a8
 .i16
-  lda STAGE_SOUND_READ
-  cmp STAGE_SOUND_WRITE
+  lda SOUND_READ
+  cmp SOUND_WRITE
   beq @done
-  rep #$20
-  and #31
+  a16
+  and #SOUND_QUEUE_SIZE-1
   tax
-  sep #$20
-  lda STAGE_SOUND_QUEUE,x
-  beq @stop
-  cmp #$1f
+  a8
+  lda SOUND_QUEUE,x
+  beq @stop                     ; SND_STOP_ALL
+  cmp #SND_STOP_EFFECTS
   beq @effects_stop
-  cmp #$3f
+  cmp #SND_STOP_MUSIC
   beq @music_stop
-  cmp #$3e
+  cmp #SND_SMOOTH_STOP
   beq @smooth_stop
-  cmp #$20
+  cmp #SND_FM_FIRST
   bcs @music
-  lda SSG_PENDING
+  lda MUSIC_PAGE+SSG_PENDING
   bne @done
-  lda STAGE_SOUND_QUEUE,x
-  sta SSG_PENDING
+  lda SOUND_QUEUE,x
+  sta MUSIC_PAGE+SSG_PENDING
   bra @advance
 @effects_stop:
   jsr .loword(audio_effects_stop)
@@ -287,13 +238,13 @@ audio_request_tick:
 @smooth_stop:
   jsr .loword(audio_effects_stop)
   lda f:START_MUSIC_FLAGS
-  ora #$40
+  ora #SMF_SMOOTH
   sta f:START_MUSIC_FLAGS
   bra @advance
 @stop:
   jsr .loword(audio_effects_stop)
 @music_stop:
-  lda #$ff
+  lda #MUSIC_STOP
 @music:
   pha
   lda MUSIC_PENDING
@@ -306,41 +257,39 @@ audio_request_tick:
 @advance:
   txa
   inc
-  and #31
-  sta STAGE_SOUND_READ
+  and #SOUND_QUEUE_SIZE-1
+  sta SOUND_READ
 @done:
   rtl
-; Stop all six AM pairs without changing the timer or the FM voices.
+.assert SND_STOP_ALL = 0, error ; the BEQ above
+
+; audio_effects_stop: stop the SSG effects: the SSG_PARTS part records and
+; their DOC oscillators (DOC_SSG_FIRST up to the music timer). The timer and
+; the FM voices continue. JSR; X kept.
 audio_effects_stop:
   phx
-  stz SSG_PENDING
-  stz SSG_ACTIVE
-  stz a:$1ebe
-  stz a:$1ebf
+  stz MUSIC_PAGE+SSG_PENDING
+  stz MUSIC_PAGE+SSG_ACTIVE
+  stz MUSIC_PAGE+SSG_NEXT
+  stz MUSIC_PAGE+SSG_TIME
   ldx #0
   lda #0
 @states:
-  sta f:$01850a,x
-  rep #$21
+  sta f:SSG_STATES+T_ACTIVE,x
+  rep #P_M8|P_CARRY             ; A 16 bits; clear carry
   txa
-  adc #32
+  adc #SSG_PART_SIZE
   tax
-  sep #$20
+  a8
   lda #0
-  cpx #192
+  cpx #SSG_PARTS*SSG_PART_SIZE
   bcc @states
-  ldx #$ad
+  ldx #DOC_CONTROL+DOC_SSG_FIRST
 @halt:
-  lda #3
+  lda #DOC_HALT|DOC_ONE_SHOT
   jsr .loword(audio_doc_write)
   inx
-  cpx #$b9
+  cpx #DOC_CONTROL+MUSIC_TIMER_VOICE
   bcc @halt
   plx
   rts
-.endif
-; No completion-timed sample operation exists on the snapshot/AM path.
-audio_init:
-  rtl
-audio_completed:
-  rtl

@@ -1,7 +1,8 @@
-; Original US $2553-$2596, eight-byte deterministic random state.
+; random_step: one step of the eight random streams (US arcade $2553-$2596):
+; RANDOM_STATE counts up; each next stream adds the one before and its prime
+; step (3, 5, 7, 11, 13, 17, 19). JSR; A8.
 .a8
 .i16
-RANDOM_STATE = $11c8
 random_step:
   inc RANDOM_STATE
   lda RANDOM_STATE

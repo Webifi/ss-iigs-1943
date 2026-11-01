@@ -3,24 +3,6 @@
 import struct
 from roms import load
 
-CALLBACKS = (
-    0x9283,
-    0x928D,
-    0x92F9,
-    0x9309,
-    0x933C,
-    0xA1EF,
-    0xA218,
-    0xA233,
-    0xA267,
-    0xA28E,
-    0xA33E,
-    0xA343,
-    0xA348,
-    0xA6B5,
-    0xA6BF,
-)
-LAUNCHES = (0x924C, 0xB31B, 0xA16C, 0xA65F)
 TEMPLATES = (0x9263, 0xB346, 0xA183, 0xA676, 0x8392, 0x83B2)
 
 
@@ -83,22 +65,3 @@ def prepare(out, patterns=None):
     (out / "ship_data.inc").write_text("\n".join(text) + "\n")
     return [(4, p) for p in sorted(paths)]
 
-
-def prepare_target(out):
-    import re
-    from arcade import ROOT
-
-    text = (ROOT / "src/enemy_ai.s").read_text()
-    text = text[text.index("ai_target_far:") : text.index("ai_approach:")]
-    text = (
-        text.replace("ai_target_far", "large_target_far")
-        .replace("jsr ai_target", "jsr .loword(large_target)")
-        .replace("ai_target:", "large_target:")
-    )
-    text = re.sub(
-        r"\bENEMY\+(\$[0-9a-fA-F]+|[0-9]+)",
-        lambda m: "z:$%02x" % int(m[1][1:], 16) if m[1].startswith("$") else "z:$%02x" % int(m[1]),
-        text,
-    )
-    text = re.sub(r"(?<= )\$(?:[0-9a-fA-F]{2})(?=\s*$|,)", lambda m: "a:" + m[0], text, flags=re.M)
-    (out / "large_target.inc").write_text(".a8\n.i16\n" + text)

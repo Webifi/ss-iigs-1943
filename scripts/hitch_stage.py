@@ -1,30 +1,33 @@
 """Staged $D500 renderer: compact host assets, temporary free VRAM."""
 
-from harness import HostData
+from iigs_payload import HostData
 
 
-def blocks_source(blocks, origin, output_base):
-    """build/card/gen/hitch_stage_blocks_ORIGIN.s: the blocks of the draw
-    helper that runs at ORIGIN (region hitch-stage-draw-ORIGIN)."""
-    from card_link import generate
+def blocks_source(blocks, buffer, output):
+    """build/secondsight/gen/hitch_stage_blocks_bufferN.s: the blocks of the draw
+    helper that runs in packet buffer BUFFER (.hitch_stage_draw_N of
+    secondsight.ld). OUTPUT is the symbol of the high byte of the buffer
+    that receives the expanded data."""
+    from secondsight_link import generate
 
-    suffix = f"{origin:04x}"
-    # Each block: a world decompression header that expands into OUTPUT_BASE,
+    suffix = f"buffer{buffer}"
+    # Each block: a world decompression header that expands into OUTPUT
+    # (with the CBR of the game),
     # the fragment count, and per fragment its BBR, read segment, logical
     # source and byte count.
     lines = [
         f'        .section .rodata.hitch_stage_blocks_{suffix},"a"',
         f"hitch_stage_blocks_{suffix}:",
     ]
+    from asset_source import PAGE, WINDOW_C000, vga_window_bbr
+
     for raw, n, frags in blocks:
-        header = (4, 0x84, 0, 0, 0, output_base >> 8, raw & 255, raw >> 8, n & 255, n >> 8)
-        lines.append("        .byte " + ",".join(f"0x{v:02X}" for v in header))
+        header = (4, "game_cbr", 0, 0, 0, output, raw & 255, raw >> 8, n & 255, n >> 8)
+        lines.append("        .byte " + ",".join(v if isinstance(v, str) else f"0x{v:02X}" for v in header))
         lines.append(f"        .byte {len(frags)}")
         for group, count in frags:
-            ptr = 0xC000 + (group & 4095)
-            lines.append(
-                f"        .byte 0x{0x94 + ((group & 65535) >> 12):02X},0x{group >> 16:02X}"
-            )
+            ptr = WINDOW_C000 + (group & (PAGE - 1))
+            lines.append(f"        .byte 0x{vga_window_bbr(group):02X},0x{group >> 16:02X}")
             lines.append(f"        .word 0x{ptr:04X},{count}")
     lines.append("        .byte 0")
     lines.insert(1, f"        .global hitch_stage_blocks_{suffix}")
@@ -149,22 +152,16 @@ def prepare(scene, pool):
 
 
 def install(scene, host):
-    """The host packets of the stage scene, after the final link (they hold
-    the helper code)."""
-    from card_link import after_link
+    """The host packets of the stage scene: the stage art, and the helper
+    code (the IIgs link puts in the linked helpers, src/host_jobs.inc)."""
+    from asset_source import PAGE, WINDOW_E000, vga_window_cbr
+    from world_stream import card_job, packet
 
     # The currently inactive packet buffer receives the helper, before the
     # current packet's state planner runs. The helper overwrites only raw
     # packet scratch after planning and before the next receive is armed.
-    blocks_source(scene.hitch_stage_blocks, 0x8000, 0x4000)
-    blocks_source(scene.hitch_stage_blocks, 0x4000, 0x8000)
-    after_link(lambda: _install(scene, host))
-
-
-def _install(scene, host):
-    from card_link import region_image
-    from world_stream import packet, sram_jobs
-    import struct
+    for buffer in (1, 0):
+        blocks_source(scene.hitch_stage_blocks, buffer, f"packet_buffer_{1 - buffer}__high")
 
     def even(job):
         job = bytearray(job)
@@ -184,49 +181,32 @@ def _install(scene, host):
                 even(
                     packet(
                         1,
-                        0x92 + ((ptr & 65535) >> 12),
+                        vga_window_cbr(ptr),
                         1 << plane,
                         ptr >> 16,
-                        0xE000 + (ptr & 4095),
+                        WINDOW_E000 + (ptr & (PAGE - 1)),
                         data[off : off + n],
                     )
                 )
             )
-    jobs.extend(even(j) for j in sram_jobs(0x7BF9, b"\x01"))
+    # The state job: one byte, 12 bytes with its header (even).
+    jobs.append(card_job("hitch_d500_state", b"\x01"))
     batches = []
-    batch = bytearray()
+    batch = HostData()
     for job in jobs:
         if len(batch) + len(job) > 320:
-            batches.append(bytes(batch))
-            batch.clear()
-        batch.extend(job)
-    if batch:
-        batches.append(bytes(batch))
-    jobs = batches
+            batches.append(batch)
+            batch = HostData()
+        batch += job
+    if len(batch):
+        batches.append(batch)
     directory = HostData()
-    for data in jobs:
+    for data in batches:
         assert len(data) <= 320
         directory.word(len(data)).dword(host.blob_at(data))
     directory.data(bytes(6))
     host.blob_at(directory, "D500_STAGE_LIST")
-    descriptors = []
-    helpers = [region_image(f"hitch-stage-draw-{dest:04x}") for dest in (0x8000, 0x4000)]
-    for dest, code in zip((0x8000, 0x4000), helpers):
-        items = list(sram_jobs(dest, code))
-        assert len(items) == 1
-        data = even(items[0]) + b"".join(even(j) for j in sram_jobs(0x7BF9, b"\x02"))
-        descriptors.append((len(data), host.blob_at(data, f"D500_HELPER{len(descriptors)}_ADDRESS")))
-    p = scene.build_out / "game_world.inc"
-    with p.open("a") as f:
-        f.write(f"D500_STAGE_COUNT = {len(jobs)}\n")
-        for i, (length, _) in enumerate(descriptors):
-            f.write(f"D500_HELPER{i}_LENGTH = {length}\n")
-    print(
-        "D500 stage host jobs",
-        len(jobs),
-        "helper bytes",
-        [len(code) for code in helpers],
-        "packed helper bytes",
-        [x[0] for x in descriptors],
-        flush=True,
-    )
+    for i, buffer in enumerate((1, 0)):
+        helper = HostData().linked_job(f"hitch_stage_draw_{buffer}") + card_job("hitch_d500_state", b"\x02")
+        host.blob_at(helper, f"D500_HELPER{i}_ADDRESS", length=f"D500_HELPER{i}_LENGTH")
+    print("D500 stage host jobs", len(jobs), flush=True)

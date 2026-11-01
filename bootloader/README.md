@@ -19,6 +19,7 @@ It does not boot from a 5.25-inch drive.
 | File | Contents |
 |---|---|
 | `boot0.s` | Block 0. Loads one file to $2000 and runs it |
+| `boot0.cfg` | The ld65 memory map of block 0 |
 | `prodos_read.s` | Opens and reads files, for the program that boot0 starts |
 | `prodos_volume.py` | Builds the volume, and the image for an Apple SCSI card |
 
@@ -53,8 +54,11 @@ A program writes a block with `pr_call` (command 2). For a one-block file,
 
 ## prodos_volume.py
 
+Assemble block 0 first: `ca65 boot0.s` and `ld65 -C boot0.cfg` give the 512
+bytes of boot0.bin.
+
 ```python
-volume = Volume("NAME", blocks, boot_block(ca65, ld65, work_dir))
+volume = Volume("NAME", blocks, boot0_bin_bytes)
 volume.install("GAME.SYSTEM", code, 0xFF, 0x2000)
 volume.boot("GAME.SYSTEM")
 image = bytes(volume.data)        # .hdv / .po; 1600 blocks for an 800K disk

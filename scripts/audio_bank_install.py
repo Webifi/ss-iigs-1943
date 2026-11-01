@@ -7,7 +7,7 @@ separately by scripts/fm_native.py.
 
 import json, struct
 from audio_config import volume_register
-from harness import HostData
+from iigs_payload import HostData
 from audio_preview import layout
 from sound_files import BANK
 from ssg_logic import ROTATIONS
@@ -75,45 +75,6 @@ def install(out, host, law="knee"):
         for ch in range(6):
             ptr, n = parts.get((cmd, ch), (0, 0))
             directory.faraddr(ptr).word(n)
-    init = [
-        ".a8",
-        ".i16",
-        "audio_bank_init:",
-        "  ldx #0",
-        "@table:",
-        "  phx",
-        "  rep #$20",
-        "  lda f:audio_tables,x",
-        "  sta AUDIO_BINARY_SOURCE",
-        "  sep #$20",
-        "  lda f:audio_tables+2,x",
-        "  sta AUDIO_BINARY_SOURCE+2",
-        "  lda f:audio_tables+4,x",
-        "  sta AUDIO_BINARY_AM",
-        "@ready:",
-        "  lda f:$e0c03c",
-        "  bmi @ready",
-        "  lda DOC_MASTER",
-        "  ora #$60",
-        "  sta f:$e0c03c",
-        "  lda #0",
-        "  sta f:$e0c03e",
-        "  lda f:audio_tables+3,x",
-        "  sta f:$e0c03f",
-        "  lda f:audio_tables+5,x",
-        "  rep #$20",
-        "  and #255",
-        "  tax",
-        "  sep #$20",
-        "  jsl audio_binary_upload",
-        "  rep #$21",
-        "  pla",
-        "  adc #6",
-        "  tax",
-        "  sep #$20",
-        f"  cpx #{len(tables)}",
-        "  bne @table",
-    ]
     # All six SSG pairs start halted and silent; a command starts its pair.
     registers = []
     for ch in range(6):
@@ -121,67 +82,31 @@ def install(out, host, law="knee"):
         even = odd + 1
         registers += [(0x40 + odd, 0), (0x40 + even, 0), (0xA0 + odd, 3), (0xA0 + even, 3)]
     host.blob_at(bytes(v for pair in registers for v in pair), "audio_registers")
-    init += [
-        "@register_mode:",
-        "  lda f:$e0c03c",
-        "  bmi @register_mode",
-        "  lda DOC_MASTER",
-        "  sta f:$e0c03c",
-        "  ldx #0",
-        "@registers:",
-        "  lda f:$e0c03c",
-        "  bmi @registers",
-        "  lda f:audio_registers,x",
-        "  sta f:$e0c03e",
-        "  inx",
-        "  lda f:audio_registers,x",
-        "  sta f:$e0c03d",
-        "  inx",
-        f"  cpx #{2 * len(registers)}",
-        "  bne @registers",
-    ]
-    init += [
-        "  rep #$20",
-        "  ldx #190",
-        "  lda #0",
-        "@clear:",
-        "  sta f:SSG_STATES|$010000,x",
-        "  dex",
-        "  dex",
-        "  bpl @clear",
-        "  sep #$20",
-        "  stz SSG_PENDING",
-        "  stz SSG_ACTIVE",
-        "  stz a:$1ebe",
-        "  stz a:$1ebf",
-        "  rtl",
-    ]
     host.blob_at(bytes(index), "SSG_COMMAND_INDEX")
     host.blob_at(directory, "SSG_COMMAND_ENTRIES")
     host.blob_at(masks, "SSG_MASKS")
     host.blob_at(fields, "SSG_FIELDS")
     host.blob_at(ssg_writes.kinds(), "SSG_KINDS")
     text = [
+        # An audio_tables record: faraddr(source), then the three bytes above.
+        "AT_SOURCE = 0",
+        "AT_PAGE = 3",
+        "AT_AM = 4",
+        "AT_PAGES = 5",
+        "AT_SIZE = 6",
+        # The effect lists (scripts/ssg_writes.py) for src/audio_ssg.s.
+        f"SSG_HEAD = {struct.calcsize('<BBHHH') + 2 * ROTATIONS}",
+        "SSG_HEAD_TONE_SIZE = 1",
+        f"SSG_EXPLICIT = {ssg_writes.EXPLICIT}",
+        f"SSG_DELAY_UNIT = {ssg_writes.DELAY_UNIT}",
+        f"SSG_END_HEADER = ${ssg_writes.END_HEADER:02x}",
+        f"SSG_REPEAT_HEADER = ${ssg_writes.REPEAT_HEADER:02x}",
+        f"SSG_COMMANDS = {len(index)}",
+        "SSG_NO_COMMAND = $ff",
+        "SSG_ENTRY_SIZE = 5",
         f"AUDIO_VOLUME_MAP = {levels.label}",
-        "SSG_PENDING = $1eb8",
-        f"SSG_GATE_PAGE = ${places['stage_gate'] >> 8:02x}",
-        f"SSG_NOISE_PAGE = ${places['stage_noise'] >> 8:02x}",
-        f"SSG_ON_PAGE = ${places['stage_on'] >> 8:02x}",
-        f"SSG_SQUARE_PAGE = ${squares[0]:02x}",
         f"SSG_NOISE_SIZE = {noise_size}",
-        f"SSG_ON_SIZE = {noise_size & 7}",
-    ] + init
-    (out / "audio_bank.inc").write_text("\n".join(text) + "\n")
-    receipt = dict(
-        commands=len(commands),
-        effect_parts=len(parts),
-        effect_record_bytes=sum(len(b) for b in records),
-        ssg_shared_table_bytes=len(masks) + len(fields) + 32,
-        directory_bytes=len(index) + len(directory),
-        ssg_table_bytes=sum(size for _, size, _, _ in entries),
-        table_places={n: places[n] for n in names},
-        code_sources=["src/audio_binary.s", "src/audio_ssg.s"],
-        scope="Shared SSG tables and native effect commands",
-    )
-    (out / "audio-bank-install.json").write_text(json.dumps(receipt, indent=2) + "\n")
-    return receipt
+        f"AUDIO_TABLE_BYTES = {len(tables)}",
+        f"AUDIO_REGISTER_BYTES = {2 * len(registers)}",
+    ]
+    (out / "audio_bank_data.inc").write_text("\n".join(text) + "\n")

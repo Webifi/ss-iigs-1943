@@ -4,9 +4,9 @@ Packets contain prepared final pixels and row commands. They are assets, not
 recorded game states. Runtime selects a spatial cache and expands packets.
 """
 
-from harness import HostData
+from iigs_payload import HostData, content_key
+from asset_source import PAGE, WINDOW_E000, common_window, vga_window_cbr
 import struct
-import os
 from collections import defaultdict
 from startup_pack import pack
 from stage_controls import event_tables, CONTROLS, FLOW_CONTROLS
@@ -23,8 +23,6 @@ REGIONS.append((0xE800, 0xEFFF))
 INTRO = 22
 COMMAND_PLANE = 5632
 COMMAND_TAIL = 1600
-COLUMN_PLANE = 6144
-COLUMN_BYTES = COLUMN_PLANE * 4
 # Each moving boss follows a short sea stretch. Keep their combined art in
 # one residency unit, loaded during the earlier carrier/land quiet interval.
 # The largest union is 236 strips; stage 16 already reserves 367 slots.
@@ -72,17 +70,10 @@ def routes():
 
 
 def prepare(scene, pool, initial):
-    from foreground_cache import ForegroundCache
     from game_background import World
 
     scene.foreground_initial = initial
-    scene.foreground_last = 65535
-    scene.foreground_pan = 0
     scene.foreground_primary = False
-    scene.banded_foreground = False
-    scene.foreground_phases = (0, 1, 2, 3)
-    scene.foreground_source = ForegroundCache(scene.a, pool, initial, allocate=False)
-    scene.foreground_scratch = 0  # combined paths never read the retired scratch row
     world = World(scene.a)
     # Split horizontally only: two prepared 16x32 strips per tile. Sharing
     # identical strips reduces residency without per-pixel drawing work.
@@ -122,7 +113,7 @@ def prepare(scene, pool, initial):
         )
         for c in units
     }
-    intro_commands, intro_offsets, intro_tiles = prepared[INTRO]
+    intro_tiles = prepared[INTRO][2]
     # The immutable intro shares the tails of the two command source slots.
     direct = bytearray(COMMAND_TAIL * 2)
     intro_offsets = {}
@@ -163,13 +154,9 @@ def prepare(scene, pool, initial):
     scene.world_routes = route
     scene.world_prepared = prepared
     scene.world_colors = colors
-    import os
+    from world_rows import prepare as prepare_shared_rows
 
-    scene.shared_world_rows = os.getenv("SS1943_ROW_SHARING", "1") != "0"
-    if scene.shared_world_rows:
-        from world_rows import prepare as prepare_shared_rows
-
-        prepare_shared_rows(scene, pool, world, prepared, pairs, units)
+    prepare_shared_rows(scene, pool, world, prepared, pairs, units)
     from combined_world import prepare as prepare_combined
 
     return prepare_combined(scene, pool, cols, prepared)
@@ -196,10 +183,10 @@ def vram_jobs(address, data):
             ptr = address + off
             yield packet(
                 1,
-                0x92 + ((ptr & 65535) >> 12),
+                vga_window_cbr(ptr),
                 1 << plane,
                 ptr >> 16,
-                0xE000 + (ptr & 4095),
+                WINDOW_E000 + (ptr & (PAGE - 1)),
                 raw[off : off + 256],
             )
 
@@ -208,28 +195,20 @@ def sram_jobs(address, data):
     off = 0
     while off < len(data):
         p = address + off
-        n = min(len(data) - off, 4096 - (p & 4095))
+        n = min(len(data) - off, PAGE - (p & (PAGE - 1)))
         packed = pack(data[off : off + n])
-        bank, dest = (0, p) if p < 0xC000 else (((p >> 12) - 14) & 255, 0xE000 + (p & 4095))
+        bank, dest = common_window(p)
         yield struct.pack("<BBBBHHH", 4, bank, 0, 0, dest, n, len(packed)) + packed
         off += n
 
 
 def card_job(label, data, offset=0, literal=False):
     """One SRAM job to card label LABEL + OFFSET, a record in one 4 KB page.
-    Its header waits for the card link. LITERAL sends DATA as one literal
-    run, so the host can fill it in the packet."""
-    from card_link import Late, symbol
-
-    packed = bytes((len(data) - 1,)) + bytes(data) if literal else pack(data)
-
-    def header():
-        p = symbol(label) - 0x100000 + offset
-        assert (p & 4095) + len(data) <= 4096, (label, hex(p), len(data))
-        bank, dest = (0, p) if p < 0xC000 else (((p >> 12) - 14) & 255, 0xE000 + (p & 4095))
-        return struct.pack("<BBBBHHH", 4, bank, 0, 0, dest, len(data), len(packed)) + packed
-
-    return Late(10 + len(packed), header)
+    LABEL is a load address (a data region) or a card variable in common
+    SRAM below $C000 (its logical address is its physical one); the IIgs
+    link puts in its address (src/host_jobs.inc). LITERAL sends DATA as one
+    literal run, so the host can fill it in the packet."""
+    return HostData().sram_job(label, data, offset, literal)
 
 
 def plane_jobs(base, offset, data, plane_size):
@@ -238,7 +217,7 @@ def plane_jobs(base, offset, data, plane_size):
     while done < len(data):
         plane, off = divmod(offset + done, plane_size)
         ptr = base + off
-        n = min(len(data) - done, plane_size - off, 4096 - (ptr & 4095))
+        n = min(len(data) - done, plane_size - off, PAGE - (ptr & (PAGE - 1)))
         encoded = pack(data[done : done + n])
         while len(encoded) > 980:
             n = (n + 1) // 2
@@ -247,10 +226,10 @@ def plane_jobs(base, offset, data, plane_size):
             struct.pack(
                 "<BBBBHHH",
                 5,
-                0x92 + ((ptr & 65535) >> 12),
+                vga_window_cbr(ptr),
                 plane,
                 ptr >> 16,
-                0xE000 + (ptr & 4095),
+                WINDOW_E000 + (ptr & (PAGE - 1)),
                 n,
                 len(encoded),
             )
@@ -259,16 +238,24 @@ def plane_jobs(base, offset, data, plane_size):
         done += n
 
 
+# The side 1 descriptors are two fragments (.world_side1_low and
+# .world_side1_high of secondsight.ld); the first holds this many bytes
+# (src/secondsight/combined_rows.s SIDE1_LOW_BYTES).
+SIDE1_LOW_BYTES = 510
+
 def install(out, host, scene):
     world = scene.game_world
-    # Scores occupy $01B300-$01B34F. Slots are initialized at $01B400;
-    # keep their full generated extent and fill only the other fragments.
-    slots_end = 0x400 + scene.world_slots * 2
-    assert slots_end <= 0x1000, "world slots exceed bank-one scratch page"
-    host.production_b_world = bytearray(0x1000)
-    host.production_b_holes = [[0, 0x300], [0x350, 0x400], [slots_end, 0x1000]]
-    host.production_b_allocations = []
-    host.upload(0x116000, struct.pack("<2048H", *world.column_index))
+    # The world slot table (WORLD_SLOTS, src/game_world.s) is RAM at the start
+    # of B_WORLD2; world data follows it (src/iigs.cfg).
+    host.reserve("B_WORLD2", scene.world_slots * 2, "world_slot_table")
+    from asset_source import Source
+    from secondsight_link import asset
+
+    # The column map and the column descriptors of each side: labelled data
+    # that secondsight.ld places (src/secondsight/combined_rows.s reads it).
+    source = Source("world column map and descriptors (scripts/world_stream.py)")
+    source.section(".rodata.world_column_map").label("world_column_map")
+    source.data(struct.pack("<2048H", *world.column_index))
     for i, (lo, hi) in enumerate(REGIONS):
         region = BOSS_RESIDENT_WITH.get(i, i)
         side = scene.world_region_side.get(region, 0)
@@ -283,17 +270,27 @@ def install(out, host, scene):
             )
     # Each resident section owns its own column descriptors. The lookup
     # selects the matching table from the world row's region.
-    host.upload(0x114800, scene.game_column_descriptors[0])
-    host.upload(0x11B400, scene.game_column_descriptors[1][:510])
-    host.upload(0x11BB00, scene.game_column_descriptors[1][510:])
-    host.upload(0x118000, scene.combined_row_programs)
-    from game_sea import install as install_sea
+    side0, side1 = scene.game_column_descriptors
+    source.section(".rodata.world_side0").label("world_side0").data(side0)
+    source.section(".rodata.world_side1_low").label("world_side1_low").data(side1[:SIDE1_LOW_BYTES])
+    source.section(".rodata.world_side1_high").label("world_side1_high").data(side1[SIDE1_LOW_BYTES:])
+    asset("world_columns", source)
+    # The ready row programs of the strip families (.row_programs of
+    # secondsight.ld).
+    programs = Source("strip row programs (scripts/combined_world.py)").section(".rodata.row_programs")
+    asset("row_programs", programs.label("row_programs").data(scene.combined_row_programs))
+    # The world packets write into fixed places of the Second Sight memory
+    # (the upload buffer and the descriptor tables, src/secondsight/fixed.ld).
+    _package(out, host, scene)
+    from arcade_flow import install as install_cabinet
 
-    install_sea(host, scene)
+    install_cabinet(out, host, scene)
+
+
+def _package(out, host, scene):
+    """The compressed world packets, their lists and the world directory."""
     shared = {}
     lists = {}
-    largest = 0
-    lz = os.getenv("SS1943_WORLD_LZ", "1") != "0"
     plan = {}
     for c in sorted({c for c, side in scene.world_columns}):
         for side in (scene.world_region_side[c],):
@@ -314,38 +311,32 @@ def install(out, host, scene):
                 batch.extend(job)
             if batch:
                 entries.append((65535, 0, False, bytes(batch) + b"\0"))
-            if scene.shared_world_rows:
-                from world_rows import tile_packets
+            from world_rows import tile_packets
 
-                for tile in tiles:
-                    if tile in scene.world_intro_tiles:
-                        continue
-                    jobs = tile_packets(scene, tile)
-                    entries.append((65535, 0, False, b"".join(jobs) + b"\0"))
+            for tile in tiles:
+                if tile in scene.world_intro_tiles:
+                    continue
+                jobs = tile_packets(scene, tile)
+                entries.append((65535, 0, False, b"".join(jobs) + b"\0"))
             plan[c, side] = entries
-    if lz:
-        import world_packet_lz
-        from world_dictionary import make
+    import world_packet_lz
+    from world_dictionary import make
 
-        world_packet_lz.set_dictionary(
-            *make(
-                [
-                    job.ljust((len(job) + 1) & ~1, b"\0")
-                    for entries in plan.values()
-                    for *_, job in entries
-                ]
-            )
+    world_packet_lz.set_dictionary(
+        *make(
+            [job.ljust((len(job) + 1) & ~1, b"\0") for entries in plan.values() for *_, job in entries]
         )
-        from world_packet_lz import D, SHORT, decompress
-        from world_packet_opt import compress
+    )
+    from world_packet_lz import D, SHORT, decompress
+    from world_packet_opt import compress
 
-        host.blob_at(D, "WORLD_LZ_DICT")
-        host.blob_at(SHORT, "WORLD_LZ_SHORT")
+    host.blob_at(D, "WORLD_LZ_DICT")
+    host.blob_at(SHORT, "WORLD_LZ_SHORT")
 
     def blob(data):
-        key = bytes(data)
+        key = content_key(data)
         if key not in shared:
-            shared[key] = host.production_world_blob_at(data)
+            shared[key] = host.world_blob_at(data)
         return shared[key]
 
     for (c, side), entries in plan.items():
@@ -355,17 +346,15 @@ def install(out, host, scene):
             assert len(job) <= 1026, ("world packet exceeds receive reservation", len(job))
             wire_length = len(job)
             stored = job
-            if lz:
-                packed = compress(job)
-                if packed is not None:
-                    assert decompress(packed) == job
-                    stored = packed
-                    wire_length |= 0x8000
+            packed = compress(job)
+            if packed is not None:
+                assert decompress(packed) == job
+                stored = packed
+                wire_length |= 0x8000
             addr = blob(stored)
             encoded.word(slot, tile, wire_length).faraddr(addr).byte(0)
         encoded.data(b"\xfe\xff" + bytes(8))
         lists[c, side] = blob(encoded)
-        largest = max(largest, sum(len(e[3]) for e in entries))
     directory = [0] * 64
     for (c, side), p in lists.items():
         directory[c * 2 + side] = p
@@ -384,28 +373,11 @@ def install(out, host, scene):
     for c in (*scene.world_initial_chunks, INTRO):
         for tile in scene.world_prepared[c][2]:
             struct.pack_into("<H", initial, scene.world_colors[tile] * 2, tile)
-    print("World host assets", sum(map(len, shared)), "compressed blobs", len(shared), flush=True)
     host.blob_at(initial, "WORLD_INITIAL_SLOTS")
     (out / "game_world.inc").write_text(
-        f"GAME_WORLD_NEXT = $1480\nWORLD_CABINET_ID = {CABINET}\nWORLD_DEMO_ID = 20\nWORLD_INTRO_ID = {INTRO}\nWORLD_DIRECTORY = {blob(HostData().dword(*directory)).label}\nWORLD_ROUTES = {blob(bytes(nexts)).label}\nWORLD_REGION_MAP = {blob(bytes(by_high)).label}\nWORLD_REGION_SIDE = {blob(bytes(scene.world_region_side.get(c, 255) for c in range(32))).label}\nWORLD_INITIAL_TAGS = {blob(bytes(scene.world_initial_chunks)).label}\nWORLD_SLOT_COUNT = {scene.world_slots}\n"
+        f"WORLD_DEMO_ID = 20\nWORLD_INTRO_ID = {INTRO}\nWORLD_DIRECTORY = {blob(HostData().dword(*directory)).label}\nWORLD_ROUTES = {blob(bytes(nexts)).label}\nWORLD_REGION_MAP = {blob(bytes(by_high)).label}\nWORLD_REGION_SIDE = {blob(bytes(scene.world_region_side.get(c, 255) for c in range(32))).label}\nWORLD_INITIAL_TAGS = {blob(bytes(scene.world_initial_chunks)).label}\nWORLD_SLOT_COUNT = {scene.world_slots}\n"
     )
-    if lz:
-        ceilings = bytes((REGIONS[i][1] >> 8) if i < len(REGIONS) else 0 for i in range(32))
-        host.blob_at(ceilings, "WORLD_REGION_CEILING")
-        with (out / "game_world.inc").open("a") as f:
-            f.write("WORLD_LZ = 1\n")
-    from arcade_flow import install as install_cabinet
-
-    cabinet_bytes = install_cabinet(out, host, scene)
-    return dict(
-        foreground_writer_banks=[],
-        foreground_card_bytes=32768 + 6144,
-        foreground_mask_bytes=8192,
-        foreground_tile_variants=scene.world_slots,
-        world_asset_bytes=sum(len(x) for x in shared) + (len(D) + len(SHORT)),
-        cabinet_bytes=cabinet_bytes,
-        world_regions=len(lists),
-        largest_world_transfer=largest,
-    )
+    ceilings = bytes((REGIONS[i][1] >> 8) if i < len(REGIONS) else 0 for i in range(32))
+    host.blob_at(ceilings, "WORLD_REGION_CEILING")
 
 

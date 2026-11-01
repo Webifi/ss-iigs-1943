@@ -1,28 +1,30 @@
-; Native persistent ground/large enemy spawns. Templates and arguments are
-; folded in the build. The extra seventeen slots preserve original $0715 order.
+; extended_spawn: a stage event (CONTROL_EXTENDED) starts ground objects,
+; boss cores, turrets or giants that stay for a while. The build folded each
+; arcade spawn routine into a plan of records (scripts/extended_spawns.py):
+; the pool kind (EX_*), flags (EXF_*) and a template. Small ones use the
+; seventeen extra slots first, in the arcade's $0715 order.
+; Returns carry 0: no plan for this event; carry 1: handled. JSL; A8, X16.
 .a8
 .i16
-EXTENDED_POOL = $5a00
-STAGE_GROUP_INDEX = $1b50
-STAGE_GROUP_REPLAY = $1b51
-EXTENDED_PLAN = $1dd0
-EXTENDED_DEST = $1dd2
-EXTENDED_FLAGS = $1dd4
-EXTENDED_LEFT = $1dd5
-EXTENDED_TEMPLATE = $1dd6
+; The plans and the templates are in one bank: extended_spawn_plans gives
+; offsets in it.
+EXTENDED_DATA_BANK = .bankbyte(extended_spawn_plans) << 16
+DIFFICULTY_CLEAR = 9         ; EXF_DIFFICULTY: from this DIP level, OBJ_FAMILY+2 is 0
+
 extended_spawn:
   lda STAGE_CONTROL_INDEX
-  cmp #254
+  cmp #CONTROL_EXTENDED
   beq :+
   clc
   rtl
 :
+  ; Find the plan of this event: its bank and its routine (STAGE_CALLBACK).
   ldx #0
 @find:
   lda f:extended_spawn_banks,x
   cmp STAGE_BANK
   bne @next_id
-  rep #$20
+  a16
   phx
   txa
   asl
@@ -31,7 +33,7 @@ extended_spawn:
   cmp STAGE_CALLBACK
   beq @found
   plx
-  sep #$20
+  a8
 @next_id:
   inx
   cpx #EXTENDED_SPAWN_COUNT
@@ -43,29 +45,29 @@ extended_spawn:
   sta EXTENDED_PLAN
   plx
   ldx EXTENDED_PLAN
-  sep #$20
-  lda f:$010000,x
-  sta EXTENDED_LEFT
-  rep #$20
+  a8
+  lda f:EXTENDED_DATA_BANK,x
+  sta EXTENDED_LEFT             ; the record count
+  a16
   inc EXTENDED_PLAN
-  sep #$20
+  a8
+  ; One record: take a record of its pool (EX_KIND); a full pool ends the plan.
 @record:
   ldx EXTENDED_PLAN
-  lda f:$010001,x
+  lda f:EXTENDED_DATA_BANK+EX_FLAGS,x
   sta EXTENDED_FLAGS
-  rep #$20
-  lda f:$010002,x
+  a16
+  lda f:EXTENDED_DATA_BANK+EX_TEMPLATE,x
   sta EXTENDED_TEMPLATE
-  sep #$20
-  lda f:$010000,x
-  beq @small
-.ifdef NATIVE_LARGE_OBJECTS
-  cmp #3
+  a8
+  lda f:EXTENDED_DATA_BANK+EX_KIND,x
+  beq @small                    ; EX_SMALL
+  cmp #EX_GIANT
   bne :+
   jsr .loword(giant_allocate)
   bra @large
 :
-  cmp #1
+  cmp #EX_CORE
   bne @turret
   jsr .loword(large_allocate_core)
   bra @large
@@ -75,131 +77,132 @@ extended_spawn:
   bcs :+
   jmp .loword(@done)
 :
-  rep #$20
+  a16
   txa
   clc
-  adc #LARGE_POOL
+  adc #LARGE_POOL               ; X is the offset in LARGE_POOL
   bra @destination
-.else
-  lda #$e8
-  sta f:$050301
-  bra @done
-.endif
+.a8
 @small:
   jsr .loword(extended_allocate)
   bcs :+
   jmp .loword(@done)
 :
-  rep #$20
+  a16
   txa
 @destination:
   sta EXTENDED_DEST
-  sep #$20
+  ; EXF_GROUP: a boss part with a damage ledger slot (STAGE_GROUP_INDEX). In
+  ; the boss replay a part whose ledger slot is empty (destroyed) stays away.
+  a8
   lda EXTENDED_FLAGS
-  and #2
+  and #EXF_GROUP
   beq @copy
   inc STAGE_GROUP_INDEX
   lda STAGE_GROUP_INDEX
-  rep #$20
+  a16
   and #255
   tay
-  sep #$20
-.ifdef CONTINUOUS_GAME
+  a8
   lda STAGE_BOSS_PHASE
-.else
-  lda STAGE_GROUP_REPLAY
-.endif
   beq @copy
   lda LARGE_GROUPS,y
   bne :+
   jmp .loword(@advance)
 :
 @copy:
-  rep #$20
+  a16
   ldx EXTENDED_TEMPLATE
   ldy EXTENDED_DEST
-  .repeat 16
-    lda f:$010000,x
-    sta a:0,y
+  .repeat OBJECT_SIZE/2
+    lda f:EXTENDED_DATA_BANK,x
+    sta a:0,y                   ; Y holds the record address
     inx
     inx
     iny
     iny
   .endrepeat
   ldx EXTENDED_DEST
-  sep #$20
+  a8
+  ; A boss part: its ledger slot keeps its HP; LARGE_THRESHOLD grows by it.
   lda EXTENDED_FLAGS
-  and #2
+  and #EXF_GROUP
   beq @position
-  rep #$20
+  a16
   lda STAGE_GROUP_INDEX
   and #255
   tay
-  sep #$20
-  sta a:$0f,x
-  lda a:$0b,x
+  a8
+  sta a:OBJ_LEDGER,x
+  lda a:OBJ_HP,x
   sta LARGE_GROUPS,y
   clc
   adc LARGE_THRESHOLD
   sta LARGE_THRESHOLD
 @position:
+  ; EXF_RELATIVE: the template cross is relative to the camera.
   lda EXTENDED_FLAGS
-  and #1
+  and #EXF_RELATIVE
   beq @quad
-  lda a:2,x
+  lda a:SPR_CROSS,x
   sec
-  sbc CAMERA+$0e
-  sta a:2,x
+  sbc CAMERA_CROSS
+  sta a:SPR_CROSS,x
 @quad:
+  ; EXF_QUAD: the upper piece (record 2) above the head; EXF_CLEAR: records
+  ; 1-3 take the head's colour and show nothing yet.
   lda EXTENDED_FLAGS
-  and #4
+  and #EXF_QUAD
   beq @difficulty
-  lda a:1,x
-  sta a:$41,x
-  lda a:3,x
+  lda a:SPR_ATTR,x
+  sta a:2*SPRITE_SIZE+SPR_ATTR,x
+  lda a:SPR_ALONG,x
   sec
-  sbc #16
-  sta a:$43,x
+  sbc #PIECE_RISE
+  sta a:2*SPRITE_SIZE+SPR_ALONG,x
   lda EXTENDED_FLAGS
-  and #8
+  and #EXF_CLEAR
   beq @difficulty
-  lda a:1,x
-  sta a:$21,x
-  sta a:$61,x
-  stz a:$20,x
-  stz a:$40,x
-  stz a:$60,x
+  lda a:SPR_ATTR,x
+  sta a:SPRITE_SIZE+SPR_ATTR,x
+  sta a:3*SPRITE_SIZE+SPR_ATTR,x
+  stz a:SPRITE_SIZE+SPR_CODE,x
+  stz a:2*SPRITE_SIZE+SPR_CODE,x
+  stz a:3*SPRITE_SIZE+SPR_CODE,x
 @difficulty:
-  lda a:8,x
-  cmp #$40
+  ; A giant: records 8 and 10 take the head's colour, each PIECE_RISE above
+  ; the last.
+  lda a:OBJ_TYPE,x
+  cmp #OT_GIANT
   bne :+
-  lda a:1,x
-  sta a:$101,x
-  sta a:$141,x
-  lda a:$43,x
+  lda a:SPR_ATTR,x
+  sta a:8*SPRITE_SIZE+SPR_ATTR,x
+  sta a:10*SPRITE_SIZE+SPR_ATTR,x
+  lda a:2*SPRITE_SIZE+SPR_ALONG,x
   sec
-  sbc #16
-  sta a:$103,x
+  sbc #PIECE_RISE
+  sta a:8*SPRITE_SIZE+SPR_ALONG,x
   sec
-  sbc #16
-  sta a:$143,x
+  sbc #PIECE_RISE
+  sta a:10*SPRITE_SIZE+SPR_ALONG,x
 :
+  ; EXF_DIFFICULTY: from DIP level DIFFICULTY_CLEAR on, family byte 2 is 0.
   lda EXTENDED_FLAGS
-  and #16
+  and #EXF_DIFFICULTY
   bne :+
   jmp .loword(@advance)
 :
-  lda STAGE_DIFFICULTY+7
-  cmp #9
+  lda STAGE_DIP_LEVEL
+  cmp #DIFFICULTY_CLEAR
   bcc @advance
-  stz a:$12,x
+  stz a:OBJ_FAMILY+2,x
 @advance:
-  rep #$20
+  a16
   lda EXTENDED_PLAN
   clc
-  adc #4
+  adc #EX_RECORD_SIZE
   sta EXTENDED_PLAN
-  sep #$20
+  a8
   dec EXTENDED_LEFT
   beq @done
   jmp .loword(@record)
@@ -207,29 +210,32 @@ extended_spawn:
   sec
   rtl
 
+; extended_allocate: a free small-object record: the first free one of
+; EXTENDED_POOL, else the last free one of ENEMY_POOL. Returns carry 1 and
+; X = its address, or carry 0 when both pools are full.
 extended_allocate:
   ldx #EXTENDED_POOL
 @forward:
-  lda a:8,x
+  lda a:OBJ_TYPE,x
   beq @found
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #OBJECT_SIZE
   tax
-  sep #$20
-  cpx #EXTENDED_POOL+17*32
+  a8
+  cpx #EXTENDED_POOL+EXTENDED_COUNT*OBJECT_SIZE
   bne @forward
-  ldx #ENEMY_POOL+15*32
+  ldx #ENEMY_POOL+(ENEMY_COUNT-1)*OBJECT_SIZE
 @reverse:
-  lda a:8,x
+  lda a:OBJ_TYPE,x
   beq @found
-  rep #$20
+  a16
   txa
   sec
-  sbc #32
+  sbc #OBJECT_SIZE
   tax
-  sep #$20
+  a8
   cpx #ENEMY_POOL
   bcs @reverse
   clc
@@ -237,3 +243,4 @@ extended_allocate:
 @found:
   sec
   rts
+.assert EX_SMALL = 0, error     ; @record tests it with BEQ

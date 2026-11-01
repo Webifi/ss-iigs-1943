@@ -11,7 +11,7 @@ def prepare(scene):
     from foreground_cache import ForegroundCache
     from game_water import stage
 
-    fg = ForegroundCache(scene.a, None, 0, allocate=False)
+    fg = ForegroundCache(scene.a)
     water, _ = stage(scene.a)
     pixels = bytearray(65536)
     art = bytearray()
@@ -41,7 +41,6 @@ def prepare(scene):
     pixels[: len(art)] = art
     pixels[32768 : 32768 + len(commands) * 4 : 4] = commands
     scene.cabinet_plane_directory = directory
-    scene.cabinet_plane_bytes = (len(art), len(commands))
     print(
         f"Cabinet P-38: {len(art)} pixel bytes + {len(commands)} command bytes in borrowed surface",
         flush=True,

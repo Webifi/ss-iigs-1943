@@ -1,22 +1,10 @@
-"""Circular foreground source cache, with all four horizontal alignments.
-
-The cache is source art, never the displayed page. It preserves independent
-foreground scrolling. New rows are prepared from ROM data during the build;
-the game uploads only rows exposed by the next camera step.
-"""
+"""Foreground rows from the ROM tile map, with all four horizontal alignments."""
 
 
 class ForegroundCache:
-    def __init__(self, a, pool, initial_scroll, phases=range(4), allocate=True):
+    def __init__(self, a):
         self.a = a
-        self.previous = initial_scroll
         self.rows = {}
-        self.base = [None] * 4
-        self.phases = tuple(sorted(set(phases)))
-        assert self.phases and all(0 <= p < 4 for p in self.phases)
-        if not allocate:
-            self.base = [0] * 4
-            return
 
     def row(self, world, phase):
         key = (world & 65535, phase)

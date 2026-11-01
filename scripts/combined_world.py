@@ -6,6 +6,8 @@ Two quiet-loaded sections share the existing strip residency schedule.
 
 import struct
 
+from asset_source import WINDOW_C000
+
 BLOCK = 16384
 
 
@@ -23,7 +25,6 @@ class Arena:
             return self.shared[data]
         if self.used % 4096 + len(data) > 4096:
             self.used = (self.used + 4095) & ~4095
-        last = (len(self.blocks) - 1) * BLOCK
         block, off = divmod(self.used, BLOCK)
         plane, pos = divmod(off, 4096)
         assert block < len(self.blocks), ("prepared section capacity", self.used, len(data))
@@ -109,7 +110,6 @@ def prepare(scene, pool, cols, prepared):
     from world_stream import INTRO, replace
 
     w = scene.game_world
-    scene.combined = True
     from ship_rows import prepare as prepare_ships
 
     prepare_ships(scene, pool, cols)
@@ -139,16 +139,16 @@ def prepare(scene, pool, cols, prepared):
     scene.combined_slots = [[pool.runtime(BLOCK, 4096) for _ in range(3)]]
     cabinet_base = scene.ship_geometry_surface
     scene.combined_slots.append([cabinet_base + i * 4096 for i in range(4)])
-    scene.game_coverage = pool.runtime(8192, 4096, name="game_coverage")
+    pool.runtime(8192, 4096, name="game_coverage")
     assert len(w.columns) <= 426, ("side 1 descriptor capacity", len(w.columns))
     scene.game_column_descriptors = [bytearray(2048), bytearray(len(w.columns) * 3)]
     scene.world_intro_tiles = prepared[INTRO][2]
-    scene.world_intro_columns = cols[INTRO]
     scene.world_initial_chunks = tuple(scene.world_routes[0][:2])
     scene.combined_arenas = {}
     scene.world_columns = {}
-    # Whole-game strip silhouettes share 490 ready row programs. Their
-    # 4 KB source lives in the old, unused world-command SRAM reservation.
+    # Whole-game strip silhouettes share 490 ready row programs (region
+    # .row_programs of secondsight.ld). The card reads them through
+    # the bank window at WINDOW_C000 with the BBR of the column families.
     # Shape families are immutable; a column names pixels and a family.
     from background_families import pack as pack_family
 
@@ -173,11 +173,10 @@ def prepare(scene, pool, cols, prepared):
                 g = end
             data = bytes([len(commands) // 3]) + commands
             if data not in row_programs:
-                row_programs[data] = 0xC000 + len(program)
+                row_programs[data] = WINDOW_C000 + len(program)
                 program.extend(data)
             pointers.extend(struct.pack("<H", row_programs[data]))
         family[tile] = shapes.put(pack_family(pointers))
-    assert len(program) <= 0x1100  # $19100-$1955F caches one column
     scene.combined_row_programs = bytes(program)
     for addr, data in zip(shapes.addresses, shapes.blocks):
         replace(pool, addr * 4, data)
@@ -333,12 +332,9 @@ def prepare(scene, pool, cols, prepared):
             scene.game_column_descriptors[side][col * stride : col * stride + stride] = data[
                 :stride
             ]
-    if scene.shared_world_rows:
-        from world_rows import initial as initialize_shared_rows
+    from world_rows import initial as initialize_shared_rows
 
-        initialize_shared_rows(scene, pool, scene.world_initial_chunks)
-    scene.foreground_tile_variants = scene.world_slots
-    scene.foreground_tile_map = bytes(1024)
+    initialize_shared_rows(scene, pool, scene.world_initial_chunks)
     scene.cabinet_surface = scene.combined_slots[1][0]
     assert scene.combined_slots[1][:4] == [scene.cabinet_surface + i * 4096 for i in range(4)]
     from game_sea import prepare as sea_features
@@ -351,19 +347,24 @@ def prepare(scene, pool, cols, prepared):
 
 
 def jobs(scene, region):
-    from world_stream import plane_jobs, sram_jobs
+    from asset_source import SRAM
+    from secondsight_link import fixed
+    from world_stream import SIDE1_LOW_BYTES, plane_jobs, sram_jobs
 
     arena, desc = scene.combined_arenas[region]
     for block, p, start, end in arena.ranges():
         raw = bytes(arena.blocks[block][p::4])
         yield from plane_jobs(arena.addresses[block], p * 4096 + start, raw[start:end], 4096)
+    # The descriptor tables (src/secondsight/fixed.ld), as physical SRAM.
+    side0, low, high = (fixed(f"{name}__load") - SRAM for name in ("world_side0", "world_side1_low", "world_side1_high"))
     for column, data in sorted(desc.items()):
         side = scene.world_region_side[region]
+        offset = column * 3
         address = (
-            0x14800 + column * 4
+            side0 + column * 4
             if side == 0
-            else 0x1B400 + column * 3
-            if column < 170
-            else 0x1BB00 + (column - 170) * 3
+            else low + offset
+            if offset < SIDE1_LOW_BYTES
+            else high + offset - SIDE1_LOW_BYTES
         )
         yield from sram_jobs(address, data if side == 0 else data[:3])

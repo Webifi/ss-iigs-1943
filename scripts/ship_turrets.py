@@ -3,7 +3,6 @@
 import struct
 from roms import load
 
-CALLBACKS = (0x804B, 0x81C7, 0x8343, 0x84B7)
 SPAWNS = {
     0x8000: (0, 0x2D),
     0x8177: (1, 0x30),

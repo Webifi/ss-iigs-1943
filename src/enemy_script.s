@@ -1,112 +1,116 @@
-; Native script-data decoder for original US $5567-$55AE and $59CB-$59D8.
-; The build copies reachable movement data, never executable Z80 code.
-; A callback is returned as an ID for a native handler, never executed as code.
+; The motion script of a small enemy or a bullet (US arcade $5567-$55AE and
+; $59CB-$59D8). The build copies the arcade motion data (enemy_script_pages);
+; a code tail comes back as its arcade address for a native decision.
 .a8
 .i16
-.ifndef ENEMY
-ENEMY = $1000
-.endif
-ENEMY_SCRIPT_KIND = ENEMY+32
-ENEMY_CALLBACK = ENEMY+34
+; ENEMY_SCRIPT_KIND values
+SCRIPT_MOVE = 0              ; a motion step is in the record
+SCRIPT_RETIRE = 1            ; the script ended; the object is retired
+SCRIPT_TAIL = 2              ; a code tail: ENEMY_CALLBACK
 
+; enemy_script: when the step time is over, read the next motion step of
+; the record D (STEP_* fields) from OBJ_MOTION+STEP_SIZE, as
+; large_object_script does. Returns ENEMY_SCRIPT_KIND (SCRIPT_TAIL with
+; ENEMY_CALLBACK). The step data is in ENEMY_SCRIPT_FAST_BANK. JSR.
 enemy_script:
   stz ENEMY_SCRIPT_KIND
-  stz ENEMY_CALLBACK
-  stz ENEMY_CALLBACK+1
-  lda ENEMY+4
+  lda z:OBJ_DURATION
   beq @advance
   rts
 @advance:
-  rep #$20
-  lda ENEMY+$0a
-  and #$70
+  a16
+  lda z:OBJ_VARIANT
+  and #OBJ_BANK_BITS
   asl
-  asl
-  sta $d4
-  lda ENEMY+$1e
+  asl                           ; bank*16*4 = bank*SCRIPT_BANK_ROWS
+  sta a:SCRIPT_BANK_ROW
+  lda z:OBJ_MOTION
   clc
-  adc #7
-  sta $d2
+  adc #STEP_SIZE
+  sta a:SCRIPT_STEP
 @record:
-  lda $d2
+  ; X = the host address of the step SCRIPT_STEP (see large_object_record).
+  lda a:SCRIPT_STEP
   xba
-  and #255
-  cmp #$80
+  and #255                      ; the arcade page of the step
+  cmp #>ARCADE_BANK_WINDOW
   bcs @banked
-  ora #512
+  ora #SCRIPT_FIXED_ROW
   bra @page
 @banked:
-  and #63
-  ora $d4
+  and #SCRIPT_BANK_ROWS-1
+  ora a:SCRIPT_BANK_ROW
 @page:
-  sta $dc
+  sta a:SCRIPT_ROW              ; the row; X = row * 3
   asl
   clc
-  adc $dc
+  adc a:SCRIPT_ROW
   tax
-  lda $d2
+  lda a:SCRIPT_STEP
   and #255
   clc
   adc f:enemy_script_pages,x
-  sta $d8
-  sep #$20
-  lda f:enemy_script_pages+2,x
-  adc #0
-  sta $da
-  lda [$d8]
-  beq @callback
-  cmp #$ff
+  sta a:SCRIPT_ADDRESS
+  a8
+  lda #ENEMY_SCRIPT_FAST_BANK
+  ldx a:SCRIPT_ADDRESS
+  phb
+  pha
+  plb
+  lda a:STEP_DURATION,x
+  beq @callback               ; STEP_TAIL
+  cmp #STEP_JUMP
   beq @jump
-  cmp #$fe
+  cmp #STEP_END
   beq @retire
-  sta ENEMY+4
-  rep #$20
-  lda $d2
-  sta ENEMY+$1e
-  lda ENEMY
-  and #$1000
-  sta $dc
-  ldy #1
-  lda [$d8],y
-  ora $dc
-  sta ENEMY
-  iny
-  iny
-  lda [$d8],y
+  ; A motion step: the time, the code and the attributes (SPR_ALONG_HIGH
+  ; stays), the two 8.8 moves.
+  sta z:OBJ_DURATION
+  a16
+  lda f:SCRIPT_STEP
+  sta z:OBJ_MOTION
+  lda z:SPR_CODE                ; and SPR_ATTR
+  and #SPR_ALONG_HIGH<<8
+  sta f:SCRIPT_ATTR
+  lda a:STEP_CODE,x             ; and STEP_ATTR
+  ora f:SCRIPT_ATTR
+  sta z:SPR_CODE
+  lda a:STEP_CROSS_DELTA,x
   xba
-  sta ENEMY+$18
-  iny
-  iny
-  lda [$d8],y
+  sta z:OBJ_CROSS_DELTA
+  lda a:STEP_ALONG_DELTA,x
   xba
-  sta ENEMY+$1a
-  sep #$20
+  sta z:OBJ_ALONG_DELTA
+  plb
+  a8
   rts
 @jump:
-  rep #$20
-  ldy #1
-  lda [$d8],y
-  sta ENEMY+$1e
-  sta $d2
+  a16
+  lda a:STEP_CODE,x            ; the jump target
+  plb
+  sta z:OBJ_MOTION
+  sta a:SCRIPT_STEP
   jmp @record
 @callback:
 .a8
-  lda #2
-  sta ENEMY_SCRIPT_KIND
-  rep #$20
-  ldy #1
-  lda [$d8],y
+  a16
+  lda a:STEP_CODE,x            ; the code tail
+  plb
   sta ENEMY_CALLBACK
-  sep #$20
+  a8
+  lda #SCRIPT_TAIL
+  sta ENEMY_SCRIPT_KIND
   rts
 @retire:
-.ifdef ENEMY_SPECIAL_CONTACT
-  lda ENEMY+2
+.a8
+  plb
+  lda z:SPR_CROSS
   sta ENEMY_RETIRE_X
-.endif
-  stz ENEMY
-  stz ENEMY+8
-  stz ENEMY+2
-  lda #1
+  stz z:SPR_CODE
+  stz z:OBJ_TYPE
+  stz z:SPR_CROSS
+  lda #SCRIPT_RETIRE
   sta ENEMY_SCRIPT_KIND
   rts
+.assert SPR_ATTR = SPR_CODE+1 .and STEP_ATTR = STEP_CODE+1, error
+.assert OBJ_BANK_BITS = $70 .and SCRIPT_BANK_ROWS = 64, error

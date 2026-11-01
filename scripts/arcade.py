@@ -6,13 +6,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Arcade:
-    def __init__(self, base_set="1943ua"):
-        if base_set == "1943ua":
-            from roms import load
+    def __init__(self):
+        from roms import load
 
-            regions, self.rom_receipt = load(base_set)
-            region = lambda name: regions[name]
-        self.base_set = base_set
+        regions, _ = load("1943ua")
+        region = lambda name: regions[name]
         self.prom = region("proms")
         self.maps = region("tilerom")
         self.palette = bytes(

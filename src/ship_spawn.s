@@ -1,20 +1,25 @@
-; Native carrier launches and the five possible destruction fragments.
-; Requests are consumed immediately so a later controller cannot overwrite one.
+; Objects that a ship starts: the planes that a carrier launches (SHIP_REQUEST
+; 1-4, from LARGE_AI_FIRE) and the fragments of a secondary explosion
+; (LA_EXPLOSION). Each request is used at once, so a later decision cannot
+; overwrite it. The templates are ship_launch_templates (OBJECT_SIZE each).
 .a8
 .i16
-SHIP_REQUEST = $1c54           ; kind 1..4, X, Y, random-already-advanced
-SHIP_DEST = $1c58
-SHIP_TEMPLATE = $1c5a
-SHIP_FRAGMENT = $1c5c
+SHIP_REQUEST_LARGE = 2       ; SHIP_REQUEST: a large plane (a core slot); else a fighter
+FRAGMENT_TEMPLATE = 4        ; ship_launch_templates entry of a fragment
+SURPRISE_TEMPLATE = 5        ; the entry of the extra object, 1 time in 16
+
+; ship_launch: launch the plane SHIP_REQUEST at SHIP_REQUEST_CROSS/ALONG.
+; A large plane starts half a sprite to the left and lower; its upper piece
+; above it. No free slot: no plane. JSL.
 ship_launch:
   lda SHIP_REQUEST
-  cmp #2
+  cmp #SHIP_REQUEST_LARGE
   beq @large
   jsr .loword(ship_allocate_fighter)
   bcs @small_found
   rtl
 @small_found:
-  rep #$20
+  a16
   txa
   clc
   adc #ENEMY_POOL
@@ -26,7 +31,7 @@ ship_launch:
   bcs :+
   rtl
 :
-  rep #$20
+  a16
   txa
   clc
   adc #LARGE_POOL
@@ -40,142 +45,150 @@ ship_launch:
   asl
   asl
   asl
-  asl
+  asl                           ; times OBJECT_SIZE
   sta SHIP_TEMPLATE
   jsr .loword(ship_copy_template)
 .a8
   lda SHIP_REQUEST
-  cmp #2
+  cmp #SHIP_REQUEST_LARGE
   beq @large_position
-  lda SHIP_REQUEST+1
-  sta a:2,x
-  lda SHIP_REQUEST+2
-  sta a:3,x
+  lda SHIP_REQUEST_CROSS
+  sta a:SPR_CROSS,x
+  lda SHIP_REQUEST_ALONG
+  sta a:SPR_ALONG,x
   rtl
 @large_position:
-  lda SHIP_REQUEST+1
+  lda SHIP_REQUEST_CROSS
   sec
-  sbc #8
-  sta a:2,x
-  lda SHIP_REQUEST+2
+  sbc #SPRITE_HALF
+  sta a:SPR_CROSS,x
+  lda SHIP_REQUEST_ALONG
   clc
-  adc #8
-  sta a:3,x
+  adc #SPRITE_HALF
+  sta a:SPR_ALONG,x
   sec
-  sbc #16
-  sta a:$43,x
-  lda a:1,x
-  sta a:$41,x
+  sbc #PIECE_RISE
+  sta a:2*SPRITE_SIZE+SPR_ALONG,x
+  lda a:SPR_ATTR,x
+  sta a:2*SPRITE_SIZE+SPR_ATTR,x
   rtl
-ship_secondary:
-  stz SHIP_REQUEST+3
-  bra ship_secondary_start
+
+; ship_secondary_ready: a secondary explosion at SHIP_REQUEST_CROSS/ALONG:
+; the four fragments, and 1 time in 16 (random stream 1) the extra object.
+; ship_core_explode stepped stream 1 already (arcade $832E). JSL.
 ship_secondary_ready:
-  lda #1
-  sta SHIP_REQUEST+3
-ship_secondary_start:
-  rep #$20
+  a16
   stz SHIP_FRAGMENT
 @fragment:
-  lda #4*32
+  lda #FRAGMENT_TEMPLATE*OBJECT_SIZE
   sta SHIP_TEMPLATE
-  sep #$20
+  a8
   jsr .loword(ship_fragment_spawn)
-  rep #$20
+  a16
   inc SHIP_FRAGMENT
   inc SHIP_FRAGMENT
   lda SHIP_FRAGMENT
-  cmp #8
+  cmp #4*2                      ; four word entries of ship_fragment_paths
   bne @fragment
-  sep #$20
-  lda SHIP_REQUEST+3
-  bne @advanced
-  lda RANDOM_STATE+1
-  clc
-  adc #$77
-  sta RANDOM_STATE+1
-@advanced:
+  a8
   lda RANDOM_STATE+1
   and #15
   bne @done
-  rep #$20
-  lda #5*32
+  a16
+  lda #SURPRISE_TEMPLATE*OBJECT_SIZE
   sta SHIP_TEMPLATE
-  sep #$20
+  a8
   jsr .loword(ship_fragment_spawn)
 @done:
   rtl
+
+; ship_fragment_spawn: one object from SHIP_TEMPLATE at the request place,
+; on the motion ship_fragment_paths[SHIP_FRAGMENT].
 ship_fragment_spawn:
 .a8
   jsr .loword(ship_allocate_fighter)
   bcc @done
-  rep #$20
+  a16
   txa
   clc
   adc #ENEMY_POOL
   sta SHIP_DEST
   jsr .loword(ship_copy_template)
 .a8
-  lda SHIP_REQUEST+1
-  sta a:2,x
-  lda SHIP_REQUEST+2
-  sta a:3,x
-  rep #$20
+  lda SHIP_REQUEST_CROSS
+  sta a:SPR_CROSS,x
+  lda SHIP_REQUEST_ALONG
+  sta a:SPR_ALONG,x
+  a16
   phx
   ldx SHIP_FRAGMENT
   lda f:ship_fragment_paths,x
   plx
-  sta a:$1e,x
-  sep #$20
+  sta a:OBJ_MOTION,x
+  a8
 @done:
   rts
+; The motion records of the five destruction fragments (bank 4).
+MOTION_SHIP_FRAGMENT1 = $83cb
+MOTION_SHIP_FRAGMENT2 = $8435
+MOTION_SHIP_FRAGMENT3 = $849f
+MOTION_SHIP_FRAGMENT4 = $8509
+MOTION_SHIP_FRAGMENT5 = $8573
 ship_fragment_paths:
-  .word $83cb,$8435,$849f,$8509,$8573
+  .word MOTION_SHIP_FRAGMENT1,MOTION_SHIP_FRAGMENT2,MOTION_SHIP_FRAGMENT3
+  .word MOTION_SHIP_FRAGMENT4,MOTION_SHIP_FRAGMENT5
+
+; ship_copy_template: copy the ship_launch_templates entry at SHIP_TEMPLATE
+; to the record at SHIP_DEST. Returns X = SHIP_DEST, A8. A16 on entry.
 ship_copy_template:
 .a16
   ldy SHIP_DEST
   ldx SHIP_TEMPLATE
-  .repeat 16
+  .repeat OBJECT_SIZE/2
     lda f:ship_launch_templates,x
-    sta a:0,y
+    sta a:0,y                   ; Y holds the record address
     inx
     inx
     iny
     iny
   .endrepeat
   ldx SHIP_DEST
-  sep #$20
+  a8
   rts
+
+; ship_allocate_fighter: a free record among the first STAGE_SPAWN_SLOTS of
+; ENEMY_POOL. Returns carry 1 and X = its offset, or carry 0.
 ship_allocate_fighter:
 .a8
-  lda STAGE_DIFFICULTY+6
+  lda STAGE_SPAWN_SLOTS
   bne :+
   clc
   rts
 :
-  rep #$20
+  a16
   and #255
   asl
   asl
   asl
   asl
-  asl
-  sta $d2
+  asl                           ; times OBJECT_SIZE
+  sta SHIP_SEARCH_END
   ldx #0
 @slot:
-  sep #$20
-  lda ENEMY_POOL+8,x
+  a8
+  lda ENEMY_POOL+OBJ_TYPE,x
   beq @found
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #OBJECT_SIZE
   tax
-  cpx $d2
+  cpx SHIP_SEARCH_END
   bne @slot
-  sep #$20
+  a8
   clc
   rts
 @found:
   sec
   rts
+.assert OBJECT_SIZE = 32, error

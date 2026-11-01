@@ -1,47 +1,20 @@
-; Connect the verified bullet contact/energy routines to the live component.
-; Player death-state progression and special-weapon interception remain ports.
+; contact_init: a new game (wave_combat_init): the energy gauges are blank,
+; the energy cap is ENERGY_START, and the gauge of player 1 is drawn. JSR.
 .a8
 .i16
-CONTACT_HITS = $11da
-CONTACT_LAST_SOUND = $11db
-CONTACT_DEATH_REQUESTS = $11dc
+ENERGY_START = 64            ; ENERGY_MAX at a game start
 
 contact_init:
-  rep #$20
-  ldx #54
+  a16
+  ldx #2*ENERGY_HUD_ROW-2
 @hud:
-  lda contact_initial_hud,x
-  sta ENERGY_HUD,x
+  stz ENERGY_HUD,x
   dex
   dex
   bpl @hud
-  stz CONTACT_HITS
-  stz CONTACT_DEATH_REQUESTS
-  sep #$20
-  lda #64
-  sta CONTACT_CONTEXT
+  a8
+  lda #ENERGY_START
+  sta ENERGY_MAX
   ldx #0
   jsr energy_hud_update
-  rts
-
-contact_hud:
-  rep #$20
-  ldx #0
-  ldy #0
-@tile:
-  lda ENERGY_HUD,x
-  and #255
-  sta $d0
-  phx
-  lda energy_character_offsets,y
-  tax
-  lda $d0
-  sta $1600,x
-  plx
-  iny
-  iny
-  inx
-  cpx #8
-  bne @tile
-  sep #$20
   rts

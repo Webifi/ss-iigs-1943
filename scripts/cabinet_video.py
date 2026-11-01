@@ -7,14 +7,10 @@ The live demo overlay also uses prepared code and pixels in VRAM.
 import struct
 from collections import OrderedDict
 
-from harness import HostData
+from iigs_payload import HostData
 
 # This scratch is unused by the row, sprite and HUD renderers. It is read only
 # while the final cabinet command runs, after their work is complete.
-CURSOR = 0x7B80
-DEST = 0x7B84
-ROW = 0x7B86
-COUNT = 0x7B8A
 
 
 def prepare(scene, pool, layouts):
@@ -128,7 +124,7 @@ def prepare_fast_demo(scene, pool):
     # One video RAM block inside one 8 KB window: the pixels of every program
     # in all four planes, then each program in its code plane.
     from asset_source import Plane, Source
-    from card_link import asset
+    from secondsight_link import asset
 
     sources = b"".join(p[2] for p in programs)
     source_groups = len(sources) // 4
@@ -140,16 +136,9 @@ def prepare_fast_demo(scene, pool):
         block.section(f".plane.cab_demo.{plane}.{n + 1}", "ax").label(f"cab_demo_program_{n}")
         block.code(lines)
     asset("cab_demo", block)
-    # The block size: the pixels and the largest code plane, measured from
-    # the assembled programs (sizes do not depend on addresses).
-    from card_link import section_sizes
-
-    sizes = section_sizes("gen/cab_demo")
-    program_groups = max(
-        sum(sizes[f".plane.cab_demo.{plane}.{n + 1}"] for n, p in enumerate(planes) if p == plane)
-        for plane in range(4)
-    )
-    demo = pool.vram.block(source_groups + program_groups, 8192, "cab_demo")
+    # The block holds the pixels; the fitter (scripts/secondsight_fit.py)
+    # makes it as large as its fullest plane, the pixels and the programs.
+    demo = pool.vram.block(source_groups, 8192, "cab_demo")
     records = []
     offset = 0
     for n, (plane, (name, band, source, _)) in enumerate(zip(planes, programs)):
@@ -157,7 +146,6 @@ def prepare_fast_demo(scene, pool):
         records.append((name, (demo("vbbr"), demo("vseg"), plane), ((demo + offset)("vptr"), program("pptr"), band * 64 * 56)))
         offset += len(source) // 4
         print("Fast demo band", name, band, len(source) // 4, flush=True)
-    print("Fast demo VRAM groups", source_groups + program_groups, flush=True)
     demo_tables_source(records)
 
 
@@ -166,11 +154,11 @@ DEMO_TABLES = {"logo": (41, (0, 0)), "prompt": (32, (0, 1))}
 
 
 def demo_tables_source(records):
-    """build/card/gen/cab_demo_tables.s: the program records (BBR, segment,
+    """build/secondsight/gen/cab_demo_tables.s: the program records (BBR, segment,
     plane, pixels, program, band offset) of the fast title demo, from
     prepare_fast_demo. Without records, the space for them."""
     from asset_source import Source
-    from card_link import generate
+    from secondsight_link import generate
 
     source = Source("the fast demo program records (scripts/cabinet_video.py)")
     source.section(".data.cab_demo_tables")
@@ -203,7 +191,7 @@ def group_source(colors):
 
 
 def install(scene, host):
-    from card_link import define
+    from secondsight_link import define
 
     info = scene.cabinet_video
     from hitch_water import install as install_hitch_water
@@ -211,7 +199,7 @@ def install(scene, host):
     install_hitch_water(scene, host)
 
     from asset_source import Source, derived
-    from card_link import alias, asset
+    from secondsight_link import alias, asset
 
     # Four-pixel group programs. card.ld puts each one into the first of the
     # cabinet code tail, the sprite cache tail and the pattern page with
@@ -370,7 +358,9 @@ def install(scene, host):
             info["demo_logo_count"] = sum(r in logo for r in records)
         layouts[kind] = b"".join(records) + b"\xff\xff\x00"
         counts[kind] = len(records)
-    from world_stream import card_job, sram_jobs
+    from asset_source import Source
+    from secondsight_link import asset
+    from world_stream import card_job
 
     directory = [(0, 0)] * 96
     stored = {}
@@ -387,8 +377,8 @@ def install(scene, host):
             if kind in (4, 86):
                 # Both pages cache mode 4. A prompt transition changes the
                 # layout without changing that mode or the credit value.
-                job += b"".join(sram_jobs(0x7B78, b"\xff\xff"))
-                job += b"".join(sram_jobs(0x7B8B, bytes((kind == 86,))))
+                job += card_job("cabinet_page_signature", b"\xff\xff")
+                job += card_job("cab_prompt_visible", bytes((kind == 86,)))
             if kind in (3, 16):
                 # A literal job lets the host fill the current 79 glyphs in
                 # the packet before the card uploads the prepared layout.
@@ -406,13 +396,7 @@ def install(scene, host):
             len(job),
         )
         if key not in stored:
-            if 74 <= kind <= 84:
-                try:
-                    stored[key] = host.blob_at_status_gap(job)
-                except ValueError:
-                    stored[key] = host.blob_at(job)
-            else:
-                stored[key] = host.blob_at(job)
+            stored[key] = host.blob_at(job)
         if 74 <= kind <= 84:
             info["post_jobs"][kind] = (len(job), stored[key])
             continue
@@ -421,16 +405,15 @@ def install(scene, host):
     for length, address in directory:
         layouts.word(length).dword(address)
     info["layout_directory"] = host.blob_at(layouts, "CABINET_LAYOUTS")
+    # The glyphs of the digits 0-9 and the space (src/secondsight/cabinet.s cab_digits).
     digits = bytes(info["glyphs"][n, 0] for n in (*range(10), 0x24))
-    host.upload(0x107B90, digits)
+    source = Source("cabinet digit glyphs (scripts/cabinet_video.py)").section(".data.cab_digits", "aw")
+    asset("cab_digits", source.label("cab_digits").data(digits))
     define("cab_demo_logo_glyphs", info["demo_logo_count"])
 
     from cabinet_live import install as install_live
 
     install_live(scene)
-    from input_menu import install as menu_install
-
-    menu_install(host.out, info)
     post_index = {code: i for i, code in enumerate(post_codes)}
     glyphs = [post_index.get(n, post_index[0x24]) for n in range(103)]
     from roms import load
@@ -454,8 +437,8 @@ def install(scene, host):
 
 
 def config_include(scene):
-    """build/card/gen/cabinet_config.inc: the cabinet values of this build."""
-    from card_link import generate_include
+    """build/secondsight/gen/cabinet_config.inc: the cabinet values of this build."""
+    from secondsight_link import generate_include
 
     surface = scene.cabinet_surface
     palette = bytes(sorted(set(scene.cabinet_pages[5]))).ljust(4, b"\0")
@@ -515,7 +498,7 @@ def mark_damage(scene):
             data += bytes((end - y, y, hi, lo))
             y = end
         tables[name] = data + b"\0"
-    from card_link import generate
+    from secondsight_link import generate
 
     lines = [
         "; Generated by scripts/cabinet_video.py: the text rows of each cabinet layout,",

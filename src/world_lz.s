@@ -1,76 +1,80 @@
-; Clear the decoder state from either world initialization or a cancelled load.
+; The world sections: the choice of the next region, and the inflate of the
+; LZ-packed world records into WORLD_LZ_OUTPUT (bank 1) in idle time. A token:
+; below LZ_SHORT a literal run of token + 1 bytes; below LZ_LONG a short
+; dictionary match (WORLD_LZ_SHORT); else a long match: from the dictionary,
+; or with LZ_BACK from the output already made.
+LZ_SHORT = $80
+LZ_LONG = $c0
+LZ_SHORT_LENGTH = $38        ; a short match: bits 3-5, + LZ_SHORT_MIN bytes
+LZ_SHORT_MIN = 4
+LZ_LONG_MIN = 3              ; a long match: bits 0-5, + LZ_LONG_MIN bytes
+LZ_BACK = $8000              ; a long match distance: back in the output
+FORCE_SHARE_MIN = 24         ; world_inflate_force: tokens always done
+LOGIC_TICKS = 6              ; more tokens only while this many ticks are left
+FORCE_NEAR = 16              ; rows before a region's ceiling: urgent
+DECK_JUMP_ROW = $d5          ; the deck row of the scripted jump
+
+; world_inflate_cancel: no inflate (game_world_init, a cancelled load). JSL.
 world_inflate_cancel:
 .a8
   lda #0
-  sta f:$018d10
+  sta f:WORLD_LZ_STATE
   rtl
 
-; Incremental expansion into startup scratch, after startup is finished.
-; Each encoded token expands at most 32 bytes. $018900-$018d1b is reserved
-; for this staging buffer and its state while the game is running.
-W_INPUT = $14bc
-W_SCRATCH = $14be
-W_LEN = $14f6
-W_DIST = $14f8
-W_END = $14fa
-WL_STATE = $018d10
-WL_SOURCE = $018d12
-WL_IN = $018d16
-WL_OUT = $018d18
-WL_FINAL = $018d1a
-
-; Select the first required region while the result text is visible. A retry
-; resumes at stage*2048; a successful stage starts from the next intro route.
-; During a retry, never replace the section currently drawn beneath the text.
+; world_choose_region: A = the next region to load, or WORLD_NONE. During the
+; result: a retry loads the region of the stage start (stage * 2048), the
+; next stage its intro route, never the section under the text. In play: the
+; route of the current region (two candidates), as cabinet_world_request
+; allows. JSL.
 world_choose_region:
 .a8
 .i16
   lda CAB_RESULT_ACTIVE
   bne @result
-  ; The result flag clears one update before the stage counter advances.
-  ; Keep the new region selected throughout that handoff.
+  ; The result ends one update before the stage counts up: the next region
+  ; stays chosen until then.
   lda GAME_STAGE_EXIT
-  cmp #2
+  cmp #EXIT_REFILL
   beq @next_stage
   bra @ordinary
 @result:
   lda GAME_STAGE_EXIT
-  cmp #2
+  cmp #EXIT_REFILL
   beq @next_stage
-  cmp #3
+  cmp #EXIT_RETRY
   beq :+
-  lda #255
+  lda #WORLD_NONE
   rtl
 :
-  rep #$20
+  a16
   lda CAMERA_STAGE
-  and #15
+  and #STAGES-1
   asl
   asl
-  asl
+  asl                           ; the map of the stage start: stage * 2048 / 256
   tax
-  sep #$20
+  a8
   lda f:WORLD_REGION_MAP,x
   bra @result_candidate
 @next_stage:
   lda CAMERA_STAGE
-  cmp #15
+  cmp #LAST_STAGE
   bcc :+
-  lda #255
+  lda #WORLD_NONE
   rtl
 :
   inc
-  rep #$20
-  and #15
+  a16
+  and #STAGES-1
   xba
   lsr
-  lsr
+  lsr                           ; the route row of the stage: 64 bytes
   ora #(WORLD_INTRO_ID*2)
   tax
-  sep #$20
+  a8
   lda f:WORLD_ROUTES,x
 @result_candidate:
-  cmp #255
+  cmp #WORLD_NONE
   beq @none
   cmp WORLD_TAGS
   beq @none
@@ -80,16 +84,16 @@ world_choose_region:
   lda WORLD_CURRENT
   cmp #WORLD_INTRO_ID
   beq @result_ready
-  rep #$20
+  a16
   lda W_SCRATCH
-  and #31
+  and #WORLD_REGIONS-1
   tax
-  sep #$20
+  a8
   lda f:WORLD_REGION_SIDE,x
-  rep #$20
+  a16
   and #1
   tax
-  sep #$20
+  a8
   lda WORLD_TAGS,x
   cmp WORLD_CURRENT
   beq @none
@@ -97,30 +101,26 @@ world_choose_region:
   lda W_SCRATCH
   rtl
 @ordinary:
-  rep #$20
+  a16
   lda CAMERA_STAGE
-  and #15
+  and #STAGES-1
   xba
   lsr
   lsr
-  sta $d0
+  sta ROUTE_ROW
   lda WORLD_CURRENT
-  and #31
-  asl
-  ora $d0
+  and #WORLD_REGIONS-1
+  asl                           ; two route candidates for each region
+  ora ROUTE_ROW
   tay
-  tax
-  sep #$20
-  lda f:WORLD_ROUTES,x
-  jsl cabinet_world_request
-  sta $d4
+  a8
   lda #2
   sta WORLD_SKIPS
 @candidate:
   tyx
   lda f:WORLD_ROUTES,x
   jsl cabinet_world_request
-  cmp #255
+  cmp #WORLD_NONE
   beq @none
   cmp WORLD_TAGS
   beq @next_candidate
@@ -131,120 +131,109 @@ world_choose_region:
   dec WORLD_SKIPS
   bne @candidate
 @none:
-  lda #255
+  lda #WORLD_NONE
 @return:
   rtl
 
+; world_inflate_begin: start the inflate of the record WORLD_SOURCE of
+; WORLD_LENGTH bytes. JSL; A16.
 world_inflate_begin:
 .a16
 .i16
-.ifdef WORLD_LZ_PROFILE
-  php
-  sep #$20
-  lda #1
-  sta f:$05050a
-  plp
-.a16
-.endif
-  lda $d4
+  lda WORLD_SOURCE
   sta f:WL_SOURCE
-  lda $d6
+  lda WORLD_SOURCE+2
   sta f:WL_SOURCE+2
   lda WORLD_LENGTH
   sta f:WL_FINAL
   lda #0
   sta f:WL_IN
   sta f:WL_OUT
-  sep #$20
-  lda #1
-  sta f:WL_STATE
-  rep #$20
+  a8
+  lda #WLS_INFLATE
+  sta f:WORLD_LZ_STATE
+  a16
   rtl
 
-; Called only while the logic clock has at least three ticks remaining.
-; Preserves the wait loop's registers and direct-page scratch pointers.
+; world_inflate_pump: inflate one token (the clock wait, with PUMP_TICKS to
+; spare, and world_inflate_force); at the end WLS_READY. JSL; A16;
+; registers and the direct page pointers kept.
 world_inflate_pump:
 .a16
 .i16
-  sep #$20
-  lda f:WL_STATE
-  cmp #1
-  rep #$20
+  a8
+  lda f:WORLD_LZ_STATE
+  cmp #WLS_INFLATE
+  a16
   beq :+
   rtl
 :
   pha
   phx
   phy
-.ifdef WORLD_LZ_PROFILE
-  sep #$20
-  lda #3
-  sta f:$05050a
-  rep #$20
-.endif
-  lda $d0
+  lda WORLD_POINTER
   pha
-  lda $d2
+  lda WORLD_POINTER+2
   pha
-  lda $d4
+  lda WORLD_SOURCE
   pha
-  lda $d6
+  lda WORLD_SOURCE+2
   pha
   lda f:WL_SOURCE
-  sta $d4
+  sta WORLD_SOURCE
   lda f:WL_SOURCE+2
-  sta $d6
+  sta WORLD_SOURCE+2
   lda #.loword(WORLD_LZ_DICT)
-  sta $d0
-  sep #$20
+  sta WORLD_POINTER
+  a8
   lda #^WORLD_LZ_DICT
-  sta $d2
-  rep #$20
+  sta WORLD_POINTER+2
+  a16
   lda f:WL_IN
   tay
   lda f:WL_OUT
   tax
-  sep #$20
-  lda [$d4],y
+  a8
+  lda [WORLD_SOURCE],y
   iny
-  cmp #$80
+  cmp #LZ_SHORT
   bcs @match
-  inc
+  inc                           ; a literal run
   sta W_LEN
   stz W_LEN+1
-  rep #$20
+  a16
   txa
   clc
   adc W_LEN
   sta W_END
-  sep #$20
+  a8
 @literal:
-  lda [$d4],y
+  lda [WORLD_SOURCE],y
   iny
-  sta f:$018900,x
+  sta f:WORLD_LZ_OUTPUT,x
   inx
   cpx W_END
   bcc @literal
   jmp @next
 @match:
-  cmp #$c0
+  cmp #LZ_LONG
   bcs @long
   sta W_SCRATCH+1
-  and #$38
+  and #LZ_SHORT_LENGTH
   lsr
   lsr
   lsr
   clc
-  adc #4
+  adc #LZ_SHORT_MIN
   sta W_LEN
   stz W_LEN+1
   lda W_SCRATCH+1
-  and #7
+  and #7                        ; the high bits of the WORLD_LZ_SHORT index
   sta W_SCRATCH+1
-  lda [$d4],y
+  lda [WORLD_SOURCE],y
   iny
   sta W_SCRATCH
-  rep #$20
+  a16
   lda W_SCRATCH
   asl
   phx
@@ -255,42 +244,42 @@ world_inflate_pump:
   bra @dictionary
 @long:
 .a8
-  and #$3f
+  and #<~LZ_LONG
   clc
-  adc #3
+  adc #LZ_LONG_MIN
   sta W_LEN
   stz W_LEN+1
-  rep #$20
-  lda [$d4],y
+  a16
+  lda [WORLD_SOURCE],y
   iny
   iny
   sta W_DIST
-  cmp #$8000
+  cmp #LZ_BACK
   bcc @dictionary
-  and #$7fff
+  and #LZ_BACK-1
   sta W_DIST
   sty W_INPUT
   txa
   clc
-  adc #$8900
+  adc #.loword(WORLD_LZ_OUTPUT)
   tay
   txa
   sec
   sbc W_DIST
   clc
-  adc #$8900
+  adc #.loword(WORLD_LZ_OUTPUT)
   tax
   lda W_LEN
   dec
   phb
-  mvn #$01,#$01
+  mvn #^WORLD_LZ_OUTPUT,#^WORLD_LZ_OUTPUT
   plb
   tya
   sec
-  sbc #$8900
+  sbc #.loword(WORLD_LZ_OUTPUT)
   tax
   ldy W_INPUT
-  sep #$20
+  a8
   bra @next
 @dictionary:
   sty W_INPUT
@@ -299,82 +288,76 @@ world_inflate_pump:
   adc W_LEN
   sta W_END
   ldy W_DIST
-  sep #$20
+  a8
 @dict_copy:
-  lda [$d0],y
-  sta f:$018900,x
+  lda [WORLD_POINTER],y
+  sta f:WORLD_LZ_OUTPUT,x
   iny
   inx
   cpx W_END
   bcc @dict_copy
   ldy W_INPUT
 @next:
-  rep #$20
+  a16
   tya
   sta f:WL_IN
   txa
   sta f:WL_OUT
   cmp f:WL_FINAL
   bcc :+
-  sep #$20
-  lda #2
-  sta f:WL_STATE
-  rep #$20
+  a8
+  lda #WLS_READY
+  sta f:WORLD_LZ_STATE
+  a16
 :
   pla
-  sta $d6
+  sta WORLD_SOURCE+2
   pla
-  sta $d4
+  sta WORLD_SOURCE
   pla
-  sta $d2
+  sta WORLD_POINTER+2
   pla
-  sta $d0
+  sta WORLD_POINTER
   ply
   plx
   pla
-.ifdef WORLD_LZ_PROFILE
-  php
-  sep #$20
-  lda #4
-  sta f:$05050a
-  plp
-.endif
   rtl
 
-; Begin the next compressed record while this picture's packet is sent.
-; Uncompressed and already-resident records stay on the ordinary path.
+; world_inflate_prefetch: when no inflate runs, start the next list entry
+; if it is packed and its slot does not hold its tile already, while this
+; packet goes out. JSL; A16.
 world_inflate_prefetch:
 .a16
 .i16
   phx
-  sep #$20
-  lda f:WL_STATE
+  a8
+  lda f:WORLD_LZ_STATE
   bne @done8
   lda WORLD_LOADING
-  cmp #255
+  cmp #WORLD_NONE
   beq @done8
-  rep #$20
+  a16
   lda WORLD_LIST
-  sta $d0
+  sta WORLD_POINTER
   lda WORLD_LIST+2
-  sta $d2
+  sta WORLD_POINTER+2
   ldy WORLD_OFFSET
-  lda [$d0],y
-  cmp #$fffe
+  lda [WORLD_POINTER],y
+  cmp #WORLD_LIST_END
   beq @done16
   sta W_SCRATCH
   iny
   iny
-  lda [$d0],y
+  lda [WORLD_POINTER],y
   sta W_DIST
   iny
   iny
-  lda [$d0],y
+  lda [WORLD_POINTER],y
   bpl @done16
   and #$7fff
   sta W_LEN
   lda W_SCRATCH
-  cmp #$ffff
+  cmp #WORLD_NO_SLOT
   beq @claim
   asl
   tax
@@ -390,12 +373,12 @@ world_inflate_prefetch:
   sta WORLD_LENGTH
   iny
   iny
-  lda [$d0],y
-  sta $d4
+  lda [WORLD_POINTER],y
+  sta WORLD_SOURCE
   iny
   iny
-  lda [$d0],y
-  sta $d6
+  lda [WORLD_POINTER],y
+  sta WORLD_SOURCE+2
   iny
   iny
   sty WORLD_OFFSET
@@ -404,93 +387,91 @@ world_inflate_prefetch:
   plx
   rtl
 @done8:
-  rep #$20
+  a16
   plx
   rtl
 
-; One minimum share per logic update, even when no idle time is available.
-; Intro camera scripts can jump directly to the selected stage's first area.
+; world_inflate_force: a share of tokens each update, also without idle
+; time: more when the region is needed soon; on the deck the intro script
+; can jump to the stage's first area (DECK_JUMP_ROW). After FORCE_SHARE_MIN
+; tokens it goes on only while LOGIC_TICKS ticks are left. JSL; A16.
 world_inflate_force:
 .a16
 .i16
   phx
   phy
-  sep #$20
-  lda f:WL_STATE
-  cmp #1
+  a8
+  lda f:WORLD_LZ_STATE
+  cmp #WLS_INFLATE
   beq :+
-  rep #$20
+  a16
   ply
   plx
   rtl
 :
 .a8
-.ifdef WORLD_LZ_PROFILE
-  lda #7
-  sta f:$05050a
-.endif
-  lda CAMERA+$10
-  cmp #$d0
+  lda CAMERA_BG1_SCROLL+1
+  cmp #DECK_ROWS_FIRST
   bcc @normal
-  cmp #$d8
+  cmp #DECK_ROWS_END
   bcs @normal
-  ; The second queued region may be needed much later than the jump.
-  ; Size the first region's share against the approaching scripted jump.
-  rep #$20
+  ; On the deck: the first region of the stage before the scripted jump
+  ; gets the larger share; another region a moderate one.
+  a16
   lda CAMERA_STAGE
-  and #15
+  and #STAGES-1
   xba
   lsr
   lsr
   ora #(WORLD_INTRO_ID*2)
   tax
-  sep #$20
+  a8
   lda f:WORLD_ROUTES,x
   jsl cabinet_world_request
   cmp WORLD_LOADING
   bne @moderate
-  lda CAMERA+$10
-  cmp #$d5
+  lda CAMERA_BG1_SCROLL+1
+  cmp #DECK_JUMP_ROW
   bcc @first
   bne @last_resort
-  lda CAMERA+$0f
-  cmp #$f0
+  lda CAMERA_BG1_SCROLL
+  cmp #$f0                      ; near the jump: all that it needs
   bcs @last_resort
   cmp #$c0
   bcs @urgent
 @first:
-  rep #$20
+  a16
   ldx #32
   bra @loop
 @moderate:
-  rep #$20
+  a16
   ldx #16
   bra @loop
 @normal:
-  rep #$20
+  a16
   lda WORLD_LOADING
-  and #31
+  and #WORLD_REGIONS-1
   tax
-  sep #$20
+  a8
   lda f:WORLD_REGION_CEILING,x
   sta W_SCRATCH
-  lda CAMERA+$10
+  lda CAMERA_BG1_SCROLL+1
   sec
   sbc W_SCRATCH
   bcc @urgent
-  cmp #16
+  cmp #FORCE_NEAR
   bcc @urgent
-  rep #$20
+  a16
   ldx #8
   bra @loop
 @urgent:
-  rep #$20
+  a16
   ldx #32
   bra @loop
 @last_resort:
-  rep #$20
+  a16
   ldx #64
-  ldy #$8000
+  ldy #$8000                    ; the jump comes: no time limit
   bra @token
 @loop:
   ldy #0
@@ -499,53 +480,36 @@ world_inflate_force:
   iny
   dex
   beq @none16
-  sep #$20
-  lda f:WL_STATE
-  cmp #1
-  rep #$20
+  a8
+  lda f:WORLD_LZ_STATE
+  cmp #WLS_INFLATE
+  a16
   bne @none16
   cpy #$8000
-  bcs @token                 ; imminent scripted jump: force the larger share
-  ; A small share always makes progress. Beyond that, use the beginning of
-  ; the update only while six clock ticks remain for game logic and sound.
-  cpy #24
+  bcs @token
+  cpy #FORCE_SHARE_MIN
   bcc @token
   lda GAME_DUE
   sec
   sbc GAME_CLOCK
   bmi @none16
-  cmp #6
+  cmp #LOGIC_TICKS
   bcs @token
 @none16:
-.ifdef WORLD_LZ_PROFILE
-  php
-  sep #$20
-  lda #8
-  sta f:$05050a
-  plp
-.a16
-.endif
   ply
   plx
   rtl
-; Write the original word-swapped packet into the live send buffer.
+; world_inflate_finish: the inflated record at X of the packet, words high
+; byte first; the inflate ends. JSL; A16; X = the packet end.
 world_inflate_finish:
 .a16
 .i16
-.ifdef WORLD_LZ_PROFILE
-  php
-  sep #$20
-  lda #5
-  sta f:$05050a
-  plp
-.a16
-.endif
   txy
   ldx #0
 @copy:
-  lda f:$018900,x
+  lda f:WORLD_LZ_OUTPUT,x
   xba
-  sta a:$0000,y
+  sta a:0,y
   inx
   inx
   iny
@@ -554,18 +518,8 @@ world_inflate_finish:
   cmp f:WL_FINAL
   bcc @copy
   tyx
-  sep #$20
+  a8
   lda #0
-  sta f:WL_STATE
-  rep #$20
-.ifdef WORLD_LZ_PROFILE
-  php
-  sep #$20
-  lda #6
-  sta f:$05050a
-  lda #2
-  sta f:$05050a
-  plp
-.a16
-.endif
+  sta f:WORLD_LZ_STATE
+  a16
   rtl

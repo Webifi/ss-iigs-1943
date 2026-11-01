@@ -1,83 +1,83 @@
-; Original US aimed bullet creation ($38B2-$38FF), followed by caller XY.
+; enemy_bullet_spawn: an aimed bullet from the object D (US arcade
+; $38B2-$38FF) in a free slot among the first BULLET_SLOTS, on the
+; bullet_pointers path of BULLET_SPEED and BULLET_ANGLE. Returns X = the
+; bullet record, or BULLET_SCRATCH when no bullet comes; the caller may
+; write its place to X either way. JSR.
 .a8
 .i16
-.ifndef ENEMY
-ENEMY = $1100
-.endif
-BULLETS = $5200
-BULLET_SCRATCH = $1d40
-BULLET_CONTEXT = $11c0
 
 enemy_bullet_spawn:
   ldx #BULLET_SCRATCH
-  lda ENEMY+1
-  and #16
+  lda z:SPR_ATTR
+  and #SPR_ALONG_HIGH
   bne @position
-  lda BULLET_CONTEXT+1
+  lda BULLET_SUPPRESS
   bne @position
-  rep #$20
-  lda BULLET_CONTEXT+2
+  a16
+  lda BULLET_SLOTS
   and #255
   beq @no_slots
   asl
   asl
   asl
   asl
-  asl
+  asl                           ; times OBJECT_SIZE
   clc
   adc #BULLETS
-  sta $d0
+  sta a:BULLET_SEARCH_END
   ldx #BULLETS
 @slot:
-  sep #$20
-  lda a:$0008,x
+  a8
+  lda a:OBJ_TYPE,x
   beq @found
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #OBJECT_SIZE
   tax
-  cpx $d0
+  cpx a:BULLET_SEARCH_END
   bne @slot
 @no_slots:
   ldx #BULLET_SCRATCH
-  sep #$20
+  a8
   bra @position
 @found:
 .a8
-  rep #$20
-  stx $d2
+  a16
+  stx a:BULLET_RECORD
   ldy #0
 @copy:
   lda bullet_template,y
-  sta a:$0000,x
+  sta a:0,x
   inx
   inx
   iny
   iny
-  cpy #32
+  cpy #OBJECT_SIZE
   bne @copy
-  lda BULLET_CONTEXT+3
+  ; Y = (BULLET_SPEED * DIRECTIONS + BULLET_ANGLE) * 2.
+  lda BULLET_SPEED
   and #255
   asl
   asl
   asl
   asl
-  asl
-  sta $d0
-  lda BULLET_CONTEXT
+  asl                           ; times DIRECTIONS
+  sta a:BULLET_SEARCH_END
+  lda BULLET_ANGLE
   and #255
   clc
-  adc $d0
+  adc a:BULLET_SEARCH_END
   asl
   tay
   lda bullet_pointers,y
-  ldx $d2
-  sta a:$001e,x
-  sep #$20
+  ldx a:BULLET_RECORD
+  sta a:OBJ_MOTION,x
+  a8
 @position:
-  lda ENEMY+2
-  sta a:$0002,x
-  lda ENEMY+3
-  sta a:$0003,x
+  lda z:SPR_CROSS
+  sta a:SPR_CROSS,x
+  lda z:SPR_ALONG
+  sta a:SPR_ALONG,x
   rts
+.assert OBJECT_SIZE = 32 .and DIRECTIONS = 32, error ; the ASLs above

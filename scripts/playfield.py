@@ -11,8 +11,7 @@ from modes import program
 WIDTH = 224
 GROUPS = WIDTH // 4
 RING_GROUPS = GROUPS * 256
-# Common-area-zero state (src/card/playfield.s .vars.playfield).
-WORLD = 0x3300
+# Common-area-zero state (src/secondsight/playfield.s .vars.playfield).
 
 
 def sea_pixel(a, world_x, world_y):
@@ -24,36 +23,6 @@ def sea_pixel(a, world_x, world_y):
     return a.colors[2][((attr >> 2) & 15) * 16 + a.gfx[2][code % len(a.gfx[2])][y * 32 + x]]
 
 
-def assets(a, world_start=None, world_rows=4096):
-    assert world_rows >= 256 and world_rows <= 65536 and world_rows & (world_rows - 1) == 0
-    columns = [((world_start // 32) + i) & 2047 for i in range(world_rows // 32)]
-    positions = [0x8000 + column * 16 + offset for column in columns for offset in range(0, 16, 2)]
-    keys = sorted(
-        {
-            (a.maps[i] % len(a.gfx[2]), (a.maps[i + 1] >> 2) & 15, a.maps[i + 1] >> 6)
-            for i in positions
-        }
-    )
-    ids = {key: i for i, key in enumerate(keys)}
-    atlas = bytearray()
-    for code, color, flip in keys:
-        tile = a.gfx[2][code]
-        for y in range(32):
-            for x in range(32):
-                ox, oy = 31 - y, x
-                atlas.append(a.colors[2][color * 16 + tile[oy * 32 + ox]])
-    assert len(atlas) <= 0x80000
-    # Each tile occupies 256 unchained addresses. Its low address is zero.
-    # The compact pair is DMA source high byte, then Oak read segment.
-    table = bytearray(len(columns) * 16)
-    for i in positions:
-        code, attr = a.maps[i : i + 2]
-        index = ids[(code % len(a.gfx[2]), (attr >> 2) & 15, attr >> 6)]
-        offset = (i - 0x8000) & (len(table) - 1)
-        table[offset : offset + 2] = bytes((index & 255, 2 + (index >> 8)))
-    return bytes(atlas), bytes(table), len(keys)
-
-
 PIXEL_CLOCKS = {0: 25175000, 1: 28322000, 5: 36000000, 6: 40000000, 12: 63000000, 14: 40000000}
 
 
@@ -62,30 +31,22 @@ def raster_ticks(mode, divider=1):
     return round(900000 * mode["total"] * mode["htotal"] * divider / PIXEL_CLOCKS[mode["clock"]])
 
 
-def config_include(scene, camera_start, updates):
-    """build/card/gen/playfield_config.inc: the values of this build."""
-    from card_link import generate_include
+def config_include(scene, camera_start):
+    """build/secondsight/gen/playfield_config.inc: the values of this build."""
     from modes import mode_data
+    from secondsight_link import generate_include
 
     window = scene.window
     source_base = 0x10000 - 2 * window
     assert window != 0x4000
-    sea_rows = scene.sea_window_rows
-    assert sea_rows < 65536 and sea_rows // 2 <= window
     vga = mode_data("vga-224x256-roomy", "unchained")
     rgb = mode_data("rgb-224x256-276", "unchained")
     ticks, rgb_ticks = raster_ticks(vga), raster_ticks(rgb, 2)
     values = {
-        "UPDATES": updates,
         "CAMERA_START": camera_start,
         "FOREGROUND_INITIAL": scene.foreground_initial,
         "INITIAL_DISPLAY_START": ((-camera_start) & 255) * GROUPS + 0x400,
         "PLAYFIELD_CBAR": ((0x10000 - window) >> 8) | (source_base >> 12),
-        "SEA_MAP_BBR": (0x10000 - source_base) >> 12,
-        "SEA_MAP_WINDOW": source_base,
-        "SEA_HIGH_MASK": (sea_rows // 2 - 1) >> 8,
-        "TIMES_BASE": scene.times_base,
-        "CADENCE_BASE": scene.times_base + scene.cadence_offset,
         "FIRST_RASTER_THRESHOLD": 65535 - ticks,
         "HALF_RASTER_THRESHOLD": 65535 - ticks // 2,
         "RGB_HALF_RASTER_THRESHOLD": 65535 - rgb_ticks // 2,
@@ -97,16 +58,15 @@ def config_include(scene, camera_start, updates):
     return ticks, rgb_ticks
 
 
-def build_kernel(out, mode_name, updates, camera_start, scene):
+def build_kernel(out, mode_name, camera_start, scene):
     """The generated sources of the playfield and the entry; returns the
     playfield mode."""
-    ticks, rgb_ticks = config_include(scene, camera_start, updates)
+    ticks, rgb_ticks = config_include(scene, camera_start)
     # Entry selects the monitor and installs this table before calling us.
     mode = program("vga-224x256-roomy", layout="unchained", name="playfield_mode")
     mode["raster_timer_ticks"] = ticks
     scene.planner()
     # The firmware owns the low vector/service area until RunCustomCode.
-    scene.firmware_backup_vram_bytes = 0
     entry_mode = program(mode_name, layout="unchained", auto_monitor=True, name="entry_mode")
     mode["monitor_selection"] = entry_mode["monitor_selection"]
     mode["rgb_mode"] = entry_mode["rgb_mode"]
@@ -115,47 +75,12 @@ def build_kernel(out, mode_name, updates, camera_start, scene):
 
 
 def finish_entry(out, host, scene):
-    """Stage startup-only reclaimed SRAM safely, after all tables are final.
-    The checks of src/card/memory.toml keep the runtime block clear of the
-    entry code that still runs."""
-    import card_layout
-    from card_link import Late, generate, region_late
+    """The entry staging (playfield.s entry_staging, secondsight.ld): the disk
+    step (scripts/disk.py) loads the bytes of each staged SRAM range and of
+    the runtime block into plane 0 of their staging groups entry_stage_N."""
+    from secondsight_link import define
 
-    blocks = getattr(host, "deferred_card_sram", {})
-    # The runtime block runs at its physical address in common area 0.
-    runtime_block = (card_layout.SRAM + card_layout.region("entry-runtime")["run"], region_late("entry-runtime"))
-    lines = [
-        "; Generated by scripts/playfield.py: startup copies of the reclaimed SRAM.",
-        '        .include "video.inc"',
-        '        .section .text.entry_staging,"ax",@progbits',
-        "        .global entry_staging",
-        "entry_staging:",
-        "        gc_set GC_READ_MAP, 0",
-    ]
-    # Group $0000-$03ff is available for live art after the boot handoff.
-    # Stage firmware-era SRAM inside page 0, which entry repaints completely.
-    staging = 0
-    staging_base = 0x400
-    for destination, data in list(blocks.items()) + ([runtime_block]):
-        # Only plane zero is read. Interleave at build time for the firmware's
-        # ordinary byte upload; there is no run-time format conversion.
-        def interleave(data=data):
-            packed = bytearray(len(data) * 4)
-            packed[::4] = bytes(data)
-            return packed
-
-        packed = Late(len(data) * 4, interleave)
-        # Entry consumes this before calling the renderer. Its initialization
-        # then writes every byte of display page zero from the clean ring
-        # (build_kernel's two initial DMA copies). This scratch has no live
-        # lifetime and must not consume permanent art VRAM.
-        assert staging + len(packed) <= RING_GROUPS * 2 * 4
-        address = staging_base + staging // 4
-        staging += len(packed)
-        host.upload(address * 4, packed)
-        lines.append(f"        oak_set OAK_READ_SEGMENT, 0x{address >> 16:X}")
-        source = 0xA0000 + (address & 65535)
-        lines.append(f"        dma_groups 0x{source:X}, 0x{destination - 0x100000:X}, {len(data)}, 0, 0")
-    generate("entry_staging", "\n".join(lines) + "\n")
-    scene.startup_display_scratch_bytes = staging
+    # The entry draws the ring rows twice over display page 0 (build_kernel's
+    # two initial DMA copies): the staging must stay inside them.
+    define("ring_groups", RING_GROUPS)
     scene.sprite_cache.boot_clear_source()

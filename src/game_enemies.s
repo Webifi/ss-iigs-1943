@@ -1,6 +1,42 @@
-; Original US whole-stage formations and large aircraft. Copies only at spawn.
+; The stage formations and the large aircraft (US arcade): the pair wave,
+; the giant, the four-piece quad plane and the bonus plane; the later
+; aircraft, turret, air boss and raid code is included here. The templates
+; are copied only at the spawn.
 .a8
 .i16
+PAIR_WAVE_GROUP = 12         ; WAVE_COUNTS of the pair wave (its OBJ_WAVE_COUNTER)
+PAIR_PLANES = 8
+PAIR_DELAY = 16              ; each pair plane starts this many updates later
+QUAD_HEADINGS = 16           ; QUAD_HEADING: 0 up to 15; 8 the other way
+QUAD_FAR = 180               ; game_quad_tick: farther across: QUAD_DELAY 3
+QUAD_NEAR = 60               ; game_quad_tick: farther across: QUAD_DELAY 2, else 0
+QUAD_TURN_WAIT = 13          ; QUAD_WAIT at heading 0 or 8
+QUAD_LEAVE_WAIT = 255        ; QUAD_WAIT after the second turn to heading 0
+GIANT_TURN_STEPS = 63        ; game_giant_turns entries
+GIANT_BONUS_LIFE = 2         ; GIANT_LIFE at which the score changes
+GIANT_HIT_HP = 8             ; OBJ_HP after a hit that the giant survives
+BONUS_CREDITS = 8            ; game_bonus_spawn: the bonus plane needs this many credits
+
+; The family bytes of the object record, by kind.
+QUAD_HEADING = $10           ; game_quad_tick: the heading, 0-15
+QUAD_DELAY = $11             ; game_quad_tick: QUAD_WAIT of a turn, from the distance
+QUAD_WAIT = $12              ; game_quad_tick: decisions left before the next turn
+QUAD_TURNED = $13            ; game_quad_tick: the first turn to heading 0 is done
+QUAD_DIRECTION = $14         ; game_quad_tick: 1 heading + 1, 0 heading - 1
+GIANT_TIMER = $11            ; game_giant_tick: counts 0-119; bursts start at 30, 70, 100, 120
+GIANT_TURN_STEP = $12        ; game_giant_select: the game_giant_turns entry, 0-62
+GIANT_BURST = $13            ; game_giant_tick: burst shots left
+GIANT_BURST_DIRECTION = $14  ; game_giant_tick: the direction of the next burst shot
+GIANT_LIFE = $15             ; game_giant_hit: hits left
+
+; Motion records (large_ai_selected).
+MOTION_QUAD = $ad8f
+MOTION_GIANT_APPROACH = $9c25    ; bank 0
+MOTION_GIANT_OPEN = $9c44        ; bank 0
+MOTION_GIANT_READY = $9c63       ; bank 0
+MOTION_GIANT_ATTACK = $9d8b      ; bank 0
+MOTION_GIANT_HIT = $9f52         ; bank 0
+MOTION_GIANT_EXPLOSION = $6623   ; fixed
 .segment "GAMEFLOW"
 .include "stage_aircraft.s"
 .include "later_aircraft.s"
@@ -10,29 +46,32 @@
 .include "air_boss_enemies.s"
 .include "stage_raid.s"
 .segment "GAMEPLAY"
+; game_pair_wave: the two-player formation (EVENT_PAIR_WAVE): PAIR_PLANES
+; planes (game_pair_template) PAIR_DELAY updates apart, with the drop of
+; WAVE_MODIFIER, counted in WAVE_COUNTS. JSL.
 game_pair_wave:
-  stz WAVE_COUNTS+12
-  rep #$20
-  lda #8
+  stz WAVE_COUNTS+PAIR_WAVE_GROUP
+  a16
+  lda #PAIR_PLANES
   sta SIMPLE_LEFT
   stz SIMPLE_SLOT
   ldx #0
 @find:
-  sep #$20
-  lda ENEMY_POOL+8,x
+  a8
+  lda ENEMY_POOL+OBJ_TYPE,x
   beq @found
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #OBJECT_SIZE
   tax
-  cpx #512
+  cpx #ENEMY_COUNT*OBJECT_SIZE
   bne @find
-  sep #$20
+  a8
   rtl
 @found:
   stx SIMPLE_LIMIT
-  rep #$20
+  a16
   ldy #0
 @copy:
   phx
@@ -44,28 +83,31 @@ game_pair_wave:
   inx
   iny
   iny
-  cpy #32
+  cpy #OBJECT_SIZE
   bne @copy
   ldx SIMPLE_LIMIT
-  sep #$20
+  a8
   lda WAVE_MODIFIER
-  sta ENEMY_POOL+$15,x
-  lda SIMPLE_SLOT
-  sta ENEMY_POOL+4,x
+  sta ENEMY_POOL+OBJ_DROP,x
+  lda SIMPLE_SLOT               ; here: the start delay
+  sta ENEMY_POOL+OBJ_DURATION,x
   clc
-  adc #16
+  adc #PAIR_DELAY
   sta SIMPLE_SLOT
-  inc WAVE_COUNTS+12
+  inc WAVE_COUNTS+PAIR_WAVE_GROUP
   dec SIMPLE_LEFT
   bne @find
   rtl
 
+; game_giant_spawn: the giant plane (EVENT_GIANT): the template in four
+; free large slots; the head column's rows 1-3 get its attributes and their
+; places PIECE_RISE apart. JSL.
 game_giant_spawn:
   jsr .loword(giant_allocate)
   bcs :+
   rtl
 :
-  rep #$20
+  a16
   stx LARGE_SPAWN_SLOT
   ldy #0
 @copy:
@@ -78,66 +120,71 @@ game_giant_spawn:
   inx
   iny
   iny
-  cpy #32
+  cpy #OBJECT_SIZE
   bne @copy
   ldx LARGE_SPAWN_SLOT
-  sep #$20
-  lda LARGE_POOL+1,x
-  sta LARGE_POOL+$41,x
-  sta LARGE_POOL+$101,x
-  sta LARGE_POOL+$141,x
-  lda LARGE_POOL+3,x
+  a8
+  lda LARGE_POOL+SPR_ATTR,x
+  sta LARGE_POOL+2*SPRITE_SIZE+SPR_ATTR,x
+  sta LARGE_POOL+8*SPRITE_SIZE+SPR_ATTR,x
+  sta LARGE_POOL+10*SPRITE_SIZE+SPR_ATTR,x
+  lda LARGE_POOL+SPR_ALONG,x
   sec
-  sbc #16
-  sta LARGE_POOL+$43,x
+  sbc #PIECE_RISE
+  sta LARGE_POOL+2*SPRITE_SIZE+SPR_ALONG,x
   sec
-  sbc #16
-  sta LARGE_POOL+$103,x
+  sbc #PIECE_RISE
+  sta LARGE_POOL+8*SPRITE_SIZE+SPR_ALONG,x
   sec
-  sbc #16
-  sta LARGE_POOL+$143,x
+  sbc #PIECE_RISE
+  sta LARGE_POOL+10*SPRITE_SIZE+SPR_ALONG,x
   rtl
 
-; D is the live four-piece record, selected by large_ai.
+; The quad plane (a large object; D = its record, large_ai). game_quad_enable:
+; contacts on, then the turns.
 game_quad_enable:
 .a16
-  sep #$20
-  lda #3
-  sta $09
-  rep #$20
-  lda #$ad8f
+  a8
+  lda #OF_CONTACT|OF_SHOT
+  sta OBJ_FLAGS
+  a16
+  lda #MOTION_QUAD
   jmp .loword(large_ai_selected)
+; game_quad_fire: fire 1 time in 8 (random stream 2, no step), then turn.
 game_quad_fire:
 .a16
-  sep #$20
+  a8
   lda RANDOM_STATE+2
   and #7
   bne game_quad_tick8
   jsr .loword(large_plane_shot)
 game_quad_tick8:
-  rep #$20
+  a16
+; game_quad_tick: at headings 0 and 8 the quad turns toward the player's
+; side; the wait of each turn grows with the distance across. After the
+; second turn to heading 0 it leaves.
 game_quad_tick:
 .a16
-  sep #$20
-  lda $12
+  a8
+  lda QUAD_WAIT
   beq @turn
-  dec $12
+  dec QUAD_WAIT
   jmp .loword(@select)
 @turn:
-  lda $10
+  lda QUAD_HEADING
   beq @target
-  cmp #8
+  cmp #QUAD_HEADINGS/2
   bne @step
 @target:
-  jsl LARGE_TARGET
-  lda $02
+  jsl ai_target_far
+  lda SPR_CROSS
   sec
-  sbc PLAYER+2,y
+  sbc PLAYER+SPR_CROSS,y
   bcs @right
-  eor #255
+  eor #$ff
   inc
   pha
-  lda $10
+  lda QUAD_HEADING
   beq :+
   lda #0
   bra @direction
@@ -146,33 +193,32 @@ game_quad_tick:
   bra @direction
 @right:
   pha
-  lda $10
+  lda QUAD_HEADING
   beq :+
   lda #1
   bra @direction
 :
   lda #0
 @direction:
-  sta $14
+  sta QUAD_DIRECTION
   pla
-  stz $11
-  cmp #180
+  cmp #QUAD_FAR
   bcc :+
   lda #3
   bra @delay
 :
-  cmp #60
+  cmp #QUAD_NEAR
   bcc :+
   lda #2
   bra @delay
 :
   lda #0
 @delay:
-  sta $11
+  sta QUAD_DELAY
 @step:
-  lda $10
+  lda QUAD_HEADING
   pha
-  lda $14
+  lda QUAD_DIRECTION
   beq @decrease
   pla
   inc
@@ -181,85 +227,91 @@ game_quad_tick:
   pla
   dec
 @heading:
-  and #15
-  sta $10
+  and #QUAD_HEADINGS-1
+  sta QUAD_HEADING
   beq @zero
-  cmp #8
+  cmp #QUAD_HEADINGS/2
   bne @ordinary
-  lda #13
+  lda #QUAD_TURN_WAIT
   bra @wait
 @zero:
-  lda $13
+  lda QUAD_TURNED
   bne @leave
-  inc $13
-  lda #13
+  inc QUAD_TURNED
+  lda #QUAD_TURN_WAIT
   bra @wait
 @leave:
-  lda #255
+  lda #QUAD_LEAVE_WAIT
   bra @wait
 @ordinary:
-  lda $11
+  lda QUAD_DELAY
 @wait:
-  sta $12
+  sta QUAD_WAIT
 @select:
-  rep #$20
-  lda $10
-  and #15
+  a16
+  lda QUAD_HEADING
+  and #QUAD_HEADINGS-1
   asl
   tax
   lda f:game_quad_turns,x
   jmp .loword(large_ai_selected)
 
-; Sixteen-piece aircraft phases, bank-zero $9BEE-$9F85.
+; The giant (US arcade bank 0 $9BEE-$9F85): it comes down to along $70,
+; opens to $7c, gets ready to $88 (then contacts on) and attacks.
 game_giant_approach:
 .a16
-  ldx #$9c25
-  sep #$20
-  lda $03
+  ldx #MOTION_GIANT_APPROACH
+  a8
+  lda SPR_ALONG
   cmp #$70
   bne :+
-  ldx #$9c44
+  ldx #MOTION_GIANT_OPEN
 :
-  rep #$20
+  a16
   txa
   jmp .loword(large_ai_selected)
 game_giant_open:
 .a16
-  ldx #$9c44
-  sep #$20
-  lda $03
+  ldx #MOTION_GIANT_OPEN
+  a8
+  lda SPR_ALONG
   cmp #$7c
   bne :+
-  ldx #$9c63
+  ldx #MOTION_GIANT_READY
 :
-  rep #$20
+  a16
   txa
   jmp .loword(large_ai_selected)
 game_giant_ready:
 .a16
-  ldx #$9c63
-  sep #$20
-  lda $03
+  ldx #MOTION_GIANT_READY
+  a8
+  lda SPR_ALONG
   cmp #$88
   bne :+
-  lda #3
-  sta $09
-  ldx #$9d8b
+  lda #OF_CONTACT|OF_SHOT
+  sta OBJ_FLAGS
+  ldx #MOTION_GIANT_ATTACK
 :
-  rep #$20
+  a16
   txa
   jmp .loword(large_ai_selected)
+; game_giant_reopen: contacts on again, then the turns.
 game_giant_reopen:
 .a16
-  sep #$20
-  lda #3
-  sta $09
+  a8
+  lda #OF_CONTACT|OF_SHOT
+  sta OBJ_FLAGS
   bra game_giant_select
+; game_giant_tick: at GIANT_TIMER 30, 70, 100 and 120 a burst of 5 spread
+; bullets starts at the player's angle (limited to 12..20) - 4, two angles
+; apart, each when the player is 32 or more away on both axes (LA_SPREAD
+; from 8 left of and 48 above the giant's cross and along).
 game_giant_tick:
 .a16
-  sep #$20
-  inc $11
-  lda $11
+  a8
+  inc GIANT_TIMER
+  lda GIANT_TIMER
   cmp #30
   beq @burst
   cmp #70
@@ -268,9 +320,9 @@ game_giant_tick:
   beq @burst
   cmp #120
   bne @fire
-  stz $11
+  stz GIANT_TIMER
 @burst:
-  jsl LARGE_TARGET
+  jsl ai_target_far
   cmp #13
   bcs :+
   lda #12
@@ -281,112 +333,117 @@ game_giant_tick:
 :
   sec
   sbc #4
-  sta $14
+  sta GIANT_BURST_DIRECTION
   lda #5
-  sta $13
+  sta GIANT_BURST
 @fire:
-  lda $13
+  lda GIANT_BURST
   beq game_giant_select
-  jsl LARGE_TARGET
-  lda $03
+  jsl ai_target_far
+  lda SPR_ALONG
   sec
   sbc #32
   sec
-  sbc PLAYER+3,y
+  sbc PLAYER+SPR_ALONG,y
   bcs :+
-  eor #255
+  eor #$ff
   inc
 :
   cmp #32
   bcc game_giant_select
-  lda PLAYER+2,y
+  lda PLAYER+SPR_CROSS,y
   clc
   adc #16
   sec
-  sbc $02
-  bcc :+                     ; arcade $9CCB keeps a negative difference
-  eor #255
+  sbc SPR_CROSS
+  bcc :+                        ; arcade $9CCB keeps a negative difference
+  eor #$ff
   inc
 :
   cmp #32
   bcc game_giant_select
-  dec $13
-  lda $14
+  dec GIANT_BURST
+  lda GIANT_BURST_DIRECTION
   sta MEDIUM_SHOT_ANGLE
-  inc $14
-  inc $14
-  lda #64
+  inc GIANT_BURST_DIRECTION
+  inc GIANT_BURST_DIRECTION
+  lda #LA_SPREAD
   sta LARGE_AI_ACTION
-  lda $02
+  lda SPR_CROSS
   sec
   sbc #8
   sta LARGE_AI_X
-  lda $03
+  lda SPR_ALONG
   sec
   sbc #48
   sta LARGE_AI_Y
+; game_giant_select: the next game_giant_turns path (in a loop).
 game_giant_select:
 .a8
-  inc $12
-  lda $12
-  cmp #63
+  inc GIANT_TURN_STEP
+  lda GIANT_TURN_STEP
+  cmp #GIANT_TURN_STEPS
   bne :+
-  stz $12
+  stz GIANT_TURN_STEP
 :
-  rep #$20
-  lda $12
+  a16
+  lda GIANT_TURN_STEP
   and #255
   asl
   tax
   lda f:game_giant_turns,x
   jmp .loword(large_ai_selected)
+; game_giant_hit: a hit takes one GIANT_LIFE; at the last but one the score
+; changes; at 0 the giant explodes (SND_BOSS_PART), else it gets
+; GIANT_HIT_HP again.
 game_giant_hit:
 .a16
-  sep #$20
-  lda $15
-  cmp #2
+  a8
+  lda GIANT_LIFE
+  cmp #GIANT_BONUS_LIFE
   bne :+
-  lda #$5f
-  sta $17
+  lda #$5f                      ; the score code
+  sta OBJ_SCORE
 :
-  dec $15
+  dec GIANT_LIFE
   bne @survived
-  lda #$1a
+  lda #SND_BOSS_PART
   sta LARGE_AI_SOUND
-  rep #$20
-  lda #$6623
+  a16
+  lda #MOTION_GIANT_EXPLOSION
   jmp .loword(large_ai_selected)
 @survived:
 .a8
-  lda #8
-  sta $0b
-  rep #$20
-  lda #$9f52
+  lda #GIANT_HIT_HP
+  sta OBJ_HP
+  a16
+  lda #MOTION_GIANT_HIT
   jmp .loword(large_ai_selected)
 
-; Original $76F7: the bonus plane is available with eight cabinet credits.
+; game_bonus_spawn: the bonus plane (US arcade $76F7), with BONUS_CREDITS
+; credits or more, in the first free ENEMY_POOL slot. JSL.
 game_bonus_spawn:
 .a8
   lda GAME_CREDITS
-  cmp #8
+  cmp #BONUS_CREDITS
   bcs :+
   rtl
 :
   ldx #0
 @find:
-  lda ENEMY_POOL+8,x
+  lda ENEMY_POOL+OBJ_TYPE,x
   beq @copy
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #OBJECT_SIZE
   tax
-  sep #$20
-  cpx #512
+  a8
+  cpx #ENEMY_COUNT*OBJECT_SIZE
   bne @find
   rtl
 @copy:
-  rep #$20
+  a16
   ldy #0
 @word:
   phx
@@ -398,7 +455,7 @@ game_bonus_spawn:
   inx
   iny
   iny
-  cpy #32
+  cpy #OBJECT_SIZE
   bne @word
-  sep #$20
+  a8
   rtl

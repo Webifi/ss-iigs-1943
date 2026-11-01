@@ -26,6 +26,21 @@ PR_BUF  = $44
 PR_BLK  = $46
 PR_SRC  = PR_ZP
 PR_DST  = PR_ZP + 2
+PR_SLOT_ROM = $C0               ; + the slot: the page of the slot ROM
+PR_DRIVER_OFFSET = $FF          ; $CnFF: the offset of the block driver
+PR_READ_BLOCK = 1               ; the block driver command
+PR_BLOCK_SIZE = 512
+PR_DIR_BLOCK = 2                ; the volume directory starts at this block
+PR_DIR_NEXT = 2                 ; a directory block: the next block (2 bytes),
+PR_DIR_ENTRY = 4                ;   the first entry,
+PR_DIR_ENTRIES = 13             ;   the entries,
+PR_ENTRY_SIZE = 39              ;   of this size
+PR_NAME_BITS = $0F              ; an entry: byte 0: the storage type and the name length
+PR_SEEDLING = 1                 ; the storage types (byte 0, high nibble; pr_storage)
+PR_SAPLING = 2
+PR_TREE = 3
+PR_KEY_POINTER = 17             ; an entry: the key block (2 bytes)
+PR_EOF = 21                     ; an entry: the file size (3 bytes)
 
 pr_init:
         sta     pr_unit
@@ -33,11 +48,11 @@ pr_init:
         lsr     a
         lsr     a
         lsr     a
-        and     #7
-        ora     #$C0
+        and     #7              ; the slot
+        ora     #PR_SLOT_ROM
         sta     pr_driver+1
         sta     PR_SRC+1
-        lda     #$FF
+        lda     #PR_DRIVER_OFFSET
         sta     PR_SRC
         ldy     #0
         lda     (PR_SRC),y
@@ -54,7 +69,7 @@ pr_open:
         sta     pr_mark
         sta     pr_mark+1
         sta     pr_mark+2
-        lda     #2              ; the volume directory starts at block 2
+        lda     #PR_DIR_BLOCK
         ldx     #0
 @block: ldy     #<PR_DBUF
         sty     PR_BUF
@@ -66,14 +81,14 @@ pr_open:
         sta     PR_SRC
         lda     pr_name+1
         sta     PR_SRC+1
-        lda     #<(PR_DBUF + 4)
+        lda     #<(PR_DBUF + PR_DIR_ENTRY)
         sta     PR_DST
-        lda     #>(PR_DBUF + 4)
+        lda     #>(PR_DBUF + PR_DIR_ENTRY)
         sta     PR_DST+1
-        ldx     #13             ; entries in a block
+        ldx     #PR_DIR_ENTRIES
 @entry: ldy     #0
         lda     (PR_DST),y
-        and     #$0F
+        and     #PR_NAME_BITS
         cmp     (PR_SRC),y
         bne     @skip
         tay
@@ -83,20 +98,20 @@ pr_open:
         dey
         bne     @same
         lda     (PR_DST),y
-        cmp     #$40
+        cmp     #(PR_TREE+1)<<4
         bcs     @skip
-        cmp     #$10
-        bcs     @found          ; a seedling, sapling or tree ($1n-$3n)
+        cmp     #PR_SEEDLING<<4
+        bcs     @found          ; a seedling, sapling or tree
 @skip:  lda     PR_DST
         clc
-        adc     #39
+        adc     #PR_ENTRY_SIZE
         sta     PR_DST
         bcc     :+
         inc     PR_DST+1
 :       dex
         bne     @entry
-        lda     PR_DBUF+2       ; the next directory block
-        ldx     PR_DBUF+3
+        lda     PR_DBUF+PR_DIR_NEXT  ; the next directory block
+        ldx     PR_DBUF+PR_DIR_NEXT+1
         bne     @block
         tay
         bne     @block
@@ -107,13 +122,13 @@ pr_open:
         lsr     a
         lsr     a
         sta     pr_storage
-        ldy     #17
+        ldy     #PR_KEY_POINTER
         lda     (PR_DST),y
         sta     pr_key
         iny
         lda     (PR_DST),y
         sta     pr_key+1
-        ldy     #21
+        ldy     #PR_EOF
         lda     (PR_DST),y
         sta     pr_eof
         iny
@@ -164,11 +179,11 @@ pr_read:
         ror     a
         sta     pr_n
         lda     pr_mark+1
-        and     #1
+        and     #>(PR_BLOCK_SIZE-1)
         ora     pr_mark
         bne     @part
         lda     pr_left+1
-        cmp     #2
+        cmp     #>PR_BLOCK_SIZE
         bcc     @part
         jsr     pr_block        ; a whole block: read it to the address
         bcc     :+
@@ -182,9 +197,9 @@ pr_read:
         bcc     :+
         rts
 :
-        lda     #0
+        lda     #<PR_BLOCK_SIZE
         sta     pr_k
-        lda     #2
+        lda     #>PR_BLOCK_SIZE
         sta     pr_k+1
         jmp     @moved
 @part:  lda     pr_n
@@ -210,13 +225,13 @@ pr_read:
         lda     pr_n+1
         sta     pr_held+1
 @have:  lda     pr_mark+1       ; the offset in the block
-        and     #1
+        and     #>(PR_BLOCK_SIZE-1)
         tax
         sec                     ; k = the rest of the block, at most the count
-        lda     #0
+        lda     #<PR_BLOCK_SIZE
         sbc     pr_mark
         sta     pr_k
-        lda     #2
+        lda     #>PR_BLOCK_SIZE
         stx     pr_k+1
         sbc     pr_k+1
         sta     pr_k+1
@@ -289,7 +304,7 @@ pr_read:
 ; error while an index block loads.
 pr_block:
         lda     pr_storage
-        cmp     #2
+        cmp     #PR_SAPLING
         bcs     @index
         lda     pr_key          ; a seedling: block 0 only
         ldx     pr_key+1
@@ -303,7 +318,7 @@ pr_block:
         jsr     pr_index
         bcs     @ret
         lda     pr_storage
-        cmp     #3
+        cmp     #PR_TREE
         bne     @held
         ldy     pr_n+1          ; a tree: the key block is the master index
         lda     PR_IBUF,y
@@ -329,25 +344,25 @@ pr_index:
 pr_disk:
         sta     PR_BLK
         stx     PR_BLK+1
-        lda     #1
+        lda     #PR_READ_BLOCK
         sta     PR_CMD
         lda     pr_unit
         sta     PR_UNIT
 pr_call:
         jmp     (pr_driver)
 
-pr_driver:  .word 0
-pr_unit:    .byte 0
-pr_storage: .byte 0
-pr_key:     .word 0
-pr_eof:     .res 3
-pr_mark:    .res 3
-pr_dest:    .word 0
-pr_count:   .word 0
-pr_name:    .word 0
-pr_held:    .word 0
-pr_ihold:   .byte 0
-pr_left:    .word 0
-pr_n:       .word 0
-pr_k:       .word 0
+pr_driver:  .word 0             ; the block driver of the boot slot
+pr_unit:    .byte 0             ; the boot unit
+pr_storage: .byte 0             ; the open file: PR_SEEDLING, PR_SAPLING or PR_TREE
+pr_key:     .word 0             ; its key block
+pr_eof:     .res 3              ; its size
+pr_mark:    .res 3              ; the next byte to read
+pr_dest:    .word 0             ; pr_read: the address
+pr_count:   .word 0             ; pr_read: the bytes
+pr_name:    .word 0             ; pr_open: the name
+pr_held:    .word 0             ; the file block in PR_DBUF; $FFxx none
+pr_ihold:   .byte 0             ; the index block in PR_IBUF; $FF none
+pr_left:    .word 0             ; pr_read: the bytes still to read
+pr_n:       .word 0             ; the file block of the mark
+pr_k:       .word 0             ; pr_read: the bytes of this step
         .assert <pr_driver <> $FF, lderror, "6502 JMP (abs) cannot read a vector at $xxFF"

@@ -66,13 +66,12 @@ def damage_spans(scene, pool, chars, energy):
             spans[-1][1] += 1
         else:
             spans.append([y, 1, left, right])
-    scene.hud_damage_groups = sum(n * (r - l) for _, n, l, r in spans)
     return spans
 
 
 def bounds_source(scene):
-    """build/card/gen/hud_bounds.s: the row spans of the HUD."""
-    from card_link import generate
+    """build/secondsight/gen/hud_bounds.s: the row spans of the HUD."""
+    from secondsight_link import generate
 
     lines = [
         '        .section .rodata.hud_bounds,"a"',

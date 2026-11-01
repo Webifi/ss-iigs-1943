@@ -1,142 +1,154 @@
-; Final compact-score player. All arcade decoding, pitch conversion, sample
-; selection and repeat discovery happen in scripts/music_score.py.
-; Called with D=$1E00, DBR=0, A8/X16. No source ROM, disk, or pitch arithmetic.
+; The music player: one tick of the native score (MUSIC_SCORE) for each
+; sound interrupt. scripts/music_score.py and fm_native.py make the score:
+; the arcade decoding, the pitches, the captures and the repeats are done in
+; the build. A song plays in the MUSIC_STATES slot of its priority; the
+; highest slot with a song plays, the lower slots wait. Each slot has six
+; parts. The FM voices (fm_voice.s) sound the notes. Called with
+; D = MUSIC_PAGE, DBR = 0, A8, X16.
 .a8
 .i16
-.macro fm_mark value
-.ifdef FM_DEBUG
-  pha
-  lda #value
-  sta f:$050509
-  pla
-.endif
-.endmacro
-MUSIC_STATES = $018000
-MUSIC_SELECTED = $1e80
-MUSIC_TICK = $1e82
-MUSIC_SLOT = $1e8a
-MUSIC_PENDING = $1e8c
-MUSIC_PART = $1e8e
-MUSIC_TEMP = $1e84
-MUSIC_NEXT = $1e86             ; ticks to the earliest event of the selected slot; 0 = rescan
-MUSIC_FAST = $1e88             ; ticks the selected slot ran since its part delays were updated
-MUSIC_POOL_PTR = $e8
-; Per part (32 bytes): base, PC, wait, repeat-PC, repeat-count, active,
-; opcode, sample, DOC frequency, volume, sounding; remaining bytes for envelopes.
+; The music part record (MUSIC_STATES, src/game_ram.s)
+MS_BASE = 0                  ; 2 bytes: the part start in MUSIC_SCORE; loop jumps add to it
+MS_PC = 2                    ; 2 bytes: the next event in MUSIC_SCORE
+MS_WAIT = 4                  ; 2 bytes: ticks to the next event
+MS_REPEAT = 6                ; 2 bytes: the event after the running repeat; MUSIC_NONE none
+MS_REPEAT_LEFT = 8           ; repetitions left
+MS_ACTIVE = 9                ; nonzero while the part plays; in the first part, the slot
+MS_EVENT = 10                ; the token of the next event (SCORE_*)
+MS_CAPTURE = 11              ; the capture of the note
+MS_FREQUENCY = 12            ; 2 bytes: the DOC frequency word
+MS_NEXT_CAPTURE = 14         ; the next different capture of this part
+MS_SOUNDING = 15             ; nonzero while the note sounds
+MS_TIE = 19                  ; SCORE_TIE: the note keeps the envelope of the note before
+MS_SONG = 22                 ; 2 bytes, first part of a slot: the song/phase entry (FM_SONG)
+MS_RESUME = 24               ; first part of a slot: FM_CACHE_RESUME of the slot
+MS_PREFETCH = 25             ; the next capture of the last untied note; $ff none
+; A score token: SCORE_* in bits 5-7, the delay in bits 0-4 (SCORE_DELAY_LONG:
+; the delay is in the next word). A note body (fm_native.py):
+NOTE_CAPTURE = 0             ; the capture, SCORE_TIE in bit 7
+NOTE_FREQUENCY = 1           ; 2 bytes: the DOC frequency word
+NOTE_NEXT = 3                ; the next different capture of the part
+NOTE_SIZE = 4                ; also a music_note_dictionary entry
+SCORE_KIND = $e0
+SCORE_TIE = $80
+PREFETCH_NONE = $ff
 
+; music_player_init: no song: all slots and the music state are cleared.
+; JSL.
 music_player_init:
-  rep #$20
+  a16
   stz MUSIC_TICK
-  lda #$ffff
+  lda #MUSIC_NONE
   sta MUSIC_SELECTED
   lda #0
-  ldx #766
+  ldx #MUSIC_SLOTS*MUSIC_SLOT_SIZE-2
 @clear:
   sta f:MUSIC_STATES,x
   dex
   dex
   bpl @clear
-  lda #$ffff
+  lda #MUSIC_NONE
   sta MUSIC_NEXT
   stz MUSIC_FAST
   lda #.loword(MUSIC_SCORE)
   sta MUSIC_POOL_PTR
-  sep #$20
+  a8
   lda #^MUSIC_SCORE
   sta MUSIC_POOL_PTR+2
   stz MUSIC_PENDING
   rtl
 
+; music_player_tick: one music tick (the sound interrupt). It starts the
+; MUSIC_PENDING command, moves the FM tick, and plays the due events of the
+; selected slot. While no event is due (MUSIC_NEXT of 2 or more) it only
+; counts: MUSIC_FAST holds the ticks that the part waits did not get yet.
+; JSL.
 music_player_tick:
-  rep #$20
+  a16
   inc MUSIC_TICK
-  sep #$20
-.ifdef CONTINUOUS_GAME
+  a8
   lda f:START_MUSIC_FLAGS
-  and #$20
+  and #SMF_PRELOAD
   beq :+
   jsl music_title_preload
 :
-.endif
   lda MUSIC_PENDING
   beq @select
   stz MUSIC_PENDING
-  cmp #$ff
+  cmp #MUSIC_STOP
   bne :+
   jsl music_all_off
   jsl music_player_init
   rtl
 :
+  ; The start music after SND_SMOOTH_STOP: the old notes stop only now.
   pha
-.ifdef CONTINUOUS_GAME
-  cmp #$20
+  cmp #SND_START_MUSIC
   bne @start_ordinary
   lda f:START_MUSIC_FLAGS
-  and #$40
+  and #SMF_SMOOTH
   beq @start_ordinary
   lda f:START_MUSIC_FLAGS
-  and #$bf
+  and #<~SMF_SMOOTH
   sta f:START_MUSIC_FLAGS
   jsl music_all_off
   jsl music_player_init
 @start_ordinary:
-.endif
   jsr .loword(music_catch_up)   ; music_start may replace the running slot
   pla
   jsr .loword(music_start)
-  rep #$20
-  stz MUSIC_NEXT
-  sep #$20
+  a16
+  stz MUSIC_NEXT                ; find the slot again
+  a8
 @select:
-.ifdef AUDIO_FM
-  ; Most ticks have no table wait. Advance the same banked counter without
-  ; switching DBR and making a far call; the slow path handles song starts.
-  lda f:FM_WAIT|$010000
+  ; The FM tick. Most ticks have no song wait: move FM_TICK here, without
+  ; the far call to fm_song_wait, which does the same and the song starts.
+  lda f:FM_WAIT
   bne @song_wait
-  lda f:FM_PHASE_WAIT|$010000
-  cmp #1
+  lda f:FM_PHASE_WAIT
+  cmp #PHASE_ARM
   beq @song_wait
-  lda f:FM_TICK|$010000
+  lda f:FM_TICK
   inc
-  sta f:FM_TICK|$010000
+  sta f:FM_TICK
   bra :+
 @song_wait:
   jsl fm_song_wait
   bcc :+
-  rtl
+  rtl                           ; the first captures are not loaded yet
 :
-  fm_mark 20
-.endif
-  ; no part event due and no song change: only the countdown moves
-  rep #$20
+  ; No event due: only the count moves.
+  a16
   lda MUSIC_NEXT
   cmp #2
   bcc @full
   dec
   sta MUSIC_NEXT
   inc MUSIC_FAST
-  sep #$20
+  a8
   rtl
 @full:
-  sep #$20
-  ldx #576
+  ; The highest slot with a song plays.
+  a8
+  ldx #(MUSIC_SLOTS-1)*MUSIC_SLOT_SIZE
 @priority:
-  lda f:MUSIC_STATES+9,x
+  lda f:MUSIC_STATES+MS_ACTIVE,x
   bne @found
-  rep #$20
+  a16
   txa
   sec
-  sbc #192
+  sbc #MUSIC_SLOT_SIZE
   tax
-  sep #$20
+  a8
   bpl @priority
+  ; No song: the voices stop.
   jsr .loword(music_catch_up)
   jsl music_all_off
-  rep #$20
-  lda #$ffff
+  a16
+  lda #MUSIC_NONE
   sta MUSIC_SELECTED
   sta MUSIC_NEXT
-  sep #$20
+  a8
   rtl
 @found:
   stx MUSIC_SLOT
@@ -144,228 +156,233 @@ music_player_tick:
   bne :+
   jmp .loword(music_step_selected)
 :
+  ; A different slot plays now.
   jsr .loword(music_catch_up)   ; the previous selection keeps its delays
   ldx MUSIC_SLOT
   stx MUSIC_SELECTED
   jsl music_all_off
-.ifdef AUDIO_FM
-  fm_mark 21
-.endif
-.ifdef AUDIO_FM
-  ; Activate the cache for the selected priority slot. A resumed slot
-  ; must have its earlier captures available before its score advances.
+  ; Start the FM captures of the slot's song. A resumed slot must have its
+  ; earlier captures loaded before its score continues.
   ldx MUSIC_SLOT
-  rep #$20
-  lda f:MUSIC_STATES+22,x
+  a16
+  lda f:MUSIC_STATES+MS_SONG,x
   sta z:FM_SONG
-  sep #$20
-  lda f:MUSIC_STATES+24,x
-  sta f:$018788
+  a8
+  lda f:MUSIC_STATES+MS_RESUME,x
+  sta f:FM_CACHE_RESUME
   lda #1
-  sta f:MUSIC_STATES+24,x
+  sta f:MUSIC_STATES+MS_RESUME,x
   jsl fm_song_start
   jsl fm_song_wait
   bcc :+
   rtl
 :
-.endif
-  ; A suspended score resumes from cached native note/envelope state.
+  ; The notes that sounded when the slot stopped sound again.
   ldx MUSIC_SLOT
 @resume:
-  lda f:MUSIC_STATES+15,x
+  lda f:MUSIC_STATES+MS_SOUNDING,x
   beq :+
   phx
   jsl music_voice_resume
   plx
 :
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #MUSIC_PART_SIZE
   tax
   sec
   sbc MUSIC_SLOT
-  cmp #192
-  sep #$20
+  cmp #MUSIC_SLOT_SIZE
+  a8
   bne @resume
 @parts:
+  ; Each active part counts down its wait; at 0 its events play.
   ldx MUSIC_SLOT
 @part:
   stx MUSIC_PART
-  lda f:MUSIC_STATES+9,x
+  lda f:MUSIC_STATES+MS_ACTIVE,x
   beq @next
-  rep #$20
-  lda f:MUSIC_STATES+4,x
+  a16
+  lda f:MUSIC_STATES+MS_WAIT,x
   beq @due
   dec
-  sta f:MUSIC_STATES+4,x
+  sta f:MUSIC_STATES+MS_WAIT,x
   bne @next16
 @due:
-  sep #$20
+  a8
   jsr .loword(music_event)
 @next:
-  rep #$20
+  a16
 @next16:
   ldx MUSIC_PART
   txa
   clc
-  adc #32
+  adc #MUSIC_PART_SIZE
   tax
   sec
   sbc MUSIC_SLOT
-  cmp #192
-  sep #$20
+  cmp #MUSIC_SLOT_SIZE
+  a8
   bne @part
   jmp .loword(music_next)
 
-; The selected slot again: catch up MUSIC_FAST ticks, step each part (its
-; events when due) and find the next event in one pass; the same results as
-; music_catch_up, the part loop and music_next in turn. X = MUSIC_SLOT.
+; music_step_selected: the selected slot again: catch up MUSIC_FAST ticks,
+; step each part (its events when due) and find the next event in one pass;
+; the same results as music_catch_up, the part loop and music_next in turn.
+; X = MUSIC_SLOT.
 music_step_selected:
 .a8
-  rep #$20
-  lda #$ffff
+  a16
+  lda #MUSIC_NONE
   sta MUSIC_NEXT
-  sep #$20
+  a8
 @part:
   stx MUSIC_PART
-  lda f:MUSIC_STATES+9,x
+  lda f:MUSIC_STATES+MS_ACTIVE,x
   beq @next
-  rep #$20
-  lda f:MUSIC_STATES+4,x
+  a16
+  lda f:MUSIC_STATES+MS_WAIT,x
   sec
   sbc MUSIC_FAST
   beq @zero
   dec
-  sta f:MUSIC_STATES+4,x
+  sta f:MUSIC_STATES+MS_WAIT,x
   bne @wait
   bra @due
 @zero:
-  sta f:MUSIC_STATES+4,x
+  sta f:MUSIC_STATES+MS_WAIT,x
 @due:
-  sep #$20
+  a8
   jsr .loword(music_event)
   ldx MUSIC_PART
-  lda f:MUSIC_STATES+9,x
+  lda f:MUSIC_STATES+MS_ACTIVE,x
   beq @next
-  rep #$20
-  lda f:MUSIC_STATES+4,x
+  a16
+  lda f:MUSIC_STATES+MS_WAIT,x
 @wait:
   cmp MUSIC_NEXT
   bcs @next16
   sta MUSIC_NEXT
   bra @next16
 @next:
-  rep #$20
+  a16
 @next16:
   ldx MUSIC_PART
   txa
   clc
-  adc #32
+  adc #MUSIC_PART_SIZE
   tax
   sec
   sbc MUSIC_SLOT
-  cmp #192
-  sep #$20
+  cmp #MUSIC_SLOT_SIZE
+  a8
   bne @part
-  rep #$20
+  a16
   stz MUSIC_FAST
-  sep #$20
-  ; the slot's first part ending can change the selection: rescan next tick
+  a8
+  ; The end of the slot's first part can change the selection: find the
+  ; slot again at the next tick.
   ldx MUSIC_SLOT
-  lda f:MUSIC_STATES+9,x
+  lda f:MUSIC_STATES+MS_ACTIVE,x
   bne :+
-  rep #$20
+  a16
   lda #1
   sta MUSIC_NEXT
-  sep #$20
+  a8
 :
   rtl
 
-; The selected slot's parts count down MUSIC_FAST more ticks.
+; music_catch_up: the active parts of the selected slot count down the
+; MUSIC_FAST ticks; then MUSIC_FAST = 0. JSR.
 music_catch_up:
-  rep #$20
+  a16
   lda MUSIC_FAST
   beq @done
   ldx MUSIC_SELECTED
-  bmi @clear
+  bmi @clear                    ; MUSIC_NONE
 @part:
-  sep #$20
-  lda f:MUSIC_STATES+9,x
-  rep #$20
+  a8
+  lda f:MUSIC_STATES+MS_ACTIVE,x
+  a16
   beq @next
-  lda f:MUSIC_STATES+4,x
+  lda f:MUSIC_STATES+MS_WAIT,x
   sec
   sbc MUSIC_FAST
-  sta f:MUSIC_STATES+4,x
+  sta f:MUSIC_STATES+MS_WAIT,x
 @next:
   txa
   clc
-  adc #32
+  adc #MUSIC_PART_SIZE
   tax
   sec
   sbc MUSIC_SELECTED
-  cmp #192
+  cmp #MUSIC_SLOT_SIZE
   bne @part
 @clear:
   stz MUSIC_FAST
 @done:
-  sep #$20
+  a8
   rts
 
-; MUSIC_NEXT = the selected slot's earliest part delay. The slot's first
-; part ending can change the selection, so the next tick rescans then.
+; music_next: MUSIC_NEXT = the earliest part wait of the slot MUSIC_SLOT.
+; The end of the slot's first part can change the selection: then
+; MUSIC_NEXT = 1, and the next tick finds the slot again. JSL end.
 music_next:
-  rep #$20
-  lda #$ffff
+  a16
+  lda #MUSIC_NONE
   sta MUSIC_NEXT
   ldx MUSIC_SLOT
-  sep #$20
-  lda f:MUSIC_STATES+9,x
+  a8
+  lda f:MUSIC_STATES+MS_ACTIVE,x
   bne @part
-  rep #$20
+  a16
   lda #1
   sta MUSIC_NEXT
-  sep #$20
+  a8
   rtl
 @part:
-  lda f:MUSIC_STATES+9,x
+  lda f:MUSIC_STATES+MS_ACTIVE,x
   beq @next
-  rep #$20
-  lda f:MUSIC_STATES+4,x
+  a16
+  lda f:MUSIC_STATES+MS_WAIT,x
   cmp MUSIC_NEXT
   bcs @next16
   sta MUSIC_NEXT
   bra @next16
 @next:
-  rep #$20
+  a16
 @next16:
   txa
   clc
-  adc #32
+  adc #MUSIC_PART_SIZE
   tax
   sec
   sbc MUSIC_SLOT
-  cmp #192
-  sep #$20
+  cmp #MUSIC_SLOT_SIZE
+  a8
   bne @part
   rtl
 
+; music_start: start the song of the FM command A (SND_FM_FIRST up to
+; MUSIC_SONGS songs; other commands do nothing) in the slot of its priority.
+; Each song has two phases, as the two arcade interrupt phases: the tick
+; parity picks one. The parts start at their first event. JSR.
 music_start:
-  rep #$20
+  a16
   and #255
   sec
-  sbc #$20
-  cmp #19
+  sbc #SND_FM_FIRST
+  cmp #MUSIC_SONGS
   bcc :+
-  sep #$20
+  a8
   rts
 :
-  sta MUSIC_TEMP                ; song index
+  sta MUSIC_TEMP                ; the song
   tax
-  sep #$20
+  a8
   lda f:music_priority,x
-  rep #$20
+  a16
   and #255
   tax
   lda f:music_slot_offsets,x
@@ -373,279 +390,228 @@ music_start:
   lda MUSIC_TICK
   and #1
   asl
-  sta MUSIC_PART
+  sta MUSIC_PART                ; the phase entry: 0 or 2
   lda MUSIC_TEMP
   asl
-  asl
+  asl                           ; two phase entries of 2 bytes
   clc
-  adc MUSIC_PART                ; song/phase entry
-.ifdef AUDIO_FM
-  sta z:FM_SONG
-.endif
+  adc MUSIC_PART
+  sta z:FM_SONG                 ; the song/phase entry
   tax
   lda f:music_entries,x
-  sta MUSIC_TEMP                ; this phase's part offsets
+  sta MUSIC_TEMP                ; the phase's part offsets
   ldx MUSIC_SLOT
-.ifdef AUDIO_FM
   lda z:FM_SONG
-  sta f:MUSIC_STATES+22,x
+  sta f:MUSIC_STATES+MS_SONG,x
   lda #0
-  sta f:MUSIC_STATES+24,x
+  sta f:MUSIC_STATES+MS_RESUME,x
   lda MUSIC_SLOT
   cmp MUSIC_SELECTED
   bne :+
-  lda #$ffff
+  lda #MUSIC_NONE               ; the new song of the playing slot starts its captures
   sta MUSIC_SELECTED
 :
-.endif
 @part:
   phx
   ldx MUSIC_TEMP
   lda f:music_part_offsets,x
   plx
-  sta f:MUSIC_STATES,x
-  sta f:MUSIC_STATES+2,x
+  sta f:MUSIC_STATES+MS_BASE,x
+  sta f:MUSIC_STATES+MS_PC,x
   inc MUSIC_TEMP
   inc MUSIC_TEMP
   lda #0
-  sta f:MUSIC_STATES+6,x
-  sta f:MUSIC_STATES+8,x
-  sta f:MUSIC_STATES+14,x
-  sta f:MUSIC_STATES+16,x
-  sep #$20
-.ifdef AUDIO_FM
-  lda #$ff
-  sta f:MUSIC_STATES+25,x       ; no prefetch recorded for this part yet
-.endif
+  sta f:MUSIC_STATES+MS_REPEAT,x
+  sta f:MUSIC_STATES+MS_REPEAT_LEFT,x    ; and MS_ACTIVE
+  sta f:MUSIC_STATES+MS_NEXT_CAPTURE,x   ; and MS_SOUNDING
+  a8
+  lda #PREFETCH_NONE
+  sta f:MUSIC_STATES+MS_PREFETCH,x
   lda #1
-  sta f:MUSIC_STATES+9,x
+  sta f:MUSIC_STATES+MS_ACTIVE,x
   jsr .loword(music_prime)
-  rep #$20
-  lda f:MUSIC_STATES+4,x
-  inc
-  sta f:MUSIC_STATES+4,x
+  a16
+  lda f:MUSIC_STATES+MS_WAIT,x
+  inc                           ; the part loop of this tick counts one
+  sta f:MUSIC_STATES+MS_WAIT,x
   txa
   clc
-  adc #32
+  adc #MUSIC_PART_SIZE
   tax
   sec
   sbc MUSIC_SLOT
-  cmp #192
+  cmp #MUSIC_SLOT_SIZE
   bne @part
-  sep #$20
+  a8
   rts
+.assert MS_ACTIVE = MS_REPEAT_LEFT+1 .and MS_SOUNDING = MS_NEXT_CAPTURE+1, error
 
-.ifdef CONTINUOUS_GAME
 .segment "SOUND_EXTRA"
-; Run only after the title's stop command and all prior FM uploads complete.
-; This is an IRQ-side producer, so it cannot race the FM request ring.
+; music_title_preload: load the captures of the title music (SMF_PRELOAD)
+; when the sound is idle: a cabinet page shows, no command waits, no song
+; plays and no FM upload runs. It runs in the sound interrupt, so it cannot
+; collide with the FM requests. JSL.
 music_title_preload:
 .a8
   lda f:START_MUSIC_FLAGS
-  and #$20
+  and #SMF_PRELOAD
   beq @done
   lda CAB_START_PENDING
   bne @done
   lda GAME_FLOW
-  cmp #3
+  cmp #CAB_PAGE_FIRST
   bcc @done
   lda MUSIC_PENDING
   bne @done
-  lda STAGE_SOUND_READ
-  cmp STAGE_SOUND_WRITE
+  lda SOUND_READ
+  cmp SOUND_WRITE
   bne @done
-  rep #$20
+  a16
   lda MUSIC_SELECTED
-  cmp #$ffff
-  sep #$20
+  cmp #MUSIC_NONE
+  a8
   bne @done
-  lda f:$0187c4                ; FM_UP_ACTIVE
+  lda f:FM_UP_ACTIVE
   bne @done
-  ; A stopped score can be superseded when no main-loop upload is active.
   lda #0
-  sta f:$018788                ; FM_CACHE_RESUME: prepare a fresh plan
+  sta f:FM_CACHE_RESUME         ; a new capture plan
   lda f:START_MUSIC_FLAGS
-  and #$df
+  and #<~SMF_PRELOAD
   sta f:START_MUSIC_FLAGS
-  rep #$20
-  stz z:FM_SONG                ; both opening phases use the same captures
-  sep #$20
+  a16
+  stz z:FM_SONG                 ; the start music; both phases use the same captures
+  a8
   jsl fm_song_start
 @done:
   rtl
 .segment "SOUND"
-.endif
 
+; music_prime: read the token at MS_PC of the part X: MS_EVENT = its kind,
+; MS_WAIT = its delay; MS_PC = its body. JSR.
 music_prime:
-  rep #$20
-  lda f:MUSIC_STATES+2,x
+  a16
+  lda f:MUSIC_STATES+MS_PC,x
   tay
-  sep #$20
+  a8
   lda [MUSIC_POOL_PTR],y
   pha
-  and #$e0
-  sta f:MUSIC_STATES+10,x
+  and #SCORE_KIND
+  sta f:MUSIC_STATES+MS_EVENT,x
   pla
-  and #31
+  and #SCORE_DELAY_LONG
   iny
-  cmp #31
+  cmp #SCORE_DELAY_LONG
   beq @long
-  rep #$20
+  a16
   and #255
   bra @delay
 @long:
-  rep #$20
+  a16
   lda [MUSIC_POOL_PTR],y
   iny
   iny
 @delay:
-  sta f:MUSIC_STATES+4,x
+  sta f:MUSIC_STATES+MS_WAIT,x
   tya
-  sta f:MUSIC_STATES+2,x
-  sep #$20
+  sta f:MUSIC_STATES+MS_PC,x
+  a8
   rts
 
+; music_event: play the event MS_EVENT of the part X (its body at MS_PC),
+; then read the next token; continue while the next delay is 0. JSR.
 music_event:
-.ifdef AUDIO_FM
-  fm_mark 22
-.endif
-  rep #$20
-  lda f:MUSIC_STATES+2,x
+  a16
+  lda f:MUSIC_STATES+MS_PC,x
   tay
-  sep #$20
-  lda f:MUSIC_STATES+10,x
+  a8
+  lda f:MUSIC_STATES+MS_EVENT,x
   bne :+
-  jmp .loword(@note)
+  jmp .loword(@note)            ; SCORE_NOTE
 :
-.ifdef AUDIO_FM
-  cmp #$e0
+  cmp #SCORE_SHARED
   bne :+
   jmp .loword(@shared_note)
 :
-.endif
-  cmp #$20
+  cmp #SCORE_OFF
   bne :+
   jmp .loword(@off)
 :
-  cmp #$40
+  cmp #SCORE_LOOP
   bne :+
   jmp .loword(@loop)
 :
-  cmp #$80
-  beq @frequency
-  cmp #$a0
-  beq @volume
-  cmp #$c0
-  beq @table
+  ; SCORE_END: the part stops.
   lda #0
-  sta f:MUSIC_STATES+9,x
+  sta f:MUSIC_STATES+MS_ACTIVE,x
   rts
-@frequency:
-  rep #$20
-  lda [MUSIC_POOL_PTR],y
-  sta f:MUSIC_STATES+12,x
-  iny
-  iny
-  sep #$20
-  phy
-  phx
-  jsl music_voice_frequency
-  plx
-  ply
-  jmp .loword(@advance)
-@volume:
-  lda [MUSIC_POOL_PTR],y
-  sta f:MUSIC_STATES+14,x
-  iny
-  phy
-  phx
-  jsl music_voice_volume
-  plx
-  ply
-  jmp .loword(@advance)
-@table:
-  rep #$20
-  lda [MUSIC_POOL_PTR],y
-  sta f:MUSIC_STATES+20,x       ; ready pointer and size/resolution
-  iny
-  iny
-  sep #$20
-  phy
-  phx
-  jsl music_voice_table
-  plx
-  ply
-  jmp .loword(@advance)
 @note:
+  ; A note: its body follows the token.
   lda [MUSIC_POOL_PTR],y
   pha
-  and #127
-  sta f:MUSIC_STATES+11,x
+  and #<~SCORE_TIE
+  sta f:MUSIC_STATES+MS_CAPTURE,x
   pla
-  and #128
-  sta f:MUSIC_STATES+19,x       ; preconverted legato: keep the existing envelope
+  and #SCORE_TIE
+  sta f:MUSIC_STATES+MS_TIE,x
   iny
-  rep #$20
+  a16
   lda [MUSIC_POOL_PTR],y
-  sta f:MUSIC_STATES+12,x
+  sta f:MUSIC_STATES+MS_FREQUENCY,x
   iny
   iny
-  sep #$20
+  a8
   lda [MUSIC_POOL_PTR],y
-  sta f:MUSIC_STATES+14,x
+  sta f:MUSIC_STATES+MS_NEXT_CAPTURE,x
   iny
 @note_ready:
-.ifdef AUDIO_FM
-  lda f:MUSIC_STATES+19,x
-  bne :+                       ; tied notes retain the prior next capture
-  lda f:MUSIC_STATES+14,x
-  sta f:MUSIC_STATES+25,x
+  lda f:MUSIC_STATES+MS_TIE,x
+  bne :+                        ; a tied note keeps the prefetch of the note before
+  lda f:MUSIC_STATES+MS_NEXT_CAPTURE,x
+  sta f:MUSIC_STATES+MS_PREFETCH,x
 :
-.endif
   lda #1
-  sta f:MUSIC_STATES+15,x
+  sta f:MUSIC_STATES+MS_SOUNDING,x
   phy
   phx
   jsl music_voice_on
   plx
   ply
   jmp .loword(@advance)
-.ifdef AUDIO_FM
 @shared_note:
-  ; $f3-$f6 are the FM scratch bytes; the voice call has not begun yet.
+  ; A shared note: the body is the music_note_dictionary entry of the byte.
+  ; NOTE_ENTRY is FM work space; music_voice_on has not started yet.
   lda [MUSIC_POOL_PTR],y
   iny
   phy
   phx
-  rep #$20
+  a16
   and #255
   asl
-  asl
+  asl                           ; times NOTE_SIZE
   tax
   lda f:music_note_dictionary,x
-  sta $f3
+  sta NOTE_ENTRY
   lda f:music_note_dictionary+2,x
-  sta $f5
+  sta NOTE_ENTRY+2
   plx
   ply
-  sep #$20
-  lda $f3
-  and #127
-  sta f:MUSIC_STATES+11,x
-  lda $f3
-  and #128
-  sta f:MUSIC_STATES+19,x
-  rep #$20
-  lda $f4
-  sta f:MUSIC_STATES+12,x
-  sep #$20
-  lda $f6
-  sta f:MUSIC_STATES+14,x
+  a8
+  lda NOTE_ENTRY+NOTE_CAPTURE
+  and #<~SCORE_TIE
+  sta f:MUSIC_STATES+MS_CAPTURE,x
+  lda NOTE_ENTRY+NOTE_CAPTURE
+  and #SCORE_TIE
+  sta f:MUSIC_STATES+MS_TIE,x
+  a16
+  lda NOTE_ENTRY+NOTE_FREQUENCY
+  sta f:MUSIC_STATES+MS_FREQUENCY,x
+  a8
+  lda NOTE_ENTRY+NOTE_NEXT
+  sta f:MUSIC_STATES+MS_NEXT_CAPTURE,x
   bra @note_ready
-.endif
 @off:
   lda #0
-  sta f:MUSIC_STATES+15,x
+  sta f:MUSIC_STATES+MS_SOUNDING,x
   phy
   phx
   jsl music_voice_off
@@ -653,52 +619,56 @@ music_event:
   ply
   bra @advance
 @loop:
+  ; A loop: the repetitions (0: always), then the target from MS_BASE.
+  ; Y after the count byte tells this loop from others (MS_REPEAT).
   lda [MUSIC_POOL_PTR],y
   iny
   beq @jump
   sta MUSIC_TEMP
-  rep #$20
+  a16
   tya
-  cmp f:MUSIC_STATES+6,x
-  sep #$20
+  cmp f:MUSIC_STATES+MS_REPEAT,x
+  a8
   beq @repeat
-  rep #$20
+  a16
   tya
-  sta f:MUSIC_STATES+6,x
-  sep #$20
+  sta f:MUSIC_STATES+MS_REPEAT,x
+  a8
   lda MUSIC_TEMP
   bra @decrement
 @repeat:
-  lda f:MUSIC_STATES+8,x
+  lda f:MUSIC_STATES+MS_REPEAT_LEFT,x
   beq @finished_loop
 @decrement:
   dec
-  sta f:MUSIC_STATES+8,x
+  sta f:MUSIC_STATES+MS_REPEAT_LEFT,x
 @jump:
-  rep #$20
+  a16
   lda [MUSIC_POOL_PTR],y
   clc
-  adc f:MUSIC_STATES,x
+  adc f:MUSIC_STATES+MS_BASE,x
   tay
-  sep #$20
+  a8
   bra @advance
 @finished_loop:
-  rep #$20
-  lda #$ffff
-  sta f:MUSIC_STATES+6,x
-  sep #$20
+  a16
+  lda #MUSIC_NONE
+  sta f:MUSIC_STATES+MS_REPEAT,x
+  a8
   iny
-  iny
+  iny                           ; past the target
 @advance:
-  rep #$20
+  a16
   tya
-  sta f:MUSIC_STATES+2,x
-  sep #$20
+  sta f:MUSIC_STATES+MS_PC,x
+  a8
   jsr .loword(music_prime)
-  rep #$20
-  lda f:MUSIC_STATES+4,x
-  sep #$20
+  a16
+  lda f:MUSIC_STATES+MS_WAIT,x
+  a8
   bne @return
   jmp .loword(music_event)
 @return:
   rts
+.assert SCORE_NOTE = 0 .and SCORE_KIND = SCORE_SHARED .and NOTE_SIZE = 4, error
+.assert SCORE_DELAY_LONG = <~SCORE_KIND, error

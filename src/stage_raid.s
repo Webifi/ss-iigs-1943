@@ -1,18 +1,30 @@
-; The original thirty-second reinforcement raid after a ship escapes.
-; Spawn choices, turn timing and paths are prepared ROM data.
+; The raid after a boss result (US arcade): for RAID_TICKS, a giant plane
+; comes every RAID_WAIT updates. The spawn choices, the turn times and the
+; paths are arcade data.
 .a8
 .i16
+RAID_TICKS = 1800            ; 30 s at 60 updates
+RAID_WAIT = 60               ; updates between the raid giants
+RAID_STEPS = 14              ; game_raid_steps: the times, then the left turns, then the right turns
+RAID_STRAIGHT = 0            ; RAID_TURN
+RAID_LEFT = 1                ; RAID_TURN: heading - 1
+RAID_RIGHT = 2               ; RAID_TURN: heading + 1
+RAID_LEAVE_TIME = 255        ; RAID_TIME of a straight run or the departure
+
+; game_raid_tick: one update of the raid (game_flow_tick, SEQ_RESULT): one
+; of four extended spawns (game_raid_spawns, random stream 7, step $77) when
+; four large slots are free. JSL.
 game_raid_tick:
-  rep #$20
+  a16
   lda GAME_SEQUENCE_TICKS
-  cmp #1800
-  sep #$20
+  cmp #RAID_TICKS
+  a8
   bcc :+
   rtl
 :
-  lda STAGE_FLAGS+$23
+  lda STAGE_RAID_WAIT
   beq @ready
-  dec STAGE_FLAGS+$23
+  dec STAGE_RAID_WAIT
   rtl
 @ready:
   jsr .loword(giant_allocate)
@@ -28,62 +40,72 @@ game_raid_tick:
   and #3
   asl
   tax
-  rep #$20
+  a16
   lda f:game_raid_spawns,x
   sta STAGE_CALLBACK
-  sep #$20
+  a8
   stz STAGE_BANK
-  lda #254
+  lda #CONTROL_EXTENDED
   sta STAGE_CONTROL_INDEX
   jsl extended_spawn
-  lda #60
-  sta STAGE_FLAGS+$23
-  inc STAGE_DAMAGE_THRESHOLD
+  lda #RAID_WAIT
+  sta STAGE_RAID_WAIT
+  inc LARGE_THRESHOLD
   rtl
 
-; D selects the sixteen-piece aircraft, as in the other large callbacks.
+; The raid giant (a large object; D = its record, large_ai). Its family bytes:
+RAID_HEADING = $10           ; the heading, 0-31
+RAID_TIME = $11              ; decisions left of this step
+RAID_STEP = $12              ; the game_raid_steps entry; counts down
+RAID_LAPS = $13              ; laps left; the giant leaves after the last
+RAID_TURN = $14              ; 0 straight, 1 heading - 1, else heading + 1
+RAID_SIDE = $15              ; nonzero: the right step table
+; game_raid_giant: turn by RAID_TURN until the heading is 0, then follow
+; the RAID_STEPS steps of its side (time and turn), RAID_LAPS times; at steps
+; 11 and 5 two carrier children may come (1 in 2, random stream 4, step $55,
+; on the field); then the giant turns away and leaves.
 game_raid_giant:
 .a16
-  sep #$20
-  lda $14
-  beq @timer
-  cmp #1
+  a8
+  lda RAID_TURN
+  beq @timer                    ; RAID_STRAIGHT
+  cmp #RAID_LEFT
   beq @turn_left
-  lda $10
+  lda RAID_HEADING
   inc
   bra @heading
 @turn_left:
-  lda $10
+  lda RAID_HEADING
   dec
 @heading:
-  and #31
-  sta $10
+  and #DIRECTIONS-1
+  sta RAID_HEADING
   bne @timer
-  stz $14
-  lda #255
-  sta $11
+  stz RAID_TURN                 ; RAID_STRAIGHT
+  lda #RAID_LEAVE_TIME
+  sta RAID_TIME
   bra @select
 @timer:
-  dec $11
+  dec RAID_TIME
   bne @select
-  rep #$20
-  lda $12
+  a16
+  lda RAID_STEP
   and #255
   tax
-  sep #$20
-  lda $15
+  a8
+  lda RAID_SIDE
   beq @left_steps
-  lda f:game_raid_steps+28,x
+  lda f:game_raid_steps+2*RAID_STEPS,x
   bra @step
 @left_steps:
-  lda f:game_raid_steps+14,x
+  lda f:game_raid_steps+RAID_STEPS,x
 @step:
-  sta $14
+  sta RAID_TURN
   lda f:game_raid_steps,x
-  sta $11
-  dec $12
+  sta RAID_TIME
+  dec RAID_STEP
   bmi @lap
-  lda $12
+  lda RAID_STEP
   cmp #11
   beq @children
   cmp #5
@@ -95,8 +117,8 @@ game_raid_giant:
   sta RANDOM_STATE+4
   and #1
   bne @select
-  lda $01
-  and #16
+  lda SPR_ATTR
+  and #SPR_ALONG_HIGH
   bne @select
   lda #0
   jsr .loword(game_carrier_child_spawn)
@@ -104,26 +126,26 @@ game_raid_giant:
   jsr .loword(game_carrier_child_spawn)
   bra @select
 @lap:
-  dec $13
+  dec RAID_LAPS
   beq @depart
-  lda #13
-  sta $12
+  lda #RAID_STEPS-1
+  sta RAID_STEP
   bra @select
 @depart:
-  lda #255
-  sta $11
-  lda $15
+  lda #RAID_LEAVE_TIME
+  sta RAID_TIME
+  lda RAID_SIDE
   beq :+
-  lda #1
+  lda #RAID_LEFT
   bra @mode
 :
-  lda #2
+  lda #RAID_RIGHT
 @mode:
-  sta $14
+  sta RAID_TURN
 @select:
-  rep #$20
-  lda $10
-  and #31
+  a16
+  lda RAID_HEADING
+  and #DIRECTIONS-1
   asl
   tax
   lda f:game_raid_paths,x

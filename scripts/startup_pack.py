@@ -2,10 +2,15 @@
 
 A low token stores 1..128 literal bytes. A high token stores a 3..130 byte
 copy followed by its 16-bit backward distance. Blocks are at most 16 KB.
+
+"startup_pack.py IN OUT" writes the packed form of file IN to OUT (the
+Makefile packs the linked helpers with it).
 """
 
+import sys
 from collections import defaultdict, deque
 from functools import lru_cache
+from pathlib import Path
 
 
 def _pack(data, lazy=False):
@@ -92,3 +97,7 @@ def unpack(data):
             out.extend(data[i : i + n])
             i += n
     return bytes(out)
+
+
+if __name__ == "__main__":
+    Path(sys.argv[2]).write_bytes(pack(Path(sys.argv[1]).read_bytes()))

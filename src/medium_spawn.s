@@ -1,60 +1,66 @@
-; Build-selected native spawn index. This copies a template only at spawn.
+; medium_spawn: a stage event starts one medium plane (control indexes
+; CONTROL_MEDIUM_FIRST to CONTROL_MEDIUM_END-1). The build chose the tables
+; (scripts/medium_enemies.py); the template is copied once, at the spawn.
+; Returns carry 0: not a medium spawn; carry 1: handled (spawned, or no free
+; slot among the first STAGE_SPAWN_SLOTS). JSL; A8, X16. A, X, Y: changed.
 .a8
 .i16
 medium_spawn:
   lda STAGE_CONTROL_INDEX
-  cmp #128
+  cmp #CONTROL_MEDIUM_FIRST
   bcs :+
   clc
   rtl
 :
-  cmp #140
+  cmp #CONTROL_MEDIUM_END
   bcc :+
   clc
   rtl
 :
-  rep #$20
-  and #127
+  a16
+  and #$7f                      ; the index in the medium tables
   tax
-  sep #$20
+  a8
   lda f:medium_spawn_x,x
-  sta $d0
+  sta SPAWN_CROSS
   lda f:medium_spawn_template,x
-  sta $d2
-  stz $d3
-  lda STAGE_DIFFICULTY+6
+  sta SPAWN_TEMPLATE
+  stz SPAWN_TEMPLATE+1
+  lda STAGE_SPAWN_SLOTS
   bne :+
-  sec
+  sec                           ; no slots for spawns now
   rtl
 :
-  rep #$20
+  ; Search the first STAGE_SPAWN_SLOTS records of ENEMY_POOL for a free one.
+  a16
   and #255
   asl
   asl
   asl
   asl
-  asl
-  sta $d4
+  asl                           ; times OBJECT_SIZE
+  sta SPAWN_SEARCH_END
   ldx #0
 @slot:
-  sep #$20
-  lda ENEMY_POOL+8,x
+  a8
+  lda ENEMY_POOL+OBJ_TYPE,x
   beq @found
-  rep #$20
+  a16
   txa
   clc
-  adc #32
+  adc #OBJECT_SIZE
   tax
-  cpx $d4
+  cpx SPAWN_SEARCH_END
   bne @slot
-  sep #$20
+  a8
   sec
   rtl
+  ; Copy the template, then place the plane at SPAWN_CROSS.
 @found:
-  rep #$20
+  a16
   txy
-  ldx $d2
-  .repeat 16
+  ldx SPAWN_TEMPLATE
+  .repeat OBJECT_SIZE/2
     lda f:medium_spawn_templates,x
     sta ENEMY_POOL,y
     inx
@@ -64,10 +70,12 @@ medium_spawn:
   .endrepeat
   tya
   sec
-  sbc #32
+  sbc #OBJECT_SIZE              ; Y passed the record: X = the record again
   tax
-  sep #$20
-  lda $d0
-  sta ENEMY_POOL+2,x
+  a8
+  lda SPAWN_CROSS
+  sta ENEMY_POOL+SPR_CROSS,x
   sec
   rtl
+.assert CONTROL_MEDIUM_FIRST = $80 .and CONTROL_MEDIUM_END <= $100, error
+.assert OBJECT_SIZE = 32, error

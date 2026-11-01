@@ -1,222 +1,156 @@
-; DOC-clocked score service. No disk call, Toolbox call or card transfer.
-; Main DOC register transactions are atomic. IRQ saves the GLU mode/pointer
-; around its own writes, so interruptible waveform uploads keep their place.
-; The game calls this only after startup loading and doc_init have finished.
+; The sound interrupt: the DOC timer oscillator (MUSIC_IRQ_VOICE) interrupts
+; at the arcade sound rate (238.548 Hz) and runs the input, the sound queue,
+; the SSG effects, the music and the FM voices. It makes no disk, Toolbox or
+; card call. The main loop writes DOC registers with interrupts off; only a
+; main-loop upload leaves the GLU in RAM mode with interrupts on, and the
+; interrupt keeps its mode and address. audio_game_init installs it after the
+; start-up loads.
 .a8
 .i16
-MUSIC_IRQ_PHASE = $1e90
-MUSIC_IRQ_CONTROL = $1e92
-MUSIC_IRQ_SHADOW = $1e93
-MUSIC_IRQ_OLD_VECTOR = $1e94
-MUSIC_IRQ_COUNT = $1e96
-MUSIC_IRQ_PERIODS = $1e98
-MUSIC_IRQ_OLD_INTEN = $1e9a
-MUSIC_IRQ_OLD_VGC = $1e9b
-MUSIC_IRQ_OLD_KM = $1e9c
-.ifndef MUSIC_TIMER_VOICE
-MUSIC_TIMER_VOICE = 31
-.endif
 MUSIC_IRQ_VOICE = MUSIC_TIMER_VOICE
+FRAME_TICKS = 4              ; timer ticks of one arcade frame
+TIMER_WAVE_PAGE = $ff        ; the DOC RAM page of the timer's silent wave
+DOC_SILENCE = $80            ; the zero level of a DOC sample (0 halts it)
+.assert UPDATE_TICKS = 2*FRAME_TICKS, error ; game_clock.s: two frames an update
 
+; music_irq_install: start the music and the timer interrupt. The DOC
+; enables the oscillators up to the timer; the other interrupt sources are
+; off; the start music captures load while the title shows. The timer plays
+; a silent wave with its interrupt on. JSR; interrupts on after it.
 music_irq_install:
   php
   sei
-  ldx #$e1
+  ldx #DOC_ENABLE
   lda #(MUSIC_IRQ_VOICE*2)
-  jsr doc_write
-  lda f:$e0c035
-  sta MUSIC_IRQ_SHADOW
-  rep #$20
+  jsr .loword(audio_doc_write)
+  a16
   stz MUSIC_IRQ_PHASE
-  stz MUSIC_IRQ_COUNT
-  sep #$20
-  ; The only IRQ source enabled by this path is the DOC clock. Existing input
-  ; polling continues; later input IRQ support must dispatch its own source.
-  lda MUSIC_IRQ_SHADOW
-  ora #$40
-  sta f:$e0c035
-  rep #$20
-  lda f:$00ffee
-  sta MUSIC_IRQ_OLD_VECTOR
-  .ifdef AUDIO_GAME
+  stz GAME_CLOCK
+  a8
+  ; The DOC timer is the only interrupt source. The input code polls.
+  lda f:SHADOW
+  ora #SHADOW_IOLC
+  sta f:SHADOW
+  a16
   lda #music_irq_vector
-  .else
-  lda #music_irq_entry
-  .endif
-  sta f:$00ffee
-  sep #$20
-  lda f:$e0c041
-  sta MUSIC_IRQ_OLD_INTEN
+  sta f:IRQ_VECTOR
+  a8
   lda #0
-  sta f:$e0c041
-  lda f:$e0c023
-  and #7
-  sta MUSIC_IRQ_OLD_VGC
-  lda #0
-  sta f:$e0c023
-  sta f:$e0c032
-  lda f:$e0c027
-  sta MUSIC_IRQ_OLD_KM
-  and #$ab
-  sta f:$e0c027
-  jsl audio_init
-.ifdef AUDIO_FAST
+  sta f:INTEN
+  sta f:VGCINT
+  sta f:SCANINT
+  lda f:KMSTATUS
+  and #<~(KM_MOUSE_IRQ|KM_DATA_IRQ|KM_KEY_IRQ)
+  sta f:KMSTATUS
   phd
-  rep #$20
-  lda #$1e00
+  a16
+  lda #.loword(MUSIC_PAGE)
   tcd
-  sep #$20
-  jsl audio_fast_init
-  pld
-.endif
-.if MUSIC_ENABLED
-  phd
-  rep #$20
-  lda #$1e00
-  tcd
-  sep #$20
+  a8
   jsl music_player_init
- .ifdef AUDIO_FM
   jsl fm_voice_init
- .ifdef CONTINUOUS_GAME
-  ; Prepare the identical two phases of the opening cue while the title
-  ; is displayed. A later song may replace these buffers normally.
-  rep #$20
+  ; Load the captures of the start music (both phases are the same) while
+  ; the title shows. A later song can replace them.
+  a16
   stz z:FM_SONG
-  sep #$20
+  a8
   jsl fm_song_start
- .endif
- .endif
   pld
-.endif
+  ; The timer's wave: one page of DOC_SILENCE at TIMER_WAVE_PAGE.
 @ready:
-  lda f:$e0c03c
+  lda f:SOUNDCTL
   bmi @ready
   lda DOC_MASTER
-  ora #$60
-  sta f:$e0c03c
+  ora #SOUNDCTL_RAM|SOUNDCTL_INC
+  sta f:SOUNDCTL
   lda #0
-  sta f:$e0c03e
-  lda #$ff
-  sta f:$e0c03f
+  sta f:SOUNDADRL
+  lda #TIMER_WAVE_PAGE
+  sta f:SOUNDADRH
   ldx #256
 @silence:
-  lda f:$e0c03c
+  lda f:SOUNDCTL
   bmi @silence
-  lda #128
-  sta f:$e0c03d
+  lda #DOC_SILENCE
+  sta f:SOUNDDATA
   dex
   bne @silence
-  ldx #$40+MUSIC_IRQ_VOICE
+  ; The timer oscillator: no volume, a 256-byte table, the build's period.
+  ldx #DOC_VOLUME+MUSIC_IRQ_VOICE
   lda #0
-  jsr doc_write
-  ldx #$80+MUSIC_IRQ_VOICE
-  lda #$ff
-  jsr doc_write
-  ldx #$c0+MUSIC_IRQ_VOICE
+  jsr .loword(audio_doc_write)
+  ldx #DOC_WAVE+MUSIC_IRQ_VOICE
+  lda #TIMER_WAVE_PAGE
+  jsr .loword(audio_doc_write)
+  ldx #DOC_TABLE+MUSIC_IRQ_VOICE
   lda #0
-  jsr doc_write
-  .ifdef MUSIC_TIMER_HIGH_CONSTANT
-  ldx #$20+MUSIC_IRQ_VOICE
+  jsr .loword(audio_doc_write)
+  ldx #DOC_FREQ_HIGH+MUSIC_IRQ_VOICE
   lda #MUSIC_TIMER_HIGH_CONSTANT
-  jsr doc_write
-  lda #$ff
+  jsr .loword(audio_doc_write)
+  lda #$ff                      ; not a period: music_irq_period writes the first
   sta MUSIC_IRQ_PERIODS
-  .endif
-  jsr music_irq_period
-  ldx #$a0+MUSIC_IRQ_VOICE
-  lda #8
-  jsr doc_write
+  jsr .loword(music_irq_period)
+  ldx #DOC_CONTROL+MUSIC_IRQ_VOICE
+  lda #DOC_IRQ_ENABLE
+  jsr .loword(audio_doc_write)
   plp
   cli
   rts
 
-music_irq_remove:
-  sei
-  ldx #$a0+MUSIC_IRQ_VOICE
-  lda #3
-  jsr doc_write
-  rep #$20
-  lda MUSIC_IRQ_OLD_VECTOR
-  sta f:$00ffee
-  sep #$20
-  lda MUSIC_IRQ_SHADOW
-  sta f:$e0c035
-  lda MUSIC_IRQ_OLD_INTEN
-  sta f:$e0c041
-  lda MUSIC_IRQ_OLD_VGC
-  sta f:$e0c023
-  lda MUSIC_IRQ_OLD_KM
-  sta f:$e0c027
-  rts
-
+; music_irq_period: the timer frequency low byte of this tick from
+; music_irq_frequencies (256 entries; their average gives the arcade rate).
+; The build proves the high byte is constant; only a changed low byte goes to
+; the DOC, as the GLU is slow. The GLU must be in register mode. JSR.
 music_irq_period:
-.ifdef MUSIC_TIMER_HIGH_CONSTANT
-  ; The build proves the high byte is constant for this DOC scan rate.
-  ; Only a changed low byte crosses the slow GLU bus.
   ldx MUSIC_IRQ_PHASE
   lda f:music_irq_frequencies,x
-  inc MUSIC_IRQ_PHASE
+  inc MUSIC_IRQ_PHASE           ; the low byte only: 256 entries
   cmp MUSIC_IRQ_PERIODS
   beq @same
   sta MUSIC_IRQ_PERIODS
-@ready:                       ; callers leave the GLU in register mode
-  lda f:$e0c03c
+@ready:
+  lda f:SOUNDCTL
   bmi @ready
-  lda #MUSIC_IRQ_VOICE
-  sta f:$e0c03e
+  lda #DOC_FREQ_LOW+MUSIC_IRQ_VOICE
+  sta f:SOUNDADRL
   lda MUSIC_IRQ_PERIODS
-  sta f:$e0c03d
+  sta f:SOUNDDATA
 @same:
   rts
-.else
-  rep #$20
-  ldx MUSIC_IRQ_PHASE
-  lda f:music_irq_frequencies,x
-  sta MUSIC_IRQ_PERIODS
-  txa
-  inc
-  inc
-  and #511
-  sta MUSIC_IRQ_PHASE
-  sep #$20
-  ldx #MUSIC_IRQ_VOICE
-  lda MUSIC_IRQ_PERIODS
-  jsr doc_write
-  ldx #$20+MUSIC_IRQ_VOICE
-  lda MUSIC_IRQ_PERIODS+1
-  jmp doc_write
-.endif
 
+; music_irq_entry: the IRQ (from music_irq_vector). D = MUSIC_PAGE, DBR = 0.
+; A timer tick advances GAME_CLOCK and runs the sound work; the queue gets
+; one command each arcade frame (FRAME_TICKS). Other DOC interrupts are only
+; acknowledged. The input capture runs at the end of each interrupt.
 music_irq_entry:
-  rep #$30
+  ax16
   pha
   phx
   phy
   phd
   phb
-  sep #$20
-  lda #0
+  a8
+  lda #^GAME_RAM
   pha
   plb
-  rep #$20
-  lda #$1e00
+  a16
+  lda #.loword(MUSIC_PAGE)
   tcd
-  sep #$20
+  a8
 @pending:
-  lda f:$e0c03c
+  lda f:SOUNDCTL
   bmi @pending
-  ; Main-loop DOC register transactions mask interrupts; only a main-loop
-  ; upload leaves the GLU in RAM mode with interrupts on. Keep its mode and
-  ; pointer then; a 0 marker otherwise.
-  bit #$40
+  ; A main-loop upload in RAM mode: keep the GLU mode and address on the
+  ; stack, then the marker 1; else the marker 0.
+  bit #SOUNDCTL_RAM
   beq @lean
-  and #$60
+  and #SOUNDCTL_RAM|SOUNDCTL_INC
   ora DOC_MASTER
   pha
-  lda f:$e0c03e
+  lda f:SOUNDADRL
   pha
-  lda f:$e0c03f
+  lda f:SOUNDADRH
   pha
   lda #1
   bra @marked
@@ -225,135 +159,68 @@ music_irq_entry:
 @marked:
   pha
 @dispatch:
-  ; E0 acknowledges each reported oscillator. Timer ticks step the score;
-  ; table completions service their waiting chain without advancing music.
-  ; The GLU is idle here. C03D returns the preceding fetch and posts another
-  ; one (Apple Hardware Reference p.107): the second read returns E0 and
-  ; posts a harmless read of register 0.
+  ; The read of DOC_IRQ acknowledges the oscillator it reports. SOUNDDATA
+  ; returns the fetch before and posts a new one (Apple IIgs Hardware
+  ; Reference p.107): the second read returns DOC_IRQ and posts a harmless
+  ; read of register 0.
   lda DOC_MASTER
-  sta f:$e0c03c
-  lda #$e0
-  sta f:$e0c03e
-  lda f:$e0c03d
+  sta f:SOUNDCTL
+  lda #DOC_IRQ
+  sta f:SOUNDADRL
+  lda f:SOUNDDATA
 @fetch:
-  lda f:$e0c03c
+  lda f:SOUNDCTL
   bmi @fetch
   lda #0
-  sta f:$e0c03e
-  lda f:$e0c03d
-  cmp #$80
+  sta f:SOUNDADRL
+  lda f:SOUNDDATA
+  cmp #DOC_IRQ_NONE
   bcs @restore
   lsr
-  and #31
+  and #DOC_OSCILLATORS-1        ; the oscillator
   cmp #MUSIC_IRQ_VOICE
-  beq @timer
-  jsl audio_completed
-  bra @restore
+  bne @restore
 @timer:
-.ifdef AUDIO_PROFILE
-  lda #1
-  sta f:$050509
-.endif
-  rep #$20
-  inc MUSIC_IRQ_COUNT
-  sep #$20
-  jsr music_irq_period
-.ifdef CONTINUOUS_GAME
+  a16
+  inc GAME_CLOCK
+  a8
+  jsr .loword(music_irq_period)
   jsl native_input_doc_tick
-.endif
-.ifdef CONTINUOUS_GAME
-  ; The queue is serviced on one of every four timer ticks.
-  lda MUSIC_IRQ_COUNT
-  and #3
+  lda GAME_CLOCK
+  and #FRAME_TICKS-1
   bne :+
   jsl audio_request_tick
 :
-.endif
-.ifdef AUDIO_FAST
-  jsl audio_fast_tick
-.elseif .not .defined(AUDIO_FM)
-  jsl audio_envelopes_tick
-.endif
-.ifdef AUDIO_COMPACT_SSG
- .ifdef SSG_FEATURE_TICK
-  rep #$20
-  lda MUSIC_IRQ_COUNT
-  cmp #SSG_FEATURE_TICK
-  sep #$20
-  bne :+
-  lda #SSG_FEATURE_COMMAND_A
-  sta SSG_PENDING
-  jsl audio_ssg_command
-  lda #SSG_FEATURE_COMMAND_B
-  sta SSG_PENDING
-  jsl audio_ssg_command
-:
- .endif
-  lda z:SSG_PENDING_D
+  lda z:SSG_PENDING
   beq :+
   jsl audio_ssg_command
 :
-  lda z:SSG_ACTIVE_D
+  lda z:SSG_ACTIVE
   beq :+
   jsl audio_ssg_tick
 :
-.endif
-.ifdef AUDIO_PROFILE
-  lda #30
-  sta f:$050509
-.endif
-.if MUSIC_ENABLED
- .ifdef MUSIC_FEATURE_TICK
-  rep #$20
-  lda MUSIC_IRQ_COUNT
-  cmp #MUSIC_FEATURE_TICK
-  sep #$20
-  bne :+
-  lda #MUSIC_FEATURE_COMMAND
-  sta MUSIC_PENDING
-:
- .endif
   jsl music_player_tick
-.endif
-.ifdef AUDIO_PROFILE
-  lda #31
-  sta f:$050509
-.endif
-.ifdef AUDIO_FM
   jsl fm_voice_tick
-.endif
-.ifdef AUDIO_PROFILE
-  lda #2
-  sta f:$050509
-.endif
-.if .defined(AUDIO_FAST) .or .defined(AUDIO_FM)
-  bra @restore
-.else
-@again:
-  lda f:$e0c03c
-  bmi @again
-  jmp @dispatch
-.endif
 @restore:
+  ; The GLU state of a main-loop upload goes back.
   pla
   beq @restored
 @ready:
-  lda f:$e0c03c
+  lda f:SOUNDCTL
   bmi @ready
   pla
-  sta f:$e0c03f
+  sta f:SOUNDADRH
   pla
-  sta f:$e0c03e
+  sta f:SOUNDADRL
   pla
-  sta f:$e0c03c
+  sta f:SOUNDCTL
 @restored:
- .ifdef CONTINUOUS_GAME
   jsl native_input_capture
- .endif
-  rep #$30
+  ax16
   plb
   pld
   ply
   plx
   pla
   rti
+.assert ^GAME_RAM = 0 .and FRAME_TICKS = 4 .and DOC_OSCILLATORS = 32, error

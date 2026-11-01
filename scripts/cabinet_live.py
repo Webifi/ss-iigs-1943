@@ -3,8 +3,6 @@
 import struct
 from cabinet_post import live_layouts
 
-CURSOR = 0x7B80
-COUNT = 0x7B8A
 
 
 def records(scene):
@@ -25,9 +23,9 @@ def records(scene):
 
 def install(scene):
     """The overlay helper and its damage lists, in the banked code page
-    (region bank-code of src/card/memory.toml). Run once after cabinet text, then mark normal and
+    (.bank_code of secondsight.ld). Run once after cabinet text, then mark normal and
     live damage."""
-    from card_link import generate
+    from secondsight_link import generate
 
     # The lists are read through BBR at $C000, $2000 below this code's window.
     lists = records(scene)

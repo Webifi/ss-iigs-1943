@@ -1,50 +1,58 @@
-; Native input event bank. Capture publishes time/source/value before head.
-; Shared physical keys retain source ownership across menu/game transitions.
-; Wolf mechanisms are in input_adb.s and input_j13.s; game bindings live here.
+; The native input: the ADB keyboard, the mouse, the J13 keyboard, the
+; joystick and the pads become the bits of INPUT_P1, INPUT_P2 and
+; INPUT_SYSTEM. The interrupts put timestamped events in inputRing (the
+; Wolf3D code in input_adb.s and input_j13.s); each update applies the
+; events up to its time (drain). A key that two sources hold stays held
+; until both release it. The entries keep the DBR, D and widths of the
+; game; this code and its data use the program bank.
 .a8
 .i16
 input_native:
 .scope input_native
-KBDSTRB = $e0c010
-KEYMODREG = $e0c025
-MOUSEDATA = $e0c024
-DATAREG = $e0c026
-KMSTATUS = $e0c027
-KBD = $e0c000
-BUTN0 = $e0c061
-BUTN1 = $e0c062
-ZIPCANCEL = $e0c05f
-ROMVER = $fffb59
+BIND_COUNT = 64              ; the most key bindings (boundKeys...)
+BINDINGS_BYTES = BIND_COUNT*BINDING_SIZE  ; the binding records of the settings
+KEY_DRAIN_MAX = 4096         ; start: the most old DATAREG bytes to read
+J13_ESCAPE = 0               ; j13Mode: the J13 code looks only for Esc
+J13_MENU = 1                 ; j13Mode: a menu, a cabinet page or the demo
+J13_PLAY = 2                 ; j13Mode: the play reads the J13 rows each frame
+MOUSE_MOVE_BITS = $7f        ; an ADB mouse byte: a 7-bit signed move
+MOUSE_MOVE_SIGN = $40
+MOUSE_BUTTON_UP = $80        ; the mouse Y byte: the button is up
+MOUSE_RANGE = 32             ; mouseX and mouseY stay in -MOUSE_RANGE..MOUSE_RANGE
+INPUT_RELEASED = $ffff       ; INPUT_P1, INPUT_SYSTEM, INPUT_P2: a bit is 0 when pressed
 
-BIND_COUNT = 64
-
-; Entry wrappers restore the game's DBR, DP and width. Private data uses PB.
+; start (native_input_start): clear the held keys, keep the firmware
+; settings, find the ROM 00/01 J13 keyboard, empty the GLU and set its
+; modes: with a raw ADB keyboard the game asks for the keys itself (no
+; keyboard poll, the keyboard service request on); else the firmware polls
+; the keyboard. Then the bindings, the ADB interrupts on and all inputs
+; released. JSL.
 start:
   php
   sei
-  rep #$30
+  ax16
   phb
   phd
   lda #0
   tcd
   phk
   plb
-  ldx #127
-  sep #$20
+  ldx #KEY_CODES-1
+  a8
 @held:
   lda #0
   sta f:keyHeld,x
   dex
   bpl @held
-  rep #$20
+  a16
   jsl settings_fw_keep
   jsl J13Init
-  sep #$20
-  ldy #4096
+  a8
+  ldy #KEY_DRAIN_MAX
 @drain:
   .a8
   lda f:KMSTATUS
-  and #$20
+  and #KM_DATA_FULL
   beq @modes
   lda f:DATAREG
   dey
@@ -52,47 +60,49 @@ start:
 @modes:
   lda a:.loword(j13AdbPresent)
   beq @compat
-  lda #4
+  lda #GLU_SET_MODES
   jsr .loword(sendBounded)
-  lda #1
+  lda #GLU_NO_KEY_POLL          ; the mouse poll stays on
   jsr .loword(sendBounded)
-  lda #$52
+  lda #GLU_SRQ_ON+ADB_KEYBOARD
   jsr .loword(sendBounded)
   bra @ready
 @compat:
-  lda #5
+  lda #GLU_CLEAR_MODES          ; the firmware polls the keyboard (KBD)
   jsr .loword(sendBounded)
-  lda #1
+  lda #GLU_NO_KEY_POLL
   jsr .loword(sendBounded)
 @ready:
-  rep #$20
+  a16
   jsl J13Prime
   jsl J13Menu
   jsr .loword(defaults)
-  sep #$20
+  a8
   lda #1
   sta a:.loword(ready)
-  lda #$50
+  lda #KM_MOUSE_IRQ|KM_DATA_IRQ
   sta f:KMSTATUS
-  rep #$20
-  lda #$ffff
-  sta f:INPUT_P1
-  sep #$20
+  a16
+  lda #INPUT_RELEASED
+  sta f:INPUT_P1                ; and INPUT_SYSTEM
+  a8
   sta f:INPUT_P2
   pld
   plb
   plp
   rtl
 
-; Called by the shared IRQ with its CPU registers saved. DOC transactions
-; are already preserved by music_irq; these entries never touch the GLU.
+; capture (native_input_capture): from the shared interrupt, with the CPU
+; registers saved (music_irq keeps the DOC registers; this code does not
+; touch the sound GLU). It works only when a J13 command runs, the ADB GLU
+; has a byte or the keyboard waits for a talk. JSL; A8.
 capture:
   lda f:ready
   beq @empty
   lda f:j13Owner
   bne @work
   lda f:KMSTATUS
-  and #$a0
+  and #KM_MOUSE_FULL|KM_DATA_FULL
   bne @work
   lda f:keyPending
   bne @work
@@ -101,7 +111,7 @@ capture:
 @work:
   phb
   phd
-  rep #$30
+  ax16
   lda #0
   tcd
   phk
@@ -113,10 +123,13 @@ capture:
   jsl CaptureInput
   pld
   plb
-  sep #$20
+  a8
 capture_done:
   rtl
 
+; doc_tick (native_input_doc_tick): from the DOC timer interrupt: the J13
+; send alarm and, in J13_PLAY, the controller clock and the row read. JSL;
+; A8.
 doc_tick:
   lda f:ready
   beq @empty
@@ -127,7 +140,7 @@ doc_tick:
 @work:
   phb
   phd
-  rep #$30
+  ax16
   lda #0
   tcd
   phk
@@ -137,43 +150,42 @@ doc_tick:
   jsr .loword(sendAlarm)
 :
   lda a:.loword(j13Mode)
-  cmp #2
+  cmp #J13_PLAY
   bne @done
   jsr .loword(readControllerClock)
   jsr .loword(j13Irq)
 @done:
   pld
   plb
-  sep #$20
+  a8
 doc_tick_done:
   rtl
 
+; idle (native_input_idle): the joystick axes in the idle time of an
+; update. JSL.
 idle:
   php
   phb
   phk
   plb
-  sep #$20
+  a8
   jsr .loword(devices_idle)
   plb
   plp
-idle_done:
   rtl
 
-I_GetTime:
-  lda f:$001e96
-  rtl
-
-; One event frontier per game update. The caller can select a historical
-; DOC frontier for catch-up with sample_until; ordinary callers use now.
+; sample (native_input_sample): once each update: set the J13 mode and let
+; the J13 code read, apply the events up to now, read the devices without
+; an interrupt, then write INPUT_P1, INPUT_P2 and INPUT_SYSTEM. A key
+; pressed and released in one update shows once (keyLatch, systemLatch).
+; JSL; returns A8 with B = 0.
 sample:
-  rep #$20
-  lda f:$001e96
-sample_until:
+  a16
+  lda f:GAME_CLOCK
   php
   phb
   phd
-  rep #$30
+  ax16
   pha
   lda #0
   tcd
@@ -185,32 +197,34 @@ sample_until:
   sta a:.loword(inputLimit)
   lda a:.loword(j13Available)
   beq @events
-  ; A menu or attract never prevents the compatibility keyboard opening Esc.
+  ; A menu, a cabinet page and the demo: J13_MENU (all the J13 keys, so
+  ; Esc always works). The play: J13_PLAY when the J13 keyboard is on,
+  ; else J13_ESCAPE.
   lda a:.loword(menuMode)
   bne @menu
-  lda f:$001490               ; GAME_FLOW, initialized by cabinet start
+  lda f:GAME_FLOW
   and #255
-  cmp #3
+  cmp #CAB_PAGE_FIRST
   bcs @menu
-  lda f:$001520               ; CAB_DEMO
+  lda f:CAB_DEMO
   and #255
   bne @menu
   lda a:.loword(j13Enabled)
   beq @raw
-  lda #2
+  lda #J13_PLAY
   bra @mode
 @menu:
-  lda #1
+  lda #J13_MENU
   bra @mode
 @raw:
-  lda #0
+  lda #J13_ESCAPE
 @mode:
   cmp a:.loword(j13Mode)
   beq @same
   jsl setMode
 @same:
   lda a:.loword(j13Mode)
-  cmp #2
+  cmp #J13_PLAY
   bne @poll
   jsl J13Frame
   bra @events
@@ -223,34 +237,35 @@ sample_until:
   jsr .loword(devices_sample)
   lda a:.loword(heldCommand)
   ora a:.loword(keyLatch)
-  eor #$ffff
-  sep #$20
+  eor #INPUT_RELEASED           ; 0 = pressed
+  a8
   sta f:INPUT_P1
   xba
   sta f:INPUT_P2
   lda a:.loword(systemCommand)
   ora a:.loword(systemLatch)
-  eor #255
+  eor #<INPUT_RELEASED
   sta f:INPUT_SYSTEM
-  rep #$20
+  a16
   stz a:.loword(keyLatch)
   stz a:.loword(systemLatch)
   lda #0                      ; native game expects B=0 for byte-to-index moves
   pld
   plb
   plp
-  sep #$20
-sample_done:
+  a8
   rtl
 
-; The second 60 Hz logic tick consumes its own timestamp frontier. Hardware
-; sampling stays in the IRQ; coin/pause edges remain latched for cabinet_frame.
+; consume_until (native_input_consume_until): a game tick between two
+; samples: apply the events up to the time A, then the mouse stick. The
+; devices are read only in sample; the coin and pause presses stay latched
+; (systemLatch) for cabinet_frame. JSL with A16; returns A8 with B = 0.
 .a16
 consume_until:
   php
   phb
   phd
-  rep #$30
+  ax16
   pha
   lda #0
   tcd
@@ -261,28 +276,30 @@ consume_until:
   lda a:.loword(inputHead)
   sta a:.loword(inputLimit)
   jsr .loword(drain)
-  sep #$20
+  a8
   jsr .loword(mouse_directions)
-  rep #$20
+  a16
   lda a:.loword(heldCommand)
   ora a:.loword(keyLatch)
-  eor #$ffff
-  sep #$20
+  eor #INPUT_RELEASED
+  a8
   sta f:INPUT_P1
   xba
   sta f:INPUT_P2
-  rep #$20
+  a16
   stz a:.loword(keyLatch)
   lda #0
   pld
   plb
   plp
-  sep #$20
-consume_done:
+  a8
   rtl
 
-; Each key release removes only its source. Presses shorter than an update
-; remain latched once, while held direction state follows all released aliases.
+; drain: apply the events of inputRing before inputLimit with a time of
+; inputUntil or less. A key byte changes the held bit of its source
+; (keyHeld) and the command bits of its bindings (apply_key_mask): a key
+; stays held until all its sources release it. A mouse move moves the mouse
+; stick, and its Y byte gives the mouse button. JSR; A16.
 drain:
   .a16
   stz a:.loword(drainPress)
@@ -297,25 +314,25 @@ drain:
 :
   lda a:.loword(inputUntil)
   sec
-  sbc a:.loword(inputRing),x
+  sbc a:.loword(inputRing+INPUT_TIME),x
   bpl :+
-  jmp .loword(@done)
+  jmp .loword(@done)            ; a later event: the next tick applies it
 :
-  lda a:.loword(inputRing+2),x
-  cmp #1
+  lda a:.loword(inputRing+INPUT_TYPE),x
+  cmp #INPUT_MOUSE
   bne :+
   jmp .loword(@mouse)
 :
   lsr
-  inc
+  inc                           ; INPUT_KEY: HELD_ADB; INPUT_J13: HELD_J13
   sta a:.loword(keySource)
-  lda a:.loword(inputRing+4),x
+  lda a:.loword(inputRing+INPUT_VALUE),x
   sta a:.loword(keyRaw)
-  and #127
+  and #KEY_CODES-1
   tay
-  sep #$20
+  a8
   lda a:.loword(keyRaw)
-  bmi @release
+  bmi @release                  ; bit 7: a release
   lda a:.loword(keyHeld),y
   and a:.loword(keySource)
   bne @unchanged
@@ -323,21 +340,20 @@ drain:
   sta a:.loword(maskPressed)
   jsr .loword(drain_transition)
   bcc :+
-  rep #$20
+  a16
   jmp .loword(@done)
 :
   .a8
   lda a:.loword(keyHeld),y
   ora a:.loword(keySource)
   sta a:.loword(keyHeld),y
-  lda #1
-  sta a:.loword(maskPressed)
-  rep #$20
-  lda a:.loword(keyRaw)
+  a16
+  lda a:.loword(keyRaw)         ; the last key for the menu
   sta a:.loword(keyAction)
   lda a:.loword(keySource)
   sta a:.loword(actionSource)
   inc a:.loword(inputSerial)
+  a8
   bra @apply
 @release:
   .a8
@@ -347,43 +363,30 @@ drain:
   stz a:.loword(maskPressed)
   jsr .loword(drain_transition)
   bcc :+
-  rep #$20
+  a16
   jmp .loword(@done)
 :
   .a8
   lda a:.loword(keySource)
-  eor #255
+  eor #$ff
   and a:.loword(keyHeld),y
   sta a:.loword(keyHeld),y
-  stz a:.loword(maskPressed)
-  rep #$20
 @apply:
-  lda a:.loword(keySource)
-  dec
-  xba
-  lsr
-  sta a:.loword(maskIndex)
-  lda a:.loword(keyRaw)
-  and #127
-  ora a:.loword(maskIndex)
-  asl
-  asl
-  tax
-  sep #$20
-  lda a:.loword(maskPressed)
+  .a8
+  lda a:.loword(maskPressed)    ; X: the mask from drain_transition
   jsr .loword(apply_key_mask)
 @unchanged:
-  rep #$20
+  a16
   bra @next
 @mouse:
-  sep #$20
-  lda a:.loword(inputRing+4),x
+  a8
+  lda a:.loword(inputRing+INPUT_VALUE),x
   jsr .loword(mouse_signed)
   clc
   adc a:.loword(mouseX)
   jsr .loword(mouse_clamp)
   sta a:.loword(mouseX)
-  lda a:.loword(inputRing+6),x
+  lda a:.loword(inputRing+INPUT_AUX),x
   pha
   jsr .loword(mouse_signed)
   clc
@@ -391,44 +394,47 @@ drain:
   jsr .loword(mouse_clamp)
   sta a:.loword(mouseY)
   pla
-  eor #128
-  and #128
+  eor #MOUSE_BUTTON_UP
+  and #MOUSE_BUTTON_UP
   beq @mouse_up
   lda #1
 @mouse_up:
-  ldx #36
+  ldx #DEV_MOUSE+ACT_FIRE
   jsr .loword(set_device)
-  rep #$20
+  a16
 @next:
   lda a:.loword(inputTail)
   clc
-  adc #8
-  and #1023
+  adc #INPUT_EVENT_SIZE
+  and #INPUT_RING_SIZE-1
   sta a:.loword(inputTail)
   jmp .loword(@loop)
 @done:
   rts
 
-; Preserve opposing edges of the same action for separate logic updates.
-; Leave the blocked event in the ring; unrelated sources retain their order.
+; drain_transition: X = the mask of the key (KEYBOARD2 + the code for a
+; J13 key, times MASK_SIZE). Carry 1 when the edge must wait for the next
+; tick: a press of a command that this drain released, or a release of one
+; that it pressed. The drain stops there, so each tick sees each edge.
+; Else the commands go into drainPress or drainRelease. JSR; A8.
 .a8
 drain_transition:
-  rep #$20
+  a16
   lda a:.loword(keySource)
   dec
   xba
-  lsr
+  lsr                           ; HELD_J13: KEYBOARD2
   sta a:.loword(maskIndex)
   lda a:.loword(keyRaw)
-  and #127
+  and #KEY_CODES-1
   ora a:.loword(maskIndex)
   asl
-  asl
+  asl                           ; times MASK_SIZE
   tax
-  sep #$20
+  a8
   lda a:.loword(maskPressed)
   beq @up
-  rep #$20
+  a16
   lda a:.loword(commandMasks),x
   and a:.loword(drainRelease)
   bne @blocked
@@ -443,7 +449,7 @@ drain_transition:
   sta a:.loword(drainPress+2)
   bra @ok
 @up:
-  rep #$20
+  a16
   lda a:.loword(commandMasks),x
   and a:.loword(drainPress)
   bne @blocked
@@ -457,36 +463,41 @@ drain_transition:
   ora a:.loword(drainRelease+2)
   sta a:.loword(drainRelease+2)
 @ok:
-  sep #$20
+  a8
   clc
   rts
 @blocked:
-  sep #$20
+  a8
   sec
   rts
+; mouse_signed: A = the 7-bit signed move of the ADB mouse byte A. JSR; A8.
 .a8
 mouse_signed:
-  and #127
-  bit #64
+  and #MOUSE_MOVE_BITS
+  bit #MOUSE_MOVE_SIGN
   beq :+
-  ora #128
+  ora #<~MOUSE_MOVE_BITS
 :
   rts
+; mouse_clamp: A (signed) limited to -MOUSE_RANGE..MOUSE_RANGE. JSR; A8.
 mouse_clamp:
   bpl @positive
-  cmp #$e0
+  cmp #<-MOUSE_RANGE
   bcs @done
-  lda #$e0
+  lda #<-MOUSE_RANGE
   rts
 @positive:
-  cmp #33
+  cmp #MOUSE_RANGE+1
   bcc @done
-  lda #32
+  lda #MOUSE_RANGE
 @done:
   rts
+.assert HELD_J13 = 2 .and KEYBOARD2 = 128 .and MASK_SIZE = 4, error
+.assert SET_BINDINGS+BINDINGS_BYTES = SET_DISPLAY_MARK, error
+; center (native_input_center): the mouse stick goes back to the centre. JSL.
 center:
   php
-  rep #$20
+  a16
   lda #0
   sta f:mouseX
   sta f:mouseY
@@ -501,42 +512,40 @@ center:
 .include "input_audio.s"
 .include "input_menu.s"
 .include "input_disk.s"
-.include "input_menu_data.inc"
+.include "menu_text.inc"
 .a16
-ready: .byte 0
-inputHead: .word 0
-inputTail: .word 0
-inputLimit: .word 0
-inputUntil: .word 0
-inputDropped: .word 0
-inputSerial: .word 0
-inputRing: .res 1024
-irqType: .word 0
+; The input state.
+ready: .byte 0                  ; 1 after start: the interrupts may capture
+inputHead: .word 0              ; inputRing: the offset of the next new event
+inputTail: .word 0              ; inputRing: the offset of the next event to apply
+inputLimit: .word 0             ; drain: the head when the drain starts
+inputUntil: .word 0             ; drain: the last time to apply
+inputSerial: .word 0            ; the count of presses (the menu sees a new key)
+inputRing: .res INPUT_RING_SIZE
+irqType: .word 0                ; the event that queueInput writes
 irqValue: .word 0
 irqAux: .word 0
-keyTalk: .word 0
-keyPending: .word 0
-keyReply: .word 0
-keyHeaderByte: .word 0
-keyRaw: .word 0
-keySource: .word 1
-keyAction: .word 255
-heldCommand: .word 0
-systemCommand: .word 0
-keyLatch: .word 0
-systemLatch: .word 0
-drainPress: .res 4
-drainRelease: .res 4
-maskIndex: .word 0
-mouseTalkCount: .word 0
-mouseX: .word 0
+keyTalk: .word 0                ; 1: a talk to the keyboard runs
+keyPending: .word 0             ; 1: the keyboard asks for a talk
+keyReply: .word 0               ; the key bytes of the talk still to come
+keyHeaderByte: .word 0          ; the last ADB status byte
+keyRaw: .word 0                 ; drain: the key byte
+keySource: .word HELD_ADB       ; drain: the keyHeld bit of the key's source
+keyAction: .word NONE           ; the last key or device action (the menu)
+heldCommand: .word 0            ; the held command bits: P1 low, P2 high
+systemCommand: .word 0          ; the held system bits
+keyLatch: .word 0               ; the command bits pressed since the last write
+systemLatch: .word 0            ; the system bits pressed since the last sample
+drainPress: .res MASK_SIZE      ; drain: the commands that it pressed
+drainRelease: .res MASK_SIZE    ; drain: the commands that it released
+maskIndex: .word 0              ; drain_transition: KEYBOARD2 or 0
+mouseTalkCount: .word 0         ; mouse moves since the last keyboard talk
+mouseX: .word 0                 ; the mouse stick: -MOUSE_RANGE..MOUSE_RANGE
 mouseY: .word 0
-menuMode: .word 0
-uiGameOn: .word 0
-musicActive: .word 1
-keyHeld: .res 128
-actionSource: .word 0
-boundKeys: .res BIND_COUNT*2
+menuMode: .word 0               ; 1: the menu shows
+keyHeld: .res KEY_CODES         ; each key: the HELD_* bits of its sources
+actionSource: .word 0           ; the source of keyAction (the menu)
+boundKeys: .res BIND_COUNT*2    ; the bindings, from compile_bindings
 boundBits: .res BIND_COUNT*2
 boundSources: .res BIND_COUNT*2
 boundSystem: .res BIND_COUNT*2
@@ -549,14 +558,12 @@ native_input_center = input_native::center
 native_input_keyHeld = input_native::keyHeld
 native_input_doc_tick = input_native::doc_tick
 native_input_capture = input_native::capture
-native_input_sample_until = input_native::sample_until
 native_input_consume_until = input_native::consume_until
 
 native_input_menu = input_native::menu_check
-native_input_settings = input_native::settings
 
 native_settings_fw_keep = input_native::settings_fw_keep
 native_settings_fw_restore = input_native::settings_fw_restore
 native_settings_zero = input_native::firmwareZero
 
-native_input_demo_sound = input_native::mix_demo
+native_input_dips = input_native::dip_apply
