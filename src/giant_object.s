@@ -81,20 +81,14 @@ giant_object_script:
   and #SCRIPT_BANK_ROWS-1
   ora LARGE_BANK
 @page:
-  sta GIANT_WORD                ; the row; X = row * 3
-  asl
-  clc
-  adc GIANT_WORD
+  asl                           ; X = the row * 2
   tax
   lda LARGE_SOURCE
   and #255
   clc
   adc f:enemy_script_pages,x
-  sta f:large_object_read+1     ; the host address of the step
+  sta f:large_object_read+1     ; the low 16 bits of the step address
   a8
-  lda f:enemy_script_pages+2,x
-  adc #0
-  sta f:large_object_read+3
   ldx #STEP_DURATION
   jsr .loword(large_object_read)
   bne :+

@@ -103,17 +103,21 @@ def prepare_data(out, rows, roots=()):
             slot = (SCRIPT_FIXED_ROW + page) if bank == 8 else bank * SCRIPT_BANK_ROWS + page
             pages[slot] = (offsets[data] - first, data)
         block = host.blob_at_bank(bytes(stream), "enemy_script_data")
-        table = HostData().faraddr(*(block + entry[0] if entry else 0 for entry in pages))
+        # Every step is inside the block, so its bank is always the bank of
+        # the block and a row keeps only the low 16 bits of its page pointer.
+        # A pointer biased below the block wraps; the reader's 16-bit add of
+        # the step offset brings it back into the block.
+        table = HostData().word(
+            *(f".loword({(block + entry[0]).label})" if entry else 0 for entry in pages)
+        )
         host.blob_at(table, "enemy_script_pages")
-        # The direct pool reader uses the bank of the block, including a page
-        # pointer biased into the preceding bank. Other readers consume the
-        # 24-bit table.
         (out / "enemy_script_data.inc").write_text(
             "ENEMY_SCRIPT_FAST_BANK = ^enemy_script_data\n"
+            "ENEMY_SCRIPT_FAST_BASE = enemy_script_data & $FF0000\n"
             f".assert SCRIPT_BANK_ROWS = {SCRIPT_BANK_ROWS} .and SCRIPT_FIXED_ROW = {SCRIPT_FIXED_ROW}, error\n"
         )
         meta.update(
-            table_storage_bytes=3 * len(pages) + len(stream),
+            table_storage_bytes=2 * len(pages) + len(stream),
             bank_padding_bytes=0,
             page_overlap_bytes=overlap_bytes,
             resident_pages=len(offsets),

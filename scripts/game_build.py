@@ -11,7 +11,9 @@ CHAR_BANK = 0x3C
 
 
 
-def build():
+def build(sound_ready):
+    """SOUND_READY() returns when the sound stage (scripts/sound_assets.py)
+    has made its files."""
     out = ROOT / "build/game"
     out.mkdir(parents=True, exist_ok=True)
     a = Arcade()
@@ -345,6 +347,7 @@ def build():
     prepare_score(out)
     wave_scripts(host, scene.sprite_cache.prop_codes, script_pieces)
     ai_install(host)
+    sound_ready()
     from audio_song_native import prepare as prepare_audio
 
     prepare_audio(out, host)

@@ -6,9 +6,11 @@ recorded game states. Runtime selects a spatial cache and expands packets.
 
 from iigs_payload import HostData, content_key
 from asset_source import PAGE, WINDOW_E000, common_window, vga_window_cbr
+import os
 import struct
-from collections import defaultdict
-from startup_pack import pack
+from collections import defaultdict, namedtuple
+from concurrent.futures import ProcessPoolExecutor
+from startup_pack import pack, pack_prefix
 from stage_controls import event_tables, CONTROLS, FLOW_CONTROLS
 
 # Whole map sections stay resident through their busy waves. One upcoming
@@ -211,6 +213,12 @@ def card_job(label, data, offset=0, literal=False):
     return HostData().sram_job(label, data, offset, literal)
 
 
+# The arguments of plane_jobs for one metadata upload. The section job lists
+# (combined_world.jobs, ship_rows.jobs) give these, so that _package can pack
+# all of them at once on every processor core.
+PlaneUpload = namedtuple("PlaneUpload", "base offset data plane_size")
+
+
 def plane_jobs(base, offset, data, plane_size):
     """Quiet-time metadata upload to its final packed VRAM plane."""
     done = 0
@@ -218,10 +226,7 @@ def plane_jobs(base, offset, data, plane_size):
         plane, off = divmod(offset + done, plane_size)
         ptr = base + off
         n = min(len(data) - done, plane_size - off, PAGE - (ptr & (PAGE - 1)))
-        encoded = pack(data[done : done + n])
-        while len(encoded) > 980:
-            n = (n + 1) // 2
-            encoded = pack(data[done : done + n])
+        n, encoded = pack_prefix(data[done : done + n], 980)
         yield (
             struct.pack(
                 "<BBBBHHH",
@@ -287,48 +292,57 @@ def install(out, host, scene):
     install_cabinet(out, host, scene)
 
 
+def _plane_job_list(upload):
+    """The jobs of one PlaneUpload (in a worker process)."""
+    return list(plane_jobs(*upload))
+
+
 def _package(out, host, scene):
     """The compressed world packets, their lists and the world directory."""
     shared = {}
     lists = {}
     plan = {}
-    for c in sorted({c for c, side in scene.world_columns}):
-        for side in (scene.world_region_side[c],):
-            commands, _, tiles = scene.world_prepared[c]
-            entries = []
-            base, payload, descriptors = scene.world_columns[c, side]
-            from combined_world import jobs
+    from combined_world import jobs
+    from ship_rows import jobs as ship_jobs
 
-            metadata = list(jobs(scene, c))
-            from ship_rows import jobs as ship_jobs
+    sections = [(c, scene.world_region_side[c]) for c in sorted({c for c, side in scene.world_columns})]
+    metadata = {(c, side): [*jobs(scene, c), *ship_jobs(scene, c)] for c, side in sections}
+    uploads = list(
+        dict.fromkeys(item for items in metadata.values() for item in items if isinstance(item, PlaneUpload))
+    )
+    with ProcessPoolExecutor(os.cpu_count()) as workers:
+        upload_jobs = dict(zip(uploads, workers.map(_plane_job_list, uploads, chunksize=4)))
+    from world_rows import tile_packets
 
-            metadata.extend(ship_jobs(scene, c))
-            batch = bytearray()
-            for job in metadata:
+    for c, side in sections:
+        tiles = scene.world_prepared[c][2]
+        entries = []
+        batch = bytearray()
+        for item in metadata[c, side]:
+            for job in upload_jobs[item] if isinstance(item, PlaneUpload) else (item,):
                 if len(batch) + len(job) > 1024:
                     entries.append((65535, 0, False, bytes(batch) + b"\0"))
                     batch.clear()
                 batch.extend(job)
-            if batch:
-                entries.append((65535, 0, False, bytes(batch) + b"\0"))
-            from world_rows import tile_packets
-
-            for tile in tiles:
-                if tile in scene.world_intro_tiles:
-                    continue
-                jobs = tile_packets(scene, tile)
-                entries.append((65535, 0, False, b"".join(jobs) + b"\0"))
-            plan[c, side] = entries
+        if batch:
+            entries.append((65535, 0, False, bytes(batch) + b"\0"))
+        for tile in tiles:
+            if tile in scene.world_intro_tiles:
+                continue
+            entries.append((65535, 0, False, b"".join(tile_packets(scene, tile)) + b"\0"))
+        plan[c, side] = entries
     import world_packet_lz
     from world_dictionary import make
 
-    world_packet_lz.set_dictionary(
-        *make(
-            [job.ljust((len(job) + 1) & ~1, b"\0") for entries in plan.values() for *_, job in entries]
-        )
+    # A packet that several sections share is compressed once.
+    packets = list(
+        dict.fromkeys(job.ljust((len(job) + 1) & ~1, b"\0") for entries in plan.values() for *_, job in entries)
     )
+    world_packet_lz.set_dictionary(*make(packets))
     from world_packet_lz import D, SHORT, decompress
-    from world_packet_opt import compress
+    from world_packet_opt import compress_all
+
+    packed_jobs = dict(zip(packets, compress_all(packets)))
 
     host.blob_at(D, "WORLD_LZ_DICT")
     host.blob_at(SHORT, "WORLD_LZ_SHORT")
@@ -346,7 +360,7 @@ def _package(out, host, scene):
             assert len(job) <= 1026, ("world packet exceeds receive reservation", len(job))
             wire_length = len(job)
             stored = job
-            packed = compress(job)
+            packed = packed_jobs[job]
             if packed is not None:
                 assert decompress(packed) == job
                 stored = packed

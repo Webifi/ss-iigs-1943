@@ -95,9 +95,10 @@ STEP_TAIL_SIZE      = 3         ; a tail or jump step: the byte, then a word
 STEP_TAIL           = $00
 STEP_JUMP           = $FF
 STEP_END            = $FE
-; enemy_script_pages (scripts/enemy_script.py): one row for each 256-byte
-; motion page; bank n has the rows from n*SCRIPT_BANK_ROWS, the fixed ROM
-; the rows from SCRIPT_FIXED_ROW.
+; enemy_script_pages (scripts/enemy_script.py): one 16-bit row for each
+; 256-byte motion page (its address in bank ENEMY_SCRIPT_FAST_BANK); bank n
+; has the rows from n*SCRIPT_BANK_ROWS, the fixed ROM the rows from
+; SCRIPT_FIXED_ROW.
 SCRIPT_BANK_ROWS    = 64
 SCRIPT_FIXED_ROW    = 8*SCRIPT_BANK_ROWS
 ; A large object: four object-sized records, the object fields in the first.

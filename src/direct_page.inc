@@ -51,7 +51,6 @@ CONTACT_ADJUST      = $de       ; large_shot_test: added to the shot coordinates
 SCRIPT_STEP         = $d2       ; enemy_script: the address of the next motion step
 SCRIPT_BANK_ROW     = $d4       ; enemy_script: the first enemy_script_pages row of the bank
 SCRIPT_ADDRESS      = $d8       ; enemy_script: the host address of the step
-SCRIPT_ROW          = $dc       ; enemy_script: the enemy_script_pages row of the step
 SCRIPT_ATTR         = $dc       ; enemy_script: SPR_ALONG_HIGH of the record, kept
 TURN_ODDS           = $d6       ; game_turn_random: the odds out of 16
 CHILD_SIDE          = $d6       ; game_carrier_child_spawn: 1 the right child

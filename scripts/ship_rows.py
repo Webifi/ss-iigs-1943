@@ -105,7 +105,7 @@ def geometry(row, placement, phase):
 
 
 def prepare(scene, pool, cols):
-    from combined_world import Arena, BLOCK
+    from combined_world import BLOCK, SharedArena
     from world_stream import INTRO, replace
 
     world = scene.game_world
@@ -118,7 +118,7 @@ def prepare(scene, pool, cols):
     # Light-water ships move against the sea in every picture, not only in
     # the camera pan ranges, and a ship row without prepared geometry takes
     # the slow per-plane path (combined_ship_commands). So each side-1
-    # section also tries all its other ship columns (extra). Only side-1
+    # section also prepares all its other ship columns (extra). Only side-1
     # sections hold geometry: a column that a side-0 section or the intro
     # also uses stays out.
     side0 = set()
@@ -142,9 +142,12 @@ def prepare(scene, pool, cols):
     prepare_alignments(scene, pool)
     # Geometry exists only for side-1 world sections. Their prepared row
     # metadata fits in the first three quarters of the cabinet surface, so
-    # reserve its fourth quarter for the matching region's geometry.
+    # the fourth quarter (16 KB) holds the geometry of the loaded section.
+    # With all ship columns prepared, a section needs up to about 22 KB, so
+    # an own 8 KB area (2 KB in each plane) from free VRAM holds the rest.
     scene.ship_geometry_surface = pool.runtime(4 * BLOCK, 4096)
-    addresses = [scene.ship_geometry_surface + 3 * 4096]
+    addresses = [scene.ship_geometry_surface + 3 * 4096, pool.runtime(4 * 2048, 2048)]
+    extents = [(0, p, 0, 4096) for p in range(4)] + [(1, p, 0, 2048) for p in range(4)]
     # Seed placement lists are permanent in the existing stage-water tail.
     seed_data = bytearray(8704)
     seed_used = [0] * 4
@@ -176,7 +179,7 @@ def prepare(scene, pool, cols):
     def region_geometry(region_columns):
         """The geometry block (arena) and the row records of the ship
         columns REGION_COLUMNS of one section."""
-        arena = Arena(addresses)
+        arena = SharedArena(addresses, extents)
         records = {}
         for column in sorted(region_columns):
             if column in column_programs:
@@ -231,17 +234,7 @@ def prepare(scene, pool, cols):
     layouts = {}
     all_records = {}
     for region in sorted(cols):
-        # Arena.put stops with "prepared section capacity" when the 16 KB
-        # block is full. A section that cannot hold its extra columns keeps
-        # only its pan-range and boss columns (base); any other failure stops
-        # the build.
-        base = columns.intersection(cols[region])
-        try:
-            arena, records = region_geometry(base | extra.intersection(cols[region]))
-        except AssertionError as error:
-            if not (error.args and error.args[0][0] == "prepared section capacity"):
-                raise
-            arena, records = region_geometry(base)
+        arena, records = region_geometry((columns | extra).intersection(cols[region]))
         arenas[region] = arena
         layouts[region] = records
         all_records.update(records)
@@ -254,8 +247,13 @@ def prepare(scene, pool, cols):
         )
     initial = scene.world_routes[0][1]
     initial_arena = arenas[initial]
-    for address, data in zip(addresses, initial_arena.blocks):
-        replace(pool, address * 4, data)
+    # The geometry of the first section is in the startup VRAM image. The
+    # own area is smaller than a block, so it gets only its used ranges.
+    replace(pool, addresses[0] * 4, initial_arena.blocks[0])
+    for block, plane, start, end in initial_arena.ranges():
+        if block:
+            raw = initial_arena.blocks[block][plane + start * 4 : plane + end * 4 : 4]
+            pool.replace_plane(addresses[block] + start, plane, bytes(raw))
     scene.ship_row_layouts_by_region = layouts
     scene.ship_column_programs = column_programs
     scene.ship_row_geometry_bytes = max(a.used for a in arenas.values())
@@ -267,17 +265,19 @@ def prepare(scene, pool, cols):
         "max region geometry bytes",
         scene.ship_row_geometry_bytes,
         "VRAM shared with cabinet surface",
-        len(addresses) * BLOCK,
+        BLOCK,
+        "own",
+        4 * 2048,
         flush=True,
     )
 
 
 def jobs(scene, region):
-    from world_stream import plane_jobs
+    from world_stream import PlaneUpload
 
     arena = scene.ship_geometry_arenas[region]
     for block, plane, start, end in arena.ranges():
         raw = bytes(arena.blocks[block][plane::4])
-        yield from plane_jobs(arena.addresses[block], plane * 4096 + start, raw[start:end], 4096)
+        yield PlaneUpload(arena.addresses[block], plane * 4096 + start, raw[start:end], 4096)
 
 

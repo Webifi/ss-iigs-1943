@@ -151,7 +151,7 @@ def prepare(scene, pool):
 
 
 def install(out, host, scene):
-    from startup_pack import pack
+    from startup_pack import pack, pack_prefix
 
     def jobs(address, pixels, kind):
         # Cabinet transitions expand directly into one selected VRAM plane.
@@ -193,11 +193,7 @@ def install(out, host, scene):
                             )
                             start += len(part)
                             continue
-                    n = len(remaining) - start
-                    encoded = pack(remaining[start : start + n])
-                    while len(encoded) > 980:
-                        n = (n + 1) // 2
-                        encoded = pack(remaining[start : start + n])
+                    n, encoded = pack_prefix(remaining[start:], 980)
                     p = ptr + start
                     yield (
                         struct.pack(

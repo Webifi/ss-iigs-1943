@@ -7,6 +7,9 @@ the packet. Dynamic programming picks the cheapest token sequence instead of
 the greedy longest match."""
 
 import collections
+import os
+from concurrent.futures import ProcessPoolExecutor
+
 import world_packet_lz as lz
 
 MAXLONG = 66
@@ -14,48 +17,84 @@ MAXLONG = 66
 
 def compress(data, dict_candidates=512):
     n = len(data)
-    INF = 1 << 30
-    cost = [INF] * (n + 1)
-    cost[n] = 0
+    D = lz.D
+    size = len(D)
+    short_index = lz.short_index
+    cost = [0] * (n + 1)
     choice = [None] * (n + 1)
-    # matches[i]: list of (length, ref, short_ok)
     local = collections.defaultdict(list)
     for i in range(n - 2):
         local[data[i : i + 3]].append(i)
+    # The best literal run at i ends at the j in i+1..i+128 with the smallest
+    # cost[j] + j (the first such j on equal costs). The window keeps those
+    # values in increasing order.
+    window = collections.deque()
     for i in range(n - 1, -1, -1):
-        best = INF
-        pick = None
-        # literal runs
-        for k in range(1, min(128, n - i) + 1):
-            c = 1 + k + cost[i + k]
-            if c < best:
-                best = c
-                pick = ("lit", k)
+        value = cost[i + 1] + i + 1
+        while window and window[-1][0] >= value:
+            window.pop()
+        window.append((value, i + 1))
+        if window[0][1] > i + 128:
+            window.popleft()
+        best = 1 - i + window[0][0]
+        pick = ("lit", window[0][1] - i)
         if i + 3 <= n:
+            # The matches are tried in a fixed order and a match is taken
+            # only when it costs less, so equal costs keep the first choice.
+            # LOW3 and LOW2 are the lowest costs that any long or short
+            # match at i can have: when the best choice is not above them,
+            # no further match can be taken.
             key = data[i : i + 3]
+            longest = min(MAXLONG, n - i)
+            low3 = 3 + min(cost[i + 3 : i + longest + 1])
+            low2 = 2 + min(cost[i + 4 : i + min(11, longest) + 1]) if longest >= 4 else low3
+            low = min(low2, low3)
+            three = 3 + cost[i + 3]  # any 3-byte match
+            next_byte = data[i + 3] if longest > 3 else -1
             for p in lz.index.get(key, ())[-dict_candidates:]:
-                m = 3
-                limit = min(MAXLONG, n - i, len(lz.D) - p)
-                while m < limit and lz.D[p + m] == data[i + m]:
-                    m += 1
-                short = p in lz.short_index
-                for L in range(3, m + 1):
-                    c = (2 if short and 4 <= L <= 11 else 3) + cost[i + L]
-                    if c < best:
-                        best = c
-                        pick = ("dict", L, p)
-            for p in local.get(key, ()):
-                if p >= i:
+                if best <= low:
                     break
-                m = 3
-                limit = min(MAXLONG, n - i)
-                while m < limit and data[p + m] == data[i + m]:
+                short = p in short_index
+                if not short and low3 >= best:
+                    continue
+                limit = longest if p + longest <= size else size - p
+                if limit == 3 or D[p + 3] != next_byte:
+                    if three < best:
+                        best = three
+                        pick = ("dict", 3, p)
+                    continue
+                m = 4
+                while m < limit and D[p + m] == data[i + m]:
                     m += 1
-                for L in range(3, m + 1):
-                    c = 3 + cost[i + L]
-                    if c < best:
-                        best = c
-                        pick = ("local", L, i - p)
+                if short:
+                    parts = ((3, 3, 3), (2, 4, m if m < 11 else 11), (3, 12, m))
+                else:
+                    parts = ((3, 3, m),)
+                for add, first, last in parts:  # (token bytes, lengths)
+                    if first > last:
+                        continue
+                    span = cost[i + first : i + last + 1]
+                    low_span = min(span)
+                    if add + low_span < best:
+                        best = add + low_span
+                        pick = ("dict", first + span.index(low_span), p)
+            if low3 < best:
+                for p in local.get(key, ()):
+                    if p >= i or best <= low3:
+                        break
+                    if longest == 3 or data[p + 3] != next_byte:
+                        if three < best:
+                            best = three
+                            pick = ("local", 3, i - p)
+                        continue
+                    m = 4
+                    while m < longest and data[p + m] == data[i + m]:
+                        m += 1
+                    span = cost[i + 3 : i + m + 1]
+                    low_span = min(span)
+                    if 3 + low_span < best:
+                        best = 3 + low_span
+                        pick = ("local", 3 + span.index(low_span), i - p)
         cost[i] = best
         choice[i] = pick
     out = bytearray()
@@ -71,8 +110,8 @@ def compress(data, dict_candidates=512):
             L = pick[1]
             if pick[0] == "dict":
                 p = pick[2]
-                if p in lz.short_index and 4 <= L <= 11:
-                    idx = lz.short_index[p]
+                if p in short_index and 4 <= L <= 11:
+                    idx = short_index[p]
                     out += bytes((0x80 | ((L - 4) << 3) | (idx >> 8), idx & 255))
                 else:
                     out += bytes((0xC0 | (L - 3), p & 255, p >> 8))
@@ -82,3 +121,12 @@ def compress(data, dict_candidates=512):
             i += L
     assert lz.decompress(bytes(out)) == data
     return bytes(out)
+
+
+def compress_all(packets):
+    """compress() of each packet, on all processor cores. Each worker uses
+    the dictionary that world_packet_lz.set_dictionary set here."""
+    with ProcessPoolExecutor(
+        os.cpu_count(), initializer=lz.set_dictionary, initargs=(lz.D, lz.short_offsets)
+    ) as workers:
+        return list(workers.map(compress, packets, chunksize=16))

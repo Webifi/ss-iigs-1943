@@ -72,9 +72,9 @@ large_turret_stationary:
 
 ; large_object_script: when the step time is over, read the next motion step
 ; (STEP_* fields) from the motion page of OBJ_MOTION+STEP_SIZE. The build
-; keeps the arcade motion data in enemy_script_pages: one 3-byte entry for
-; each 256-byte page, the fixed pages at SCRIPT_FIXED_ROW, a bank's pages
-; from bank*SCRIPT_BANK_ROWS.
+; keeps the arcade motion data in enemy_script_pages: one 16-bit entry for
+; each 256-byte page (its address in bank ENEMY_SCRIPT_FAST_BANK), the fixed
+; pages at SCRIPT_FIXED_ROW, a bank's pages from bank*SCRIPT_BANK_ROWS.
 large_object_script:
   lda OBJ_DURATION
   beq @advance
@@ -103,20 +103,14 @@ large_object_record:
   and #SCRIPT_BANK_ROWS-1
   ora LARGE_BANK
 @page:
-  sta LARGE_WORD                ; the row; X = row * 3
-  asl
-  clc
-  adc LARGE_WORD
+  asl                           ; X = the row * 2
   tax
   lda LARGE_SOURCE
   and #255
   clc
   adc f:enemy_script_pages,x
-  sta f:large_object_read+1     ; the host address of the step
+  sta f:large_object_read+1     ; the low 16 bits of the step address
   a8
-  lda f:enemy_script_pages+2,x
-  adc #0
-  sta f:large_object_read+3
   ldx #STEP_DURATION
   jsr .loword(large_object_read)
   bne :+
@@ -193,7 +187,7 @@ large_object_callback:
   rts
 ; large_object_read: A = the byte (or word) X bytes into the step.
 large_object_read:
-  lda f:0,x                     ; patched: the host address of the step
+  lda f:ENEMY_SCRIPT_FAST_BASE,x  ; patched: the low 16 bits of the step address
   rts
 
 ; large_object_motion: move by the 8.8 moves (or by the camera move, with

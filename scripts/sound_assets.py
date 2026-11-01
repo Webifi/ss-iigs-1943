@@ -14,6 +14,7 @@ source changes. build/sound/stage.json holds the key of the last run.
 
 import hashlib
 import json
+import multiprocessing
 import subprocess
 
 from roms import ROOT, load
@@ -54,6 +55,14 @@ def key(rom):
     return digest.hexdigest()
 
 
+def effects(rom):
+    """The effect log and the SSG effect renders."""
+    import sound_logs, ssg_models
+
+    sound_logs.write(EFFECT_LOG, sound_logs.run(rom, sound_logs.effect_schedule()))
+    ssg_models.capture_all()
+
+
 def build():
     """Make build/sound/bank, or keep it when its inputs did not change."""
     import sound_logs
@@ -64,15 +73,20 @@ def build():
     if stamp.exists() and json.loads(stamp.read_text())["key"] == want:
         return
     stamp.unlink(missing_ok=True)
+    # The effects and the songs use different files, so the effects run in
+    # their own process at the same time.
+    effect_process = multiprocessing.get_context("spawn").Process(target=effects, args=(rom,), name="sound effects")
+    effect_process.start()
     # The Makefile builds the renderer (build/sound/ym_stems) before the asset build.
     sound_logs.write(SCORE_LOG, sound_logs.run(rom, sound_logs.song_schedule(rom)))
-    sound_logs.write(EFFECT_LOG, sound_logs.run(rom, sound_logs.effect_schedule()))
 
-    import music_score, instrument_library, instrument_isolated, ssg_models, audio_snapshot_bank
+    import music_score, instrument_library, instrument_isolated, audio_snapshot_bank
 
     score = music_score.compile_scores(rom, SCORE)
     instrument_isolated.capture(instrument_library.select(score))
-    ssg_models.capture_all()
+    effect_process.join()
+    if effect_process.exitcode:
+        raise SystemExit(f"The sound effects failed (exit code {effect_process.exitcode}).")
     audio_snapshot_bank.build()
     stamp.write_text(json.dumps(dict(key=want, bank=str(BANK.relative_to(ROOT))), indent=2) + "\n")
 

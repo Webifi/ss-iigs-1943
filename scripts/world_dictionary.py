@@ -5,11 +5,15 @@ memory; every compressed world packet can copy byte runs from the dictionary
 (world_packet_lz.py describes the token format). The dictionary is made from
 the build's own packets:
 
-1. Count, for each 6-byte sequence, how many packets contain it.
-2. Cut every packet into 48-byte segments, every 8 bytes.
-3. Repeatedly take the segment whose not yet covered 6-byte sequences are in
+1. Count, for each 5-byte sequence, how many packets contain it.
+2. Cut every packet into 48-byte segments, every 4 bytes.
+3. Repeatedly take the segment whose not yet covered 5-byte sequences are in
    the most packets, until the dictionary is full. Its sequences then count
    as covered.
+
+These three numbers (KEY, SEGMENT, STEP) gave the smallest host data of the
+settings tried (2026-11-01: 5, 6 and 7-byte keys; 32 to 64-byte segments;
+steps of 4 and 8).
 
 The offset table holds the 2,048 dictionary offsets used most often by 4- to
 11-byte copies; the compressor can then code those copies in 2 bytes, not 3.
@@ -20,7 +24,7 @@ import heapq
 
 SIZE = 32768
 SHORTS = 2048
-KEY, SEGMENT, STEP = 6, 48, 8
+KEY, SEGMENT, STEP = 5, 48, 4
 
 
 def make(packets):
@@ -57,12 +61,11 @@ def make(packets):
 def short_offsets(packets, dictionary):
     """The 2,048 dictionary offsets most used by 4..11-byte copies."""
     import world_packet_lz
-    from world_packet_opt import compress
+    from world_packet_opt import compress_all
 
     world_packet_lz.set_dictionary(dictionary, tuple(range(0, SHORTS * 16, 16)))
     used = collections.Counter()
-    for p in packets:
-        packed = compress(p)
+    for packed in compress_all(packets):
         i = 0
         while packed and i < len(packed):
             op = packed[i]

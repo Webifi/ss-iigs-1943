@@ -41,10 +41,7 @@ enemy_script:
   and #SCRIPT_BANK_ROWS-1
   ora a:SCRIPT_BANK_ROW
 @page:
-  sta a:SCRIPT_ROW              ; the row; X = row * 3
-  asl
-  clc
-  adc a:SCRIPT_ROW
+  asl                           ; X = the row * 2
   tax
   lda a:SCRIPT_STEP
   and #255

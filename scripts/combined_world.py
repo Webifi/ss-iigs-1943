@@ -352,12 +352,12 @@ def prepare(scene, pool, cols, prepared):
 def jobs(scene, region):
     from asset_source import SRAM
     from secondsight_link import fixed
-    from world_stream import SIDE1_LOW_BYTES, plane_jobs, sram_jobs
+    from world_stream import SIDE1_LOW_BYTES, PlaneUpload, sram_jobs
 
     arena, desc = scene.combined_arenas[region]
     for block, p, start, end in arena.ranges():
         raw = bytes(arena.blocks[block][p::4])
-        yield from plane_jobs(arena.addresses[block], p * 4096 + start, raw[start:end], 4096)
+        yield PlaneUpload(arena.addresses[block], p * 4096 + start, raw[start:end], 4096)
     # The descriptor tables (src/secondsight/fixed.ld), as physical SRAM.
     side0, low, high = (fixed(f"{name}__load") - SRAM for name in ("world_side0", "world_side1_low", "world_side1_high"))
     for column, data in sorted(desc.items()):
