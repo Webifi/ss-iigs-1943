@@ -228,7 +228,10 @@ def prepare(scene, pool, cols, prepared):
                 kind = 0 if not any(decoded) else 2 if all(m == 15 for m in decoded) else 1
                 if (col, row) in ship_layouts:
                     kind |= 8
-                if col in scene.ship_column_programs:
+                # A prepared ship column only where this section holds its
+                # geometry: a section with a full geometry block keeps some
+                # columns on the per-plane path (scripts/ship_rows.py).
+                if col in scene.ship_column_programs and (col, row) in ship_layouts:
                     kind |= 16
                 # Water commands are already cropped, inverted and split to the
                 # source pattern boundary. Runtime only intersects damage.

@@ -115,10 +115,28 @@ def prepare(scene, pool, cols):
     wide = boss_columns(world)
     assert not columns.intersection(wide)
     columns |= wide
+    # Light-water ships move against the sea in every picture, not only in
+    # the camera pan ranges, and a ship row without prepared geometry takes
+    # the slow per-plane path (combined_ship_commands). So each side-1
+    # section also tries all its other ship columns (extra). Only side-1
+    # sections hold geometry: a column that a side-0 section or the intro
+    # also uses stays out.
+    side0 = set()
+    for region in cols:
+        if region == INTRO or scene.world_region_side.get(region) != 1:
+            side0 |= set(cols[region])
+    extra = set()
+    for region in cols:
+        if region != INTRO and scene.world_region_side.get(region) == 1:
+            extra |= {
+                c
+                for c in set(cols[region]) - side0 - columns
+                if any(world.runs[world.columns[c][0][row]][0] for row in range(32))
+            }
     pitches = {col: 64 for col in wide}
     from ship_columns import prepare as prepare_columns
 
-    column_programs = prepare_columns(world, columns, pitches)
+    column_programs = prepare_columns(world, columns | extra, pitches)
     from ship_alignment import prepare as prepare_alignments
 
     prepare_alignments(scene, pool)
@@ -155,13 +173,12 @@ def prepare(scene, pool, cols):
                 placement = layout(masks, pitches.get(column, PITCH))
                 if placement is not None:
                     seed_pointer(placement)
-    arenas = {}
-    layouts = {}
-    all_records = {}
-    for region in sorted(cols):
+    def region_geometry(region_columns):
+        """The geometry block (arena) and the row records of the ship
+        columns REGION_COLUMNS of one section."""
         arena = Arena(addresses)
         records = {}
-        for column in sorted(columns.intersection(cols[region])):
+        for column in sorted(region_columns):
             if column in column_programs:
                 placement, blocks = column_programs[column]
                 for first, last, phases in blocks:
@@ -196,7 +213,7 @@ def prepare(scene, pool, cols):
                 records[column, row] = (
                     bytes(placement) + b"\x01" + arena.put(payload) + seed_pointer(placement)
                 )
-        for column in sorted(columns.intersection(cols[region])):
+        for column in sorted(region_columns):
             if column in column_programs:
                 continue
             for row in range(1, 32):
@@ -208,6 +225,23 @@ def prepare(scene, pool, cols):
                     and current[:2] + current[3:] == previous[:2] + previous[3:]
                 ):
                     records[column, row] = current[:2] + bytes([previous[2] + 1]) + current[3:]
+        return arena, records
+
+    arenas = {}
+    layouts = {}
+    all_records = {}
+    for region in sorted(cols):
+        # Arena.put stops with "prepared section capacity" when the 16 KB
+        # block is full. A section that cannot hold its extra columns keeps
+        # only its pan-range and boss columns (base); any other failure stops
+        # the build.
+        base = columns.intersection(cols[region])
+        try:
+            arena, records = region_geometry(base | extra.intersection(cols[region]))
+        except AssertionError as error:
+            if not (error.args and error.args[0][0] == "prepared section capacity"):
+                raise
+            arena, records = region_geometry(base)
         arenas[region] = arena
         layouts[region] = records
         all_records.update(records)
