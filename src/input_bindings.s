@@ -199,17 +199,19 @@ apply_key_mask:
 
 ; set_device: the device key state X (16 actions for each source from 2) is
 ; A8 = 1 (pressed) or 0; a change applies its mask; a press is also the
-; last key for the menu (keyAction, actionSource, inputSerial). JSR; A, X, Y
-; (with B) kept.
+; last key for the menu (keyAction, actionSource, inputSerial). JSR; A8,
+; X16; A, X, Y (with B) kept; the flags change.
 set_device:
+  cmp a:.loword(deviceKeys),x
+  bne @change
+  rts                           ; no change: nothing to apply
+@change:
   php
   ax16
   pha
   phx
   phy
   a8
-  cmp a:.loword(deviceKeys),x
-  beq @same
   sta a:.loword(deviceKeys),x
   sta a:.loword(devicePressed)
   beq @apply
@@ -237,7 +239,6 @@ set_device:
   a8
   lda a:.loword(devicePressed)
   jsr .loword(apply_key_mask)
-@same:
   ax16
   ply
   plx

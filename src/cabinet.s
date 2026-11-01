@@ -910,21 +910,24 @@ cabinet_append:
   iny                           ; UPLOAD_SIZE
   sty CAB_OFFSET
   jsl d500_stage_layout
-  ldx WORLD_OUTPUT
-  ldy #0
-@word:
-  lda [CAB_SOURCE],y
-  xba
-  sta a:0,x
-  inx
-  inx
-  iny
-  iny
-  cpy CAB_LENGTH
-  bcc @word
+  jsr .loword(cabinet_copy_layout)
   stx WORLD_OUTPUT
   rtl
 .assert UPLOAD_SIZE = 6, error
+
+; cabinet_copy_layout: the CAB_LENGTH bytes at CAB_SOURCE into the packet at
+; WORLD_OUTPUT (packet_copy). JSR; A16. Out: X = the end in the packet.
+cabinet_copy_layout:
+.a16
+  a8
+  lda CAB_SOURCE+2
+  sta f:packet_copy_bank
+  a16
+  lda CAB_LENGTH
+  ldx WORLD_OUTPUT
+  ldy CAB_SOURCE
+  jsl packet_copy
+  rts
 
 cabinet_demo_cached: .word 0    ; the cabinet_demo_dictionary pair now held
 ; game_flow_tick: the coins for one credit and the credits for one coin, for
@@ -988,18 +991,7 @@ cabinet_layout_append:
   lda f:CABINET_LAYOUTS+4,x
   sta CAB_SOURCE+2
   jsl d500_stage_layout
-  ldx WORLD_OUTPUT
-  ldy #0
-@copy:
-  lda [CAB_SOURCE],y
-  xba
-  sta a:0,x
-  inx
-  inx
-  iny
-  iny
-  cpy CAB_LENGTH
-  bcc @copy
+  jsr .loword(cabinet_copy_layout)
   a8
   lda CAB_LAYOUT_LOADED
   cmp #PAGE_RANKING_FIRST

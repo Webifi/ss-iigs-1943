@@ -60,7 +60,7 @@ audio_bank_init:
   cpx #AUDIO_REGISTER_BYTES
   bne @registers
   a16
-  ldx #SSG_PARTS*SSG_PART_SIZE-2
+  ldx #SSG_PARTS*SSG_PART_SIZE+8-2 ; SSG_STATES, then SSG_PHASES
   lda #0
 @clear:
   sta f:SSG_STATES,x
@@ -70,6 +70,5 @@ audio_bank_init:
   a8
   stz MUSIC_PAGE+SSG_PENDING
   stz MUSIC_PAGE+SSG_ACTIVE
-  stz MUSIC_PAGE+SSG_NEXT
   stz MUSIC_PAGE+SSG_TIME
   rtl

@@ -142,9 +142,18 @@ devices_idle:
   rts
 ; joy_read: start the paddle timers; at PADDLE_LOW read the X paddle, at
 ; PADDLE_HIGH both; a read too late (an interrupt in the wait) keeps the
-; directions before. A stick still high after PADDLE_ABSENT is not there:
-; input_poll stops. Then the four directions of DEV_JOYSTICK. JSR.
+; directions before. Both axes still high at PADDLE_HIGH: right and down
+; from a stick that is known to be there, and the next read checks it
+; first (joy_check); before that, joy_check waits for the stick now. Then
+; the four directions of DEV_JOYSTICK. JSR.
 joy_read:
+  lda a:.loword(joyCheck)
+  beq @start
+  stz a:.loword(joyCheck)
+  jsr .loword(joy_check)
+  bcc @start
+  jmp .loword(@stamp)           ; no stick
+@start:
   lda f:VERTCNT
   sta a:.loword(joyBeam)
   lda f:PTRIG
@@ -179,16 +188,14 @@ joy_read:
   lda a:.loword(joyHighX)
   and a:.loword(joyHighY)
   bpl @connected
-  ; Both axes high past the high threshold: is there a stick?
-  lda #PADDLE_ABSENT
-  jsr .loword(joy_wait)
-  lda f:PADDL0
-  and f:PADDL1
-  bpl @connected
-  lda #1
-  sta a:.loword(joyAbsent)
-  lda #OPCODE_RTS               ; no stick: no more timer work (the ADB and J13
-  sta f:input_poll              ; capture is in the interrupt)
+  ; Both axes high past the high threshold: right and down, or no stick.
+  lda a:.loword(joyPresent)
+  beq :+
+  inc a:.loword(joyCheck)
+  bra @connected
+:
+  jsr .loword(joy_check)
+  bcs @stamp
 @connected:
   ; Right/down: still high at PADDLE_HIGH; left/up: low at PADDLE_LOW.
   ldx #DEV_JOYSTICK
@@ -210,20 +217,44 @@ joy_read:
   iny
   cpy #2
   bcc @axis
-  lda a:.loword(joyAbsent)
-  beq @stamp
-  ldx #DEV_JOYSTICK
-  lda #0
-@clear_absent:
-  jsr .loword(set_device)
-  inx
-  cpx #DEV_JOYSTICK+ACT_FIRE
-  bcc @clear_absent
 @stamp:
   a16
   lda f:GAME_UPDATES
   sta a:.loword(joyUpdate)
   a8
+  rts
+; joy_check: both axes were high at PADDLE_HIGH of the read that started at
+; joyBeam. A stick ends its timers by PADDLE_ABSENT; a missing stick never
+; does. Timers that ended already need no wait. Carry clear: the stick is
+; there (joyPresent). Carry set: no stick; input_poll stops and the keys of
+; DEV_JOYSTICK are released. JSR.
+joy_check:
+  lda f:PADDL0
+  and f:PADDL1
+  bpl @there
+  lda #PADDLE_ABSENT
+  jsr .loword(joy_wait)
+  lda f:PADDL0
+  and f:PADDL1
+  bmi @absent
+@there:
+  lda #1
+  sta a:.loword(joyPresent)
+  clc
+  rts
+@absent:
+  lda #1
+  sta a:.loword(joyAbsent)
+  lda #OPCODE_RTS               ; no stick: no more timer work (the ADB and J13
+  sta f:input_poll              ; capture is in the interrupt)
+  ldx #DEV_JOYSTICK
+  lda #0
+@release:
+  jsr .loword(set_device)
+  inx
+  cpx #DEV_JOYSTICK+ACT_FIRE
+  bcc @release
+  sec
   rts
 ; joy_wait: wait until A VERTCNT steps since joyBeam. JSR.
 joy_wait:
@@ -352,6 +383,8 @@ pad_clock:
 ; The device state.
 joyUpdate: .word JOY_READ_NOW
 joyAbsent: .byte 0
+joyPresent: .byte 0             ; joy_check saw the timers of the stick end
+joyCheck: .byte 0               ; joy_read: both axes were high; check the stick first
 joyBeam: .byte 0
 joyThreshold: .byte 0
 joyLowX: .byte 0

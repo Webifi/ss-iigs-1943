@@ -136,18 +136,14 @@ d500_gate_site:
   adc #2                        ; the end word
   cmp #PACKET_AREA+1
   bcs @return16                 ; no room: the packet stays as it is
+  a8
+  lda D500_SOURCE+2
+  sta f:packet_copy_bank
+  a16
+  lda D500_COPY_LENGTH
   ldx WORLD_OUTPUT
-  ldy #0
-@copy:
-  lda [D500_SOURCE],y
-  xba
-  sta a:0,x
-  inx
-  inx
-  iny
-  iny
-  cpy D500_COPY_LENGTH
-  bcc @copy
+  ldy D500_SOURCE
+  jsl packet_copy
   stx WORLD_OUTPUT
   lda CAMERA_BG1_SCROLL
   cmp #DECK_SCROLL

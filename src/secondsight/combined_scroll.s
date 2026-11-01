@@ -229,10 +229,7 @@ combined_pan_ok:
         ld h,a
         ld (scene_screen_base),hl
         call water_camera
-        call background_anchor_camera
-        xor a
-        ld (play_back_row_count),a
-        ret
+        jp background_anchor_camera
 
         .section .text.scroll_damage,"ax",@progbits
 

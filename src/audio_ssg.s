@@ -21,6 +21,7 @@ T_ACTIVE = 10                  ; nonzero while the list plays
 T_TONE = 11                    ; 2 bytes: the last odd frequency (the part's tone)
 T_TSIZE = 17                   ; the tone table size
 T_ODD = 18                     ; the odd oscillator
+T_PHASE = 19                   ; T_WAIT & (SSG_DELAY_UNIT-1): its SSG_PHASES entry
 DOC_STOPPED = DOC_HALT|DOC_ONE_SHOT ; a halted oscillator
 .assert SSG_PART_SIZE = 32, error ; ssg_start: X / 16 = part * 2
 
@@ -43,7 +44,10 @@ DOC_STOPPED = DOC_HALT|DOC_ONE_SHOT ; a halted oscillator
 ; audio_ssg_tick. JSR.
 ssg_start:
   lda SSG_STATES+T_ACTIVE,x
-  bne :+
+  beq :+
+  jsr .loword(ssg_phase_remove) ; the new list replaces the one that plays
+  bra :++
+:
   inc z:SSG_ACTIVE
 :
   ldy #SSG_HEAD_TONE_SIZE
@@ -107,8 +111,58 @@ ssg_start:
   clc
   adc z:SSG_TIME
   sta SSG_STATES+T_WAIT,x       ; the SSG_TIME of the record, with the start tick
+  jsr .loword(ssg_phase_add)
 :
   rts
+
+; SSG_PHASES: every delay is a multiple of SSG_DELAY_UNIT ticks, so a part
+; that plays is due only when SSG_TIME & (SSG_DELAY_UNIT-1) is its T_PHASE;
+; the entry of each phase holds the bits of its parts (part 0: bit 0).
+; ssg_phase_add: the part X joins the entry of its T_WAIT. ssg_phase_remove:
+; it leaves the entry of its T_PHASE. JSR; DBR = the bank of SSG_STATES; X, Y
+; kept.
+ssg_phase_add:
+  a16
+  lda SSG_STATES+T_WAIT,x
+  and #SSG_DELAY_UNIT-1         ; B = 0 for the TAY
+  a8
+  sta SSG_STATES+T_PHASE,x
+  phy
+  tay
+  jsr .loword(ssg_part_bit)
+  ora SSG_PHASES,y
+  sta SSG_PHASES,y
+  ply
+  rts
+ssg_phase_remove:
+  phy
+  a16
+  lda SSG_STATES+T_PHASE,x
+  and #SSG_DELAY_UNIT-1         ; B = 0 for the TAY
+  a8
+  tay
+  jsr .loword(ssg_part_bit)
+  eor #$ff
+  and SSG_PHASES,y
+  sta SSG_PHASES,y
+  ply
+  rts
+; ssg_part_bit: A8 = the SSG_PHASES bit of the part X. JSR; X, Y kept.
+ssg_part_bit:
+  phx
+  a16
+  txa
+  .repeat 5
+  lsr                           ; / SSG_PART_SIZE
+  .endrepeat
+  tax
+  a8
+  lda f:ssg_part_bits,x
+  plx
+  rts
+ssg_part_bits: .byte $01, $02, $04, $08, $10, $20
+.assert SSG_PART_SIZE = 1 << 5 .and SSG_PARTS = 6, error
+.assert SSG_PHASES = SSG_STATES + SSG_PARTS*SSG_PART_SIZE, error ; audio_bank_init clears both
 
 ; ssg_record: write the pending record, then each record after it with no
 ; delay. Y = its values, SSG_PTR = the list, SSG_ODD/SSG_EVEN = the part's
@@ -287,6 +341,7 @@ ssg_header:
   cmp #SSG_REPEAT_HEADER
   beq @repeat
   ; SSG_END_HEADER: the part stops silent.
+  jsr .loword(ssg_phase_remove)
   stz SSG_STATES+T_ACTIVE,x
   dec z:SSG_ACTIVE
   jmp .loword(ssg_silence)
@@ -345,7 +400,6 @@ audio_ssg_command:
   rtl
 :
   stz z:SSG_PENDING
-  stz z:SSG_NEXT
   phb
   pha
   lda #^SSG_STATES
@@ -421,9 +475,9 @@ audio_ssg_command:
   bra @skip16
 .assert SSG_PARTS*SSG_ENTRY_SIZE = 30, error
 
-; audio_ssg_tick: one SSG tick. SSG_TIME counts; while SSG_NEXT counts down
-; no record is due. Then each part with a record due at SSG_TIME plays it,
-; and SSG_NEXT = the ticks before the next record of any part. JSL.
+; audio_ssg_tick: one SSG tick. SSG_TIME counts; each part of the
+; SSG_PHASES entry of this tick, in part order, plays its record when it is
+; due at SSG_TIME. JSL.
 audio_ssg_tick:
 .a8
 .i16
@@ -432,47 +486,30 @@ audio_ssg_tick:
   rtl
 :
   inc z:SSG_TIME
-  lda z:SSG_NEXT
-  beq @due
-  dec z:SSG_NEXT
-  rtl
-@due:
+  a16
+  lda z:SSG_TIME
+  and #SSG_DELAY_UNIT-1         ; B = 0 for the TAX
+  tax
+  a8
+  lda f:SSG_PHASES,x
+  bne :+
+  rtl                           ; no part has this phase
+:
+  sta z:SSG_DUE
   phb
   lda #^SSG_STATES
   pha
   plb
-  lda #$ff
-  sta z:SSG_NEXT
   .repeat SSG_PARTS,I
+    lsr z:SSG_DUE
+    bcc :+
     ldx #I*SSG_PART_SIZE
-    lda SSG_STATES+T_ACTIVE,x
-    beq :+
     lda SSG_STATES+T_WAIT,x
     cmp z:SSG_TIME
     bne :+
     jsr .loword(ssg_due_record)
 :
   .endrepeat
-  ldx #0
-@minimum:
-  lda SSG_STATES+T_ACTIVE,x
-  beq :+
-  lda SSG_STATES+T_WAIT,x
-  sec
-  sbc z:SSG_TIME
-  dec
-  cmp z:SSG_NEXT
-  bcs :+
-  sta z:SSG_NEXT
-:
-  a16
-  txa
-  clc
-  adc #SSG_PART_SIZE
-  tax
-  a8
-  cpx #SSG_PARTS*SSG_PART_SIZE
-  bne @minimum
   plb
   rtl
 

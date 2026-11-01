@@ -48,47 +48,17 @@ bullet_intercept:
   ldx #SHOTS_PER_PLAYER*SHOT_SIZE
   ldy #SHOT_COUNT*SHOT_SIZE
 @start:
-  sty a:SHOT_SCAN_END
-@shot:
-  ; A hit: the distances are within the sums of the radii.
-  lda SHOTS+SHOT_STATE,x
-  cmp #SHOT_FLYING
-  bne @next
-  lda SHOTS+SPR_ALONG,x
-  sec
-  sbc z:SPR_ALONG
-  bcs :+
-  eor #$ff
-  inc
-:
-  sta a:SHOT_DISTANCE
-  lda SHOTS+SHOT_ALONG_RADIUS,x
-  clc
-  adc z:OBJ_ALONG_RADIUS
-  cmp a:SHOT_DISTANCE
-  bcc @next
-  lda SHOTS+SPR_CROSS,x
-  sec
-  sbc z:SPR_CROSS
-  bcs :+
-  eor #$ff
-  inc
-:
-  sta a:SHOT_DISTANCE
-  lda SHOTS+SHOT_CROSS_RADIUS,x
-  clc
-  adc z:OBJ_CROSS_RADIUS
-  cmp a:SHOT_DISTANCE
+  ; The shots from X to Y in record order: player 1's records (X = 0), then
+  ; player 2's (to Y = SHOT_COUNT * SHOT_SIZE). Y stays (bullet_loop).
+  cpx #0
+  bne @player2
+  jsr .loword(intercept_player1)
   bcs @hit
-@next:
-  a16
-  txa
-  clc
-  adc #SHOT_SIZE
-  tax
-  a8
-  cpx a:SHOT_SCAN_END
-  bne @shot
+  cpy #SHOT_COUNT*SHOT_SIZE
+  bne @miss
+@player2:
+  jsr .loword(intercept_player2)
+  bcs @hit
 @miss:
   clc
   rts
@@ -117,4 +87,66 @@ bullet_intercept:
   lda #SND_BULLET_HIT
   sta INTERCEPT_SOUND
   sec
+  rts
+
+; intercept_player1, intercept_player2: the flying shots of one player, in
+; record order, through intercept_shot. Carry set: the shot X hits. A test
+; of a shot that does not fly costs one load and one compare. JSR; Y kept.
+intercept_player1:
+  .repeat SHOTS_PER_PLAYER,I
+    lda SHOTS+I*SHOT_SIZE+SHOT_STATE
+    cmp #SHOT_FLYING
+    bne :+
+    ldx #I*SHOT_SIZE
+    jsr .loword(intercept_shot)
+    bcc :+
+    rts
+:
+  .endrepeat
+  clc
+  rts
+intercept_player2:
+  .repeat SHOTS_PER_PLAYER,I
+    lda SHOTS+(SHOTS_PER_PLAYER+I)*SHOT_SIZE+SHOT_STATE
+    cmp #SHOT_FLYING
+    bne :+
+    ldx #(SHOTS_PER_PLAYER+I)*SHOT_SIZE
+    jsr .loword(intercept_shot)
+    bcc :+
+    rts
+:
+  .endrepeat
+  clc
+  rts
+.assert SHOT_COUNT = 2*SHOTS_PER_PLAYER, error
+
+; intercept_shot: carry set when the shot X lies within the sums of the
+; radii of the bullet D, on both axes. JSR.
+intercept_shot:
+  lda SHOTS+SPR_ALONG,x
+  sec
+  sbc z:SPR_ALONG
+  bcs :+
+  eor #$ff
+  inc
+:
+  sta a:SHOT_DISTANCE
+  lda SHOTS+SHOT_ALONG_RADIUS,x
+  clc
+  adc z:OBJ_ALONG_RADIUS
+  cmp a:SHOT_DISTANCE
+  bcc @miss                     ; carry clear
+  lda SHOTS+SPR_CROSS,x
+  sec
+  sbc z:SPR_CROSS
+  bcs :+
+  eor #$ff
+  inc
+:
+  sta a:SHOT_DISTANCE
+  lda SHOTS+SHOT_CROSS_RADIUS,x
+  clc
+  adc z:OBJ_CROSS_RADIUS
+  cmp a:SHOT_DISTANCE           ; carry set: within
+@miss:
   rts

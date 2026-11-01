@@ -7,7 +7,8 @@
 .a8
 .i16
 UPDATE_TICKS = 8             ; DOC ticks of one update at the arcade timing
-PUMP_TICKS = 3               ; the world decoder runs only with this many ticks to spare
+PUMP_TICKS = 2               ; the world decoder runs only with this many ticks to spare
+PUMP_BATCH = 8               ; world_inflate_pump: the most tokens of one call
 PICTURE_SKIP_MAX = 4         ; updates without a picture before one goes late
 
 ; flight_clock_init: start the clock now and apply the display timing

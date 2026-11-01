@@ -86,16 +86,42 @@ wave_combat_tick:
   jsr shot_prepare_y_bounds
   inc COMBAT_HAS_SHOTS
 @start_slots:
-  ; D = the object record (POOL_RECORD) while it runs.
-  a16
-  stz WAVE_SLOT
-@slot:
-  ldx WAVE_SLOT
+  ; Each slot with an object runs wave_object; an empty slot costs one test.
   a8
-  lda ENEMY_POOL+OBJ_TYPE,x
-  bne @active
-  jmp @next_zero
-@active:
+  .repeat ENEMY_COUNT,I
+    lda ENEMY_POOL+I*OBJECT_SIZE+OBJ_TYPE
+    beq :+
+    ldx #I*OBJECT_SIZE
+    jsr wave_object
+:
+  .endrepeat
+  .repeat EXTENDED_COUNT,I
+    lda EXTENDED_POOL+I*OBJECT_SIZE+OBJ_TYPE
+    beq :+
+    ldx #EXTENDED_POOL-ENEMY_POOL+I*OBJECT_SIZE
+    jsr wave_object
+:
+  .endrepeat
+  a16
+  ; D still identifies the last live record; zero means no record selected.
+  ; On an empty pass leave X at the last slot, as the original loop did.
+  tdc
+  beq :+
+  tax
+  lda #0
+  tcd
+  a8
+  rts
+:
+  ldx #EXTENDED_POOL-ENEMY_POOL+(EXTENDED_COUNT-1)*OBJECT_SIZE
+  a8
+  rts
+
+; wave_object: the small object at the slot X: its script, its decision
+; tail, its shot and its contacts. D = the object record (POOL_RECORD) while
+; it runs, and after it. JSR; A8.
+wave_object:
+  stx WAVE_SLOT
   a16
   txa
   clc
@@ -226,34 +252,7 @@ wave_combat_tick:
   jsr flight_enemy_retired
   pld
 @save:
-@next_zero:
 .a8
-  a16
-  lda WAVE_SLOT
-  clc
-  adc #OBJECT_SIZE
-  sta WAVE_SLOT
-  cmp #ENEMY_COUNT*OBJECT_SIZE
-  bne :+
-  lda #EXTENDED_POOL-ENEMY_POOL ; then the extended pool
-  sta WAVE_SLOT
-:
-  cmp #EXTENDED_POOL-ENEMY_POOL+EXTENDED_COUNT*OBJECT_SIZE
-  beq @done
-  a8
-  jmp @slot
-@done:
-  a16
-.a16
-  ; D still identifies the last live record; zero means no record selected.
-  ; On an empty pass leave X at the last slot, as the original loop did.
-  tdc
-  beq :+
-  tax
-  lda #0
-  tcd
-:
-  a8
   rts
 
 ; shot_prepare_y_bounds: SHOT_X/Y_MIN/MAX = the box around all listed shots

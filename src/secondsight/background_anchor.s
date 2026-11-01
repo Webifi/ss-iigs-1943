@@ -58,18 +58,22 @@ background_clean_address:
         sub e
         jp c,upper
         jp z,upper
-        ld h,0                          ; lower twin
+        ld b,PAGE_START >> 8            ; lower twin
         jp half
 upper:
         xor a
         sub e
-        ld h,1                          ; upper twin
+        ld b,(PAGE_START + PAGE_ROWS * GROUPS_PER_ROW) >> 8 ; upper twin: PAGE_ROWS rows further on
+        .if (PAGE_START | PAGE_ROWS * GROUPS_PER_ROW) & 0xFF
+        .error "background_clean_address adds PAGE_START and the twin as whole pages"
+        .endif
 half:
         ld (bg_clean_limit),a
         ld l,e
         call state_times56
-        ld de,PAGE_START
-        add hl,de
+        ld a,h
+        add a,b                         ; + PAGE_START and the twin (whole pages)
+        ld h,a
         ld a,c
         rrca                            ; page 1: bit 7 of the high byte (PAGE_DISTANCE)
         or h

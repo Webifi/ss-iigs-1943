@@ -43,7 +43,6 @@ def config_include(scene, camera_start):
     rgb = mode_data("rgb-224x256-276", "unchained")
     ticks, rgb_ticks = raster_ticks(vga), raster_ticks(rgb, 2)
     values = {
-        "CAMERA_START": camera_start,
         "FOREGROUND_INITIAL": scene.foreground_initial,
         "INITIAL_DISPLAY_START": ((-camera_start) & 255) * GROUPS + 0x400,
         "PLAYFIELD_CBAR": ((0x10000 - window) >> 8) | (source_base >> 12),

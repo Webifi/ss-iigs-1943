@@ -24,23 +24,40 @@ bullet_init:
 ; bullet_tick: one update of the enemy bullets (flight_weapons). JSR; D = 0
 ; after it.
 bullet_tick:
-  a16
-  stz BULLET_SLOT
-  a8
   ; INTERCEPT_WEAPON: a SHOT GUN of either player can stop bullets.
   lda PLAYER+PL_WEAPON
   ora PLAYER2+PL_WEAPON
   and #WEAPON_SHOTGUN
   sta a:INTERCEPT_WEAPON
+  ; Each slot with a bullet runs bullet_object; an empty slot costs one test.
+  .repeat BULLET_COUNT,I
+    lda BULLETS+I*OBJECT_SIZE+OBJ_TYPE
+    beq :+
+    ldx #I*OBJECT_SIZE
+    jsr bullet_object
+:
+  .endrepeat
   a16
-@slot:
-  ldx BULLET_SLOT
+  ; D still identifies the last live record; zero means no record selected.
+  ; On an empty pass leave X at the last slot, as the original loop did.
+  tdc
+  beq :+
+  tax
+  lda #0
+  tcd
+  bra :++
+:
+  ldx #(BULLET_COUNT-1)*OBJECT_SIZE
+:
   a8
-  lda BULLETS+OBJ_TYPE,x
-  bne @active
-  jmp @next_zero
-@active:
-  ; D = the bullet record (POOL_RECORD) while it runs.
+  stz INTERCEPT_WEAPON
+  rts
+
+; bullet_object: the bullet at the slot X: its script, its move and its
+; contacts. D = the bullet record (POOL_RECORD) while it runs, and after it.
+; JSR; A8.
+bullet_object:
+  stx BULLET_SLOT
   a16
   txa
   clc
@@ -108,27 +125,4 @@ bullet_tick:
   jsl game_sound_request
 @retired:
 @save:
-@next_zero:
-  a16
-  lda BULLET_SLOT
-  clc
-  adc #OBJECT_SIZE
-  sta BULLET_SLOT
-  cmp #BULLET_COUNT*OBJECT_SIZE
-  beq @done
-  a8
-  jmp @slot
-@done:
-  a16
-.a16
-  ; D still identifies the last live record; zero means no record selected.
-  ; On an empty pass leave X at the last slot, as the original loop did.
-  tdc
-  beq :+
-  tax
-  lda #0
-  tcd
-:
-  a8
-  stz INTERCEPT_WEAPON
   rts

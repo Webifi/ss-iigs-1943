@@ -2,6 +2,8 @@
 
 from roms import load
 
+TIMES = 64 + 2  # the entries of the weapon time digit table
+
 
 def data():
     rom = load()[0]["maincpu"]
@@ -12,8 +14,10 @@ def data():
         9 * (1 if i == 1 else 2 if i & 2 else 3 if i & 4 else 4 if i & 8 else 5 if i else 0)
         for i in range(32)
     ]
+    # The IIgs sends the weapon time 0-64 (WEAPON_TIME_MAX), or 65 for
+    # WEAPON_ENDLESS (src/state_packet.s): two digit glyphs each; 65 blank.
     digits = bytes(
-        v for n in range(256) for v in ((n // 10 or 0x24, n % 10) if n != 255 else (0x24, 0x24))
+        v for n in range(TIMES) for v in ((n // 10 or 0x24, n % 10) if n < TIMES - 1 else (0x24, 0x24))
     )
     return b"".join(names), offsets, digits
 

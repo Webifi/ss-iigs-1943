@@ -58,6 +58,9 @@
         .equ HEADER_RING, 128
         .equ STAMP_BITS, 0x7F
         .equ REFERENCE, 0x80
+        .equ epoch_end, phase_record_end + RECORD_STAMP ; the stamp after the last phase record
+        .global EPOCH_RECORDS
+        .equ EPOCH_RECORDS, 5           ; cache_age_pixels: stamps cleared each picture (secondsight.ld checks)
 
         .global art_hash, art_headers, pair_masks, art_bindings, phase_links, art_hidden_queue
 
@@ -68,13 +71,16 @@
         .balign 256
 art_hash: .fill 256, 1, 0
 
-; The slots: an empty key (0xFF) and the oldest age at the start
+; The slots: an empty key (0xFF) and an old age at the start
 ; (secondsight.ld .sprite_tables). The keys fill one 256-byte page and
-; art_ages starts the next: the slot is the low byte of an age.
+; art_used starts the next: the slot is the low byte of its entry. The age
+; of a slot is art_picture - art_used: 0 only in the picture that uses it
+; (sprite_cache_begin keeps every age below 256).
         .section .data.art_keys,"aw",@progbits
         .balign 256
 art_keys: .fill 2 * SLOTS, 1, 0xFF      ; ROM code and palette of each slot
-art_ages: .fill SLOTS, 1, 0xFF          ; pictures since the last use, 0 = in use
+art_used: .fill SLOTS, 1, 0x80          ; the art_picture of the last use (age 128 at the start)
+art_picture: .byte 0                    ; the number of this picture (sprite_cache_begin)
 art_next: .byte 0                       ; next slot to examine
 art_slot: .byte 0                       ; the slot of the current art
 art_key: .word 0                        ; the key of the current art: code, palette
@@ -122,6 +128,7 @@ art_rows: .ds.b 1                       ; the rows of the art
 art_pin_count: .byte 0                  ; the phases pinned by this picture
 art_header_next: .byte 0                ; the next draw header of the ring
 art_stamp: .byte 1                      ; the clock stamp of this picture
+art_epoch_next: .word PHASE_RECORDS + RECORD_STAMP ; cache_age_pixels: the next stamp to clear
 
 ; The hash chains and the slot phases (secondsight.ld .sprite_chain):
 ; the slot is the low byte of an entry. art_chain starts a 256-byte page;
@@ -220,13 +227,16 @@ search_next:
 
 ; Never replace a slot that the queued draws of this update use.
 not_found:
+        ld a,(art_picture)
+        ld d,a
         ld a,(art_next)
         ld l,a
-        ld h,art_ages >> 8
+        ld h,art_used >> 8
         ld b,SLOTS
         ld c,0                          ; oldest age
 victim:
-        ld a,(hl)
+        ld a,d
+        sub (hl)                        ; the age of the slot
         cp c
         jp c,victim_next
         jp z,victim_next
@@ -370,20 +380,33 @@ blank:
 
         .section .text.cache_begin,"ax",@progbits
 
-; Start a picture: age every slot, saturated at 255.
+; Start a picture: the next picture number ages every slot by one. Each
+; picture checks one slot, so each slot every SLOTS pictures: an age of
+; 128 or more, or 0 (256: the number came round), becomes 128. So no age
+; reaches 256, and 0 means only "used in this picture".
 sprite_cache_begin:
         xor a
         ld (art_hidden_count),a
-        ld hl,art_ages
-        ld b,SLOTS
-age_next:
+        ld hl,art_picture
         inc (hl)
-        jp nz,age_ready
-        dec (hl)
-age_ready:
-        inc hl
-        djnz age_next
+        ld c,(hl)
+        ld a,c
+        and SLOTS - 1
+        ld l,a
+        ld h,art_used >> 8
+        ld a,c
+        sub (hl)                        ; the age of the slot
+        jp z,age_clamp
+        cp 128
+        jp c,cache_age_pixels
+age_clamp:
+        ld a,c
+        sub 128
+        ld (hl),a                       ; age 128: still old
         jp cache_age_pixels
+        .if SLOTS > 128
+        .error "sprite_cache_begin checks each slot once in SLOTS pictures: at most 128"
+        .endif
 
         .section .text.cache_relink,"ax",@progbits
 
@@ -617,15 +640,17 @@ hidden_index:
         call prefetch_room
         ret nz
 align_live:
+        ld a,(art_picture)
+        ld c,a
         ld a,(art_prefetch_next)
         ld l,a
-        ld h,art_ages >> 8
+        ld h,art_used >> 8
         ld b,SLOTS
 find_live:
         inc l
         res 7,l
         ld a,(hl)
-        or a
+        cp c                            ; used in this picture
         jp z,live
         djnz find_live
         ret
@@ -655,11 +680,13 @@ live:
 ; at most two. Every cache has at least 128 slots.
 ; Out: Z when a slot is free.
 prefetch_room:
-        ld hl,art_ages
+        ld a,(art_picture)
+        ld c,a
+        ld hl,art_used
         ld b,SLOTS
 room_next:
         ld a,(hl)
-        or a
+        cp c                            ; used in this picture
         jp nz,room_free
         inc hl
         djnz room_next
@@ -1239,9 +1266,11 @@ pixel_bind:
         ret z
         jp archive_store
 
-; A stamp pins the current picture with no list and no unpin pass. When
-; the stamp wraps, clear the old stamps before the picture is queued, so
-; an old record cannot look pinned.
+; A stamp pins the current picture with no list and no unpin pass. The
+; stamps run 1-127 (0: no picture). Each picture clears the stamps of the
+; next EPOCH_RECORDS records, so every record within 103 pictures, before
+; its stamp value comes round again: an old record cannot look pinned. No
+; record holds the new stamp yet, and only that stamp pins.
 cache_age_pixels:
         xor a
         ld (art_pin_count),a
@@ -1249,10 +1278,28 @@ cache_age_pixels:
         inc a
         and STAMP_BITS
         jp nz,stamp_ready
-        call cache_epoch_clear
-        ld a,1
+        inc a
 stamp_ready:
         ld (art_stamp),a
+        set_io BBR, RECORDS_BBR
+        ld hl,(art_epoch_next)
+        ld de,RECORD_SIZE
+        ld b,EPOCH_RECORDS
+epoch_next:
+        ld a,(hl)
+        and REFERENCE                   ; keep the reference bit
+        ld (hl),a
+        add hl,de
+        ld a,h
+        cp epoch_end >> 8
+        jp nz,epoch_in_range
+        ld a,l
+        cp epoch_end & 0xFF
+        jp nz,epoch_in_range
+        ld hl,PHASE_RECORDS + RECORD_STAMP
+epoch_in_range:
+        djnz epoch_next
+        ld (art_epoch_next),hl
         ret
 
         .section .text.cache_retire_art,"ax",@progbits
@@ -1321,22 +1368,6 @@ cache_pixel_source:
         ld hl,art_pixel_origin
         ret
 
-; Clear every stamp and keep the reference bits.
-cache_epoch_clear:
-        set_io BBR, RECORDS_BBR
-        ld hl,PHASE_RECORDS + RECORD_STAMP
-        ld bc,phase_record_count
-        ld de,RECORD_SIZE
-epoch_next:
-        ld a,(hl)
-        and REFERENCE
-        ld (hl),a
-        add hl,de
-        dec bc
-        ld a,b
-        or c
-        jp nz,epoch_next
-        ret
 
         .section .text.cache_bindings,"ax",@progbits
 
@@ -1457,8 +1488,9 @@ ready_header:
         ld (scene_desc),hl
         ld a,(art_slot)
         ld l,a
-        ld h,art_ages >> 8
-        ld (hl),0
+        ld h,art_used >> 8
+        ld a,(art_picture)
+        ld (hl),a                       ; used in this picture
         ld hl,0                         ; high priority ID
         ld a,(scene_attr + 1)
         and ATTR_LOW_PALETTE

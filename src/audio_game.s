@@ -54,9 +54,6 @@ game_sound_request:
   sta SOUND_WRITE
   plx
   rtl
-; music_irq_vector: the IRQ vector (bank 0) jumps to the sound interrupt.
-music_irq_vector:
-  jml music_irq_entry
 
 .segment "SOUND"
 ; audio_game_init: the sound start-up (game.s, once). The queue is empty, the
@@ -270,7 +267,6 @@ audio_effects_stop:
   phx
   stz MUSIC_PAGE+SSG_PENDING
   stz MUSIC_PAGE+SSG_ACTIVE
-  stz MUSIC_PAGE+SSG_NEXT
   stz MUSIC_PAGE+SSG_TIME
   ldx #0
   lda #0
@@ -284,6 +280,11 @@ audio_effects_stop:
   lda #0
   cpx #SSG_PARTS*SSG_PART_SIZE
   bcc @states
+  ldx #8-1
+@phases:
+  sta f:SSG_PHASES,x            ; no part is due
+  dex
+  bpl @phases
   ldx #DOC_CONTROL+DOC_SSG_FIRST
 @halt:
   lda #DOC_HALT|DOC_ONE_SHOT

@@ -27,7 +27,6 @@ ship_saved_row: .ds.b 1                 ; scroll_row at the start of the column
 ship_clip_top: .ds.b 1                  ; visible rows: COLUMN_ROWS - row, exclusive top
 ship_clip_bottom: .ds.b 1               ; visible rows: the inclusive bottom
 ship_saved_rows: .ds.b 1                ; ship_row_count at the start of the column
-ship_column_mapped: .ds.b 1             ; always 0: ship_cpu_copy restores its windows
 ship_head_rows: .ds.b 1                 ; rows clipped above the rectangle
 
 ; Rectangle list of the column: count, then 8 bytes for each rectangle
@@ -272,8 +271,6 @@ ship_column_finished:
 ; changes no bank.
 ; In: HL source, DE target, B width, C rows.
 ship_cpu_copy:
-        xor a
-        ld (ship_column_mapped),a
 ; Keep the caller mappings: the column geometry can come from video RAM,
 ; and the general row path can still hold banked source data.
         in0 a,(BBR)
@@ -328,7 +325,9 @@ ship_cpu_\width:
         .rept \width
         ldi
         .endr
-        jp next
+        .if \width < 5
+        jp next                         ; width 5 runs on into next
+        .endif
         .endr
 next:
         ex af,af'
@@ -355,9 +354,6 @@ ship_cpu_row_target:
 ship_cpu_source_low:
         .byte 0, GROUPS_PER_ROW
 done:
-        ld a,(ship_column_mapped)
-        or a
-        ret nz
         pop af
         out0 (CBR),a
         pop af

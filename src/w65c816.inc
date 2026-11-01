@@ -13,6 +13,7 @@ OPCODE_JSR      = $20           ; JSR absolute
 OPCODE_JMP      = $4C           ; JMP absolute
 OPCODE_RTS      = $60
 OPCODE_ADC_IMM  = $69           ; ADC #immediate
+OPCODE_BRA      = $80           ; BRA relative
 OPCODE_LDA_DP   = $A5           ; LDA direct page
 OPCODE_LDA_ABS  = $AD           ; LDA absolute
 

@@ -32,7 +32,7 @@ music_irq_install:
   ora #SHADOW_IOLC
   sta f:SHADOW
   a16
-  lda #music_irq_vector
+  lda #.loword(music_irq_entry)
   sta f:IRQ_VECTOR
   a8
   lda #0
@@ -119,10 +119,11 @@ music_irq_period:
 @same:
   rts
 
-; music_irq_entry: the IRQ (from music_irq_vector). D = MUSIC_PAGE, DBR = 0.
-; A timer tick advances GAME_CLOCK and runs the sound work; the queue gets
-; one command each arcade frame (FRAME_TICKS). Other DOC interrupts are only
-; acknowledged. The input capture runs at the end of each interrupt.
+; music_irq_entry: the IRQ (IRQ_VECTOR holds its bank-0 address). D =
+; MUSIC_PAGE, DBR = 0 (the bank of this code). A timer tick advances
+; GAME_CLOCK and runs the sound work; the queue gets one command each arcade
+; frame (FRAME_TICKS). Other DOC interrupts are only acknowledged. The input
+; capture runs at the end of each interrupt.
 music_irq_entry:
   ax16
   pha
@@ -130,13 +131,10 @@ music_irq_entry:
   phy
   phd
   phb
-  a8
-  lda #^GAME_RAM
-  pha
-  plb
-  a16
   lda #.loword(MUSIC_PAGE)
   tcd
+  phk
+  plb
   a8
 @pending:
   lda f:SOUNDCTL
@@ -152,9 +150,13 @@ music_irq_entry:
   pha
   lda f:SOUNDADRH
   pha
+  lda DOC_MASTER
+  sta f:SOUNDCTL                ; register mode
   lda #1
   bra @marked
 @lean:
+  ; Register mode with DOC_MASTER already: each main-loop write of
+  ; SOUNDCTL leaves that, or the RAM mode above.
   lda #0
 @marked:
   pha
@@ -163,8 +165,6 @@ music_irq_entry:
   ; returns the fetch before and posts a new one (Apple IIgs Hardware
   ; Reference p.107): the second read returns DOC_IRQ and posts a harmless
   ; read of register 0.
-  lda DOC_MASTER
-  sta f:SOUNDCTL
   lda #DOC_IRQ
   sta f:SOUNDADRL
   lda f:SOUNDDATA
@@ -175,17 +175,18 @@ music_irq_entry:
   sta f:SOUNDADRL
   lda f:SOUNDDATA
   cmp #DOC_IRQ_NONE
-  bcs @restore
+  bcs music_irq_restore
   lsr
   and #DOC_OSCILLATORS-1        ; the oscillator
   cmp #MUSIC_IRQ_VOICE
-  bne @restore
+  bne music_irq_restore
 @timer:
   a16
   inc GAME_CLOCK
   a8
   jsr .loword(music_irq_period)
-  jsl native_input_doc_tick
+music_irq_doc_tick:
+  jsl native_input_doc_tick     ; native_input_start makes it a BRA without J13
   lda GAME_CLOCK
   and #FRAME_TICKS-1
   bne :+
@@ -201,7 +202,7 @@ music_irq_entry:
 :
   jsl music_player_tick
   jsl fm_voice_tick
-@restore:
+music_irq_restore:
   ; The GLU state of a main-loop upload goes back.
   pla
   beq @restored
@@ -224,3 +225,4 @@ music_irq_entry:
   pla
   rti
 .assert ^GAME_RAM = 0 .and FRAME_TICKS = 4 .and DOC_OSCILLATORS = 32, error
+.assert ^music_irq_entry = 0, error  ; IRQ_VECTOR and the PHK/PLB above

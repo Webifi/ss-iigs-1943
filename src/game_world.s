@@ -89,6 +89,10 @@ game_world_append:
   lda PLAYER2+PL_WEAPON
   sta a:TRAILER_WEAPON2,x
   lda PLAYER2+PL_WEAPON_TIME
+  cmp #WEAPON_ENDLESS
+  bne :+
+  lda #WEAPON_TIME_MAX+1        ; the last entry of the card's digit table
+:
   sta a:TRAILER_TIME2,x
   lda GAME_CREDITS
   sta a:TRAILER_CREDITS,x
@@ -386,8 +390,7 @@ world_lz_finish_call = *
   jmp .loword(world_no_upload)
 @copy:
 .a16
-  ; A packed entry inflates first (world_lz.s); a raw one goes now, words
-  ; high byte first.
+  ; A packed entry inflates first (world_lz.s); a raw one goes now.
   lda WORLD_LENGTH
   bpl :+
   and #$7fff
@@ -396,18 +399,14 @@ world_lz_finish_call = *
   jmp .loword(world_no_upload)
 :
   jsl d500_stage_world
+  a8
+  lda WORLD_SOURCE+2
+  sta f:packet_copy_bank
+  a16
+  lda WORLD_LENGTH
   ldx WORLD_OUTPUT
-  ldy #0
-@word:
-  lda [WORLD_SOURCE],y
-  xba
-  sta a:0,x
-  inx
-  inx
-  iny
-  iny
-  cpy WORLD_LENGTH
-  bcc @word
+  ldy WORLD_SOURCE
+  jsl packet_copy
 @after_copy:
   stx WORLD_OUTPUT
   lda WORLD_SLOT

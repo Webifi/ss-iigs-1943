@@ -127,3 +127,97 @@ stream_packet:
 
 ; The game stack pointer while S points at the card port for the pushes.
 stream_saved_sp: .res 2
+
+; packet_copy: copy a record of the host data (a world, stage or cabinet
+; job) into the packet, each word with its two bytes exchanged, because the
+; packet holds words high byte first. DBR points at the record and D at the
+; packet, so a word costs one load, one XBA and one direct-page store.
+; Whole passes of packet_copy_words come first; the last, shorter pass
+; enters it at the copy of its highest word.
+; In: A = the bytes (an odd count ends with a whole word), X = the packet
+; place, Y = the record, packet_copy_bank = the bank of the record. A16,
+; X16. JSL. Out: X = the end in the packet. A, Y: changed.
+PACKET_COPY_PASS = 32           ; the words of one pass of packet_copy_words
+PACKET_COPY_BYTES = 6           ; LDA abs,X + XBA + STA dp: one copy in packet_copy_words
+.a16
+.i16
+packet_copy:
+  phb
+  phd
+  phy                           ; the record
+  inc
+  lsr                           ; A = the words
+  pha
+  asl
+  phx
+  clc
+  adc 1,s
+  sta f:packet_copy_end
+  pla
+  tcd                           ; D = the packet place
+  pla
+  tay                           ; Y = the words
+  and #PACKET_COPY_PASS-1
+  beq :+                        ; whole passes only
+  eor #$ffff
+  sec
+  adc #PACKET_COPY_PASS         ; the copies that the last pass skips
+  sta f:packet_copy_entry
+  asl
+  adc f:packet_copy_entry
+  asl                           ; times PACKET_COPY_BYTES
+  adc #.loword(packet_copy_words)
+:
+  sta f:packet_copy_entry       ; 0: no shorter pass
+  tya
+  .repeat 5
+  lsr                           ; / PACKET_COPY_PASS
+  .endrepeat
+  tay                           ; Y = the whole passes
+  plx                           ; X = the record
+  a8
+  lda f:packet_copy_bank
+  pha
+  plb                           ; DBR = the bank of the record
+  a16
+  tya
+  beq @last
+@pass:
+  jsr packet_copy_words
+  txa
+  clc
+  adc #PACKET_COPY_PASS*2
+  tax
+  tdc
+  clc
+  adc #PACKET_COPY_PASS*2
+  tcd
+  dey
+  bne @pass
+@last:
+  lda f:packet_copy_entry
+  beq @done
+  per @done-1                   ; the return of the shorter pass
+  jmp (packet_copy_entry)       ; the pointer is in bank 0
+@done:
+  lda f:packet_copy_end
+  tax
+  pld
+  plb
+  rtl
+.assert PACKET_COPY_PASS = 1 << 5, error  ; the five LSRs above
+
+; packet_copy_words: PACKET_COPY_PASS words from DBR:X to D, the highest
+; first. JSR.
+packet_copy_words:
+  .repeat PACKET_COPY_PASS, I
+  lda a:2*(PACKET_COPY_PASS-1-I),x
+  xba
+  sta z:2*(PACKET_COPY_PASS-1-I)
+  .endrepeat
+  rts
+.assert * - packet_copy_words = PACKET_COPY_PASS*PACKET_COPY_BYTES+1, error
+
+packet_copy_bank: .res 1        ; the bank of the record (its caller sets it)
+packet_copy_entry: .res 2       ; packet_copy: where the shorter pass starts
+packet_copy_end: .res 2         ; packet_copy: the end in the packet

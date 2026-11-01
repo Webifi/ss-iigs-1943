@@ -32,14 +32,18 @@ flight_state_packet_far:
   lda PLAYER+PL_WEAPON
   sta a:PACKET_WEAPON
   lda PLAYER+PL_WEAPON_TIME
+  cmp #WEAPON_ENDLESS
+  bne :+
+  lda #WEAPON_TIME_MAX+1        ; the last entry of the card's digit table
+:
+.assert WEAPON_TIME_MAX = 64 .and WEAPON_ENDLESS > WEAPON_TIME_MAX, error ; scripts/weapon_timer.py TIMES
   sta a:PACKET_TIME
   lda GAME_FLOW
   beq :+
   clc
   adc #PACKET_PAGE_WEAPON
   sta a:PACKET_WEAPON
-  lda GAME_SECONDS
-  sta a:PACKET_TIME
+  stz a:PACKET_TIME
 :
   ; X = the next object record; each takes PACKET_RECORD bytes.
   a16

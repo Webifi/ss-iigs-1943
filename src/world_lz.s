@@ -136,14 +136,18 @@ world_choose_region:
   rtl
 
 ; world_inflate_begin: start the inflate of the record WORLD_SOURCE of
-; WORLD_LENGTH bytes. JSL; A16.
+; WORLD_LENGTH bytes: WL_RECORD points at it, and the literal block move
+; takes its bank. JSL; A16; D = 0.
 world_inflate_begin:
 .a16
 .i16
   lda WORLD_SOURCE
-  sta f:WL_SOURCE
+  sta z:WL_RECORD
+  a8
   lda WORLD_SOURCE+2
-  sta f:WL_SOURCE+2
+  sta z:WL_RECORD+2
+  sta f:inflate_literal_move+2  ; the source bank of the MVN
+  a16
   lda WORLD_LENGTH
   sta f:WL_FINAL
   lda #0
@@ -155,9 +159,9 @@ world_inflate_begin:
   a16
   rtl
 
-; world_inflate_pump: inflate one token (the clock wait, with PUMP_TICKS to
-; spare, and world_inflate_force); at the end WLS_READY. JSL; A16;
-; registers and the direct page pointers kept.
+; world_inflate_pump: inflate up to PUMP_BATCH tokens while PUMP_TICKS
+; ticks are left (the clock wait); at the end WLS_READY. JSL; A16; D = 0;
+; registers kept.
 world_inflate_pump:
 .a16
 .i16
@@ -171,157 +175,151 @@ world_inflate_pump:
   pha
   phx
   phy
-  lda WORLD_POINTER
-  pha
-  lda WORLD_POINTER+2
-  pha
-  lda WORLD_SOURCE
-  pha
-  lda WORLD_SOURCE+2
-  pha
-  lda f:WL_SOURCE
-  sta WORLD_SOURCE
-  lda f:WL_SOURCE+2
-  sta WORLD_SOURCE+2
-  lda #.loword(WORLD_LZ_DICT)
-  sta WORLD_POINTER
-  a8
-  lda #^WORLD_LZ_DICT
-  sta WORLD_POINTER+2
-  a16
+  lda #PUMP_BATCH
+  sta W_LEFT
   lda f:WL_IN
   tay
   lda f:WL_OUT
   tax
+@token:
+  jsr .loword(inflate_token)
+  txa
+  cmp f:WL_FINAL
+  bcs @ready
+  dec W_LEFT
+  beq @stop
+  lda GAME_DUE
+  sec
+  sbc GAME_CLOCK
+  bmi @stop
+  cmp #PUMP_TICKS
+  bcs @token
+  bra @stop
+@ready:
   a8
-  lda [WORLD_SOURCE],y
-  iny
-  cmp #LZ_SHORT
-  bcs @match
-  inc                           ; a literal run
-  sta W_LEN
-  stz W_LEN+1
+  lda #WLS_READY
+  sta f:WORLD_LZ_STATE
   a16
+@stop:
+  tya
+  sta f:WL_IN
+  txa
+  sta f:WL_OUT
+  ply
+  plx
+  pla
+  rtl
+
+; inflate_token: decode the next token of the record at WL_RECORD into
+; WORLD_LZ_OUTPUT. Y = the input offset and X = the output offset; both move
+; on. Each token is one block move. JSR; A16; D = 0; DBR = 0.
+inflate_token:
+.a16
+.i16
+  lda [WL_RECORD],y
+  iny
+  and #$00ff
+  cmp #LZ_SHORT
+  bcs inflate_match
+  ; A literal run of A + 1 bytes from the record.
+  pha                           ; the bytes - 1 (MVN)
   txa
   clc
-  adc W_LEN
-  sta W_END
-  a8
-@literal:
-  lda [WORLD_SOURCE],y
-  iny
-  sta f:WORLD_LZ_OUTPUT,x
-  inx
-  cpx W_END
-  bcc @literal
-  jmp @next
-@match:
+  adc #.loword(WORLD_LZ_OUTPUT)
+  sta W_SCRATCH
+  tya
+  clc
+  adc z:WL_RECORD
+  tax
+  ldy W_SCRATCH
+  pla
+  phb
+inflate_literal_move:
+  mvn #0,#^WORLD_LZ_OUTPUT      ; world_inflate_begin sets the source bank
+  plb
+  txa
+  sec
+  sbc z:WL_RECORD
+  pha                           ; the input offset
+; inflate_output: the stack holds the input offset; Y = the end of the
+; output: X = the output offset, Y = the input offset.
+inflate_output:
+  tya
+  sec
+  sbc #.loword(WORLD_LZ_OUTPUT)
+  tax
+  ply
+  rts
+inflate_match:
   cmp #LZ_LONG
-  bcs @long
-  sta W_SCRATCH+1
+  bcs inflate_long
+  ; A short match: bits 3-5 + LZ_SHORT_MIN bytes, from the WORLD_LZ_SHORT
+  ; entry of bits 0-2 and the next byte.
+  sta W_SCRATCH
   and #LZ_SHORT_LENGTH
   lsr
   lsr
-  lsr
-  clc
-  adc #LZ_SHORT_MIN
-  sta W_LEN
-  stz W_LEN+1
-  lda W_SCRATCH+1
-  and #7                        ; the high bits of the WORLD_LZ_SHORT index
-  sta W_SCRATCH+1
-  lda [WORLD_SOURCE],y
-  iny
-  sta W_SCRATCH
-  a16
+  lsr                           ; carry 0: bits 0-2 were 0
+  adc #LZ_SHORT_MIN-1
+  sta W_LEN                     ; the bytes - 1 (MVN)
   lda W_SCRATCH
+  and #7
+  xba
+  sta W_SCRATCH
+  lda [WL_RECORD],y
+  iny
+  and #$00ff
+  ora W_SCRATCH
   asl
   phx
   tax
   lda f:WORLD_LZ_SHORT,x
   plx
-  sta W_DIST
-  bra @dictionary
-@long:
-.a8
+  bra inflate_dictionary
+inflate_long:
+  ; A long match: bits 0-5 + LZ_LONG_MIN bytes; a distance word follows,
+  ; with LZ_BACK: back in the output.
   and #<~LZ_LONG
   clc
-  adc #LZ_LONG_MIN
-  sta W_LEN
-  stz W_LEN+1
-  a16
-  lda [WORLD_SOURCE],y
+  adc #LZ_LONG_MIN-1
+  sta W_LEN                     ; the bytes - 1 (MVN)
+  lda [WL_RECORD],y
   iny
   iny
-  sta W_DIST
   cmp #LZ_BACK
-  bcc @dictionary
+  bcc inflate_dictionary
   and #LZ_BACK-1
   sta W_DIST
-  sty W_INPUT
+  phy                           ; the input offset
   txa
   clc
   adc #.loword(WORLD_LZ_OUTPUT)
   tay
-  txa
   sec
   sbc W_DIST
-  clc
-  adc #.loword(WORLD_LZ_OUTPUT)
   tax
   lda W_LEN
-  dec
   phb
   mvn #^WORLD_LZ_OUTPUT,#^WORLD_LZ_OUTPUT
   plb
-  tya
-  sec
-  sbc #.loword(WORLD_LZ_OUTPUT)
-  tax
-  ldy W_INPUT
-  a8
-  bra @next
-@dictionary:
-  sty W_INPUT
+  jmp .loword(inflate_output)
+; inflate_dictionary: W_LEN + 1 bytes from WORLD_LZ_DICT + A.
+inflate_dictionary:
+  phy                           ; the input offset
+  clc
+  adc #.loword(WORLD_LZ_DICT)
+  sta W_SCRATCH
   txa
   clc
-  adc W_LEN
-  sta W_END
-  ldy W_DIST
-  a8
-@dict_copy:
-  lda [WORLD_POINTER],y
-  sta f:WORLD_LZ_OUTPUT,x
-  iny
-  inx
-  cpx W_END
-  bcc @dict_copy
-  ldy W_INPUT
-@next:
-  a16
-  tya
-  sta f:WL_IN
-  txa
-  sta f:WL_OUT
-  cmp f:WL_FINAL
-  bcc :+
-  a8
-  lda #WLS_READY
-  sta f:WORLD_LZ_STATE
-  a16
-:
-  pla
-  sta WORLD_SOURCE+2
-  pla
-  sta WORLD_SOURCE
-  pla
-  sta WORLD_POINTER+2
-  pla
-  sta WORLD_POINTER
-  ply
-  plx
-  pla
-  rtl
+  adc #.loword(WORLD_LZ_OUTPUT)
+  tay
+  ldx W_SCRATCH
+  lda W_LEN
+  phb
+  mvn #^WORLD_LZ_DICT,#^WORLD_LZ_OUTPUT
+  plb
+  jmp .loword(inflate_output)
+.assert LZ_SHORT_MIN = 4 .and LZ_SHORT_LENGTH = $38, error  ; the three LSRs above
 
 ; world_inflate_prefetch: when no inflate runs, start the next list entry
 ; if it is packed and its slot does not hold its tile already, while this
@@ -471,30 +469,47 @@ world_inflate_force:
 @last_resort:
   a16
   ldx #64
-  ldy #$8000                    ; the jump comes: no time limit
-  bra @token
+  lda #$8000                    ; the jump comes: no time limit
+  bra @start
 @loop:
-  ldy #0
+  lda #0
+@start:
+  ; W_DONE: the tokens done ($8000 up: no time limit); W_LEFT: allowed.
+  sta W_DONE
+  stx W_LEFT
+  lda f:WL_IN
+  tay
+  lda f:WL_OUT
+  tax
 @token:
-  jsl world_inflate_pump
-  iny
-  dex
-  beq @none16
-  a8
-  lda f:WORLD_LZ_STATE
-  cmp #WLS_INFLATE
-  a16
-  bne @none16
-  cpy #$8000
-  bcs @token
-  cpy #FORCE_SHARE_MIN
+  jsr .loword(inflate_token)
+  txa
+  cmp f:WL_FINAL
+  bcs @ready
+  inc W_DONE
+  dec W_LEFT
+  beq @stop
+  lda W_DONE
+  bmi @token
+  cmp #FORCE_SHARE_MIN
   bcc @token
   lda GAME_DUE
   sec
   sbc GAME_CLOCK
-  bmi @none16
+  bmi @stop
   cmp #LOGIC_TICKS
   bcs @token
+  bra @stop
+@ready:
+  a8
+  lda #WLS_READY
+  sta f:WORLD_LZ_STATE
+  a16
+@stop:
+  tya
+  sta f:WL_IN
+  txa
+  sta f:WL_OUT
 @none16:
   ply
   plx
@@ -504,20 +519,13 @@ world_inflate_force:
 world_inflate_finish:
 .a16
 .i16
-  txy
-  ldx #0
-@copy:
-  lda f:WORLD_LZ_OUTPUT,x
-  xba
-  sta a:0,y
-  inx
-  inx
-  iny
-  iny
-  txa
-  cmp f:WL_FINAL
-  bcc @copy
-  tyx
+  a8
+  lda #^WORLD_LZ_OUTPUT
+  sta f:packet_copy_bank
+  a16
+  lda f:WL_FINAL
+  ldy #.loword(WORLD_LZ_OUTPUT)
+  jsl packet_copy
   a8
   lda #0
   sta f:WORLD_LZ_STATE

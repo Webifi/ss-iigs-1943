@@ -53,7 +53,6 @@ PAGE_NONE = $ff ; CAB_LOADED: no page picture is loaded (the pages: cabinet_layo
 GAME_FLOW: .res $1 ; the arcade mode: 0 the play (a game or the demo), else a cabinet page
 GAME_CREDITS: .res $1 ; the credits
 GAME_INPUT_OLD: .res $1 ; game_flow_tick: INPUT_SYSTEM of the update before (for the edges)
-GAME_SECONDS: .res $1 ; sent in the state packet; only game_flow_init writes it (always 0)
 GAME_SEQUENCE: .res $1 ; game_scene_tick: the step of the stage scene sequence (SEQ_*)
 GAME_SEQUENCE_TICKS: .res $2 ; the updates in the step of GAME_SEQUENCE
 EXIT_RESULT = 1 ; GAME_STAGE_EXIT: the players left: the stage result
@@ -76,7 +75,7 @@ WORLD_CURRENT: .res $1 ; the world region of the camera (world_choose_region)
 WORLD_SKIPS: .res $1 ; world_choose_region: the regions it may still skip
 WORLD_TAGS: .res $2 ; the section in each world slot, or WORLD_NONE
 WORLD_SIDE: .res $2 ; the side of the region that loads
-W_INPUT: .res $2 ; world_inflate_pump: the input offset of the LZ data
+W_DONE: .res $2 ; world_inflate_force: the tokens done; $8000 up: no time limit
 W_SCRATCH: .res $2 ; world_lz: work bytes
 CAB_PAGE: .res $1 ; the cabinet page that shows (PAGE_*)
 CAB_LOADED: .res $1 ; the page whose picture the card has, or PAGE_NONE
@@ -122,7 +121,7 @@ PLAYER_UI_MODE: .res $2 ; for each player: 0 none, else UI_* (packet_layout.inc,
 PLAYER_UI_COUNT: .res $2 ; native_player_wait: the continue count of each player for the packet
 W_LEN: .res $2 ; world_lz: the length of the LZ match or literal run
 W_DIST: .res $2 ; world_lz: the distance of the LZ match
-W_END: .res $2 ; world_inflate_pump: the end of the inflated batch
+W_LEFT: .res $2 ; world_inflate_pump, world_inflate_force: the tokens still allowed
 SPECIAL_WAVE_INDEX: .res $2 ; the next SPECIAL_WAVE_LIST entry of the Tsunami art upload
 SPECIAL_WAVE_READY: .res $1 ; 1: the art of the special is in the card
 LOADED_TRANSFER = 2 ; SPECIAL_LOADED: + the type: its art transfer runs
@@ -405,6 +404,7 @@ FM_PAGES = 144 ; the FM cache pages
 .segment "BANK1RAM"
 MUSIC_STATES: .res MUSIC_SLOTS*MUSIC_SLOT_SIZE ; a song plays in the slot of its priority
 SSG_STATES: .res SSG_PARTS*SSG_PART_SIZE ; the state of each SSG effect voice (audio_ssg)
+SSG_PHASES: .res 8 ; audio_ssg: the parts due at each SSG_TIME & 7 (the delays are multiples of SSG_DELAY_UNIT = 8)
 FM_STATES: .res FM_PARTS*FM_PART_SIZE ; the state of each FM voice (fm_voice)
 FM_CACHE_PTR: .res $3 ; the shared capture directory of the active song
 FM_CACHE_GEN: .res $1 ; changed by the IRQ when the song changes
@@ -456,7 +456,6 @@ WORLD_LZ_OUTPUT: .res $410 ; each encoded token expands at most 32 bytes (src/wo
 WLS_INFLATE = 1 ; WORLD_LZ_STATE: a section inflates
 WLS_READY = 2 ; WORLD_LZ_STATE: the inflated batch is ready
 WORLD_LZ_STATE: .res $1 ; 0, WLS_INFLATE or WLS_READY
-WL_SOURCE: .res $4 ; the encoded record
 WL_IN: .res $2 ; the next encoded byte
 WL_OUT: .res $2 ; the next output byte
 WL_FINAL: .res $2 ; the output length

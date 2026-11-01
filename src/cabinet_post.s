@@ -263,18 +263,13 @@ cabinet_post_append:
   sta POST_JOB
   lda f:cabinet_post_jobs+4,x
   sta POST_JOB+2
+  a8
+  sta f:packet_copy_bank
+  a16
+  lda CAB_LENGTH
   ldx WORLD_OUTPUT
-  ldy #0
-@copy:
-  lda [POST_JOB],y
-  xba
-  sta a:0,x
-  inx
-  inx
-  iny
-  iny
-  cpy CAB_LENGTH
-  bcc @copy
+  ldy POST_JOB
+  jsl packet_copy
   sec
   rtl
 .assert POST_JOB_SIZE = 6, error

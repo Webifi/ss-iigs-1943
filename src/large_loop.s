@@ -37,15 +37,21 @@ large_loop_tick:
   sta LARGE_CAM_X
   lda CAMERA_OBJECT_ALONG
   sta LARGE_CAM_Y
-  a16
-  stz LARGE_SLOT
-@slot:
-  ldx LARGE_SLOT
-  a8
-  lda LARGE_POOL+OBJ_TYPE,x
-  bne :+
-  jmp .loword(@next)
+  ; Each slot with an object runs large_loop_object; an empty slot costs
+  ; one test.
+  .repeat LARGE_COUNT,I
+    lda LARGE_POOL+I*LARGE_SIZE+OBJ_TYPE
+    beq :+
+    ldx #I*LARGE_SIZE
+    jsr .loword(large_loop_object)
 :
+  .endrepeat
+  jmp .loword(large_loop_finish)
+
+; large_loop_object: the large object at the slot X: its tick, its decision
+; and its contacts. JSR; A8.
+large_loop_object:
+  stx LARGE_SLOT
   a16
   txa
   clc
@@ -158,17 +164,12 @@ large_loop_tick:
 @contact:
   jsr .loword(large_loop_contacts)
 @next:
-  a16
-  lda LARGE_SLOT
-  clc
-  adc #LARGE_SIZE
-  sta LARGE_SLOT
-  cmp #LARGE_COUNT*LARGE_SIZE
-  beq @done
-  jmp .loword(@slot)
-  ; The ship finish requests of this pass: stop, start the final one, or
-  ; start the looping one; then one tick of the ship finish.
-@done:
+  a8
+  rts
+
+; large_loop_finish: the ship finish requests of this pass: stop, start the
+; final one, or start the looping one; then one tick of the ship finish.
+large_loop_finish:
   a8
   lda LARGE_PENDING_ACTION
   and #LA_FINISH_STOP

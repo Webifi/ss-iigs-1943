@@ -873,7 +873,6 @@ cabinet_camera:
         ld (scroll_page_index),a
         xor a
         ld (play_new_start_row),a
-        ld (play_back_row_count),a
         ld hl,0
         ld (scene_ring_start),hl
         ld a,(scene_page)

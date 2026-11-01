@@ -22,7 +22,6 @@ game_flow_init:
   stz GAME_COIN_A
   stz GAME_COIN_B
   stz GAME_CREDITS
-  stz GAME_SECONDS
   stz GAME_SEQUENCE
   stz GAME_STAGE_EXIT
   a16

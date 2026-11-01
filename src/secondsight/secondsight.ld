@@ -828,6 +828,8 @@ ASSERT((art_headers & 0xFFF) == 0 && pair_masks == art_headers + 0x800 && span_h
        && span_masks == art_headers + 0xD00, "the sprite cache tables leave the window offsets of sprite_cache.s")
 ASSERT((art_bindings & 0xFFF) == 0 && phase_links == art_bindings + 0x800 && (phase_records & 0xFFF) == 0,
        "the sprite cache links leave the window offsets of sprite_cache.s")
+ASSERT(phase_record_count <= EPOCH_RECORDS * 126,
+       "cache_age_pixels (sprite_cache.s) clears every stamp in fewer than 127 pictures only with more EPOCH_RECORDS")
 ASSERT((world_side1_low >> 12) == (world_side1_high >> 12), "the two side 1 descriptor fragments need one BBR (combined_rows.s)")
 ASSERT(packet_buffer_0__run == 0x4000 && packet_buffer_1__run == 0x8000,
        "stream_arm makes the handshake token from bits 6 and 7 of the buffer high byte")

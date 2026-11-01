@@ -63,7 +63,9 @@ def tables(scene, offload):
             return weapon_glyphs(kind)
         return [(i, color) for i in ([*range(10), 0x24])]
 
-    timer_bytes = 512
+    from weapon_timer import TIMES
+
+    timer_bytes = 2 * TIMES
     hud_bytes = (
         10 * len(scene.state_hud)
         + 2

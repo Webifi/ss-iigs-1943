@@ -47,6 +47,13 @@ start:
   a16
   jsl settings_fw_keep
   jsl J13Init
+  ; Without the J13 keyboard the timer interrupt has no J13 work: its call
+  ; becomes a branch over the call's address (interrupts are off).
+  lda a:.loword(j13Available)
+  bne :+
+  lda #OPCODE_BRA | (2 << 8)
+  sta f:music_irq_doc_tick
+:
   a8
   ldy #KEY_DRAIN_MAX
 @drain:

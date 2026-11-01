@@ -9,26 +9,21 @@
         .include "playfield_config.inc"
 
         .global playfield_setup, update, loading_complete, first_raster_threshold
-        .global half_raster_threshold, row_address, back_row, copy_row
+        .global half_raster_threshold, row_address
         .global entry_begin, entry_end, entry_staging_call, monitor_timing_ready
         .global rgb_first_raster_threshold, rgb_half_raster_threshold, entry_staging_done
-        .global play_world, play_row, play_back_high, play_new_start_row
-        .global play_new_row_count, play_back_row_count
+        .global play_row, play_back_high, play_new_start_row
 
         .equ LOADING, LAYOUT_LOADING_BIT ; cabinet_mode bit: a cabinet upload runs
         .equ BACK_PAGE, PAGE_DISTANCE >> 8 ; play_back_high of page 1
-        .equ TWIN_ROW, TWIN_DISTANCE >> 8 ; high byte offset of the twin of a row
         .equ ENTRY_CBAR, 0xC8           ; the entry: bank area from $8000, common area 1 from $C000
 
         .section .vars.playfield,"aw",@nobits
-play_world: .ds.b 2                     ; the old sea counter (scroll_draw makes the rows)
-play_row: .ds.b 1                       ; the ring row of row_address and back_row
+play_row: .ds.b 1                       ; the ring row of row_address
 play_row_group: .ds.b 2                 ; the first group of play_row
 play_back_high: .ds.b 1                 ; high byte of the back page: 0 or BACK_PAGE
 play_pending_start: .ds.b 2             ; display start of the next picture
 play_new_start_row: .ds.b 1             ; the ring start row of the next picture
-play_new_row_count: .ds.b 1             ; rows that the camera moved
-play_back_row_count: .ds.b 1            ; rows to copy from the clean page (back_row)
 
 ; row_offset_low, then 256 bytes on its high bytes: row x GROUPS_PER_ROW
 ; for each row 0-255. The code indexes it with L and steps with INC H.
@@ -74,8 +69,6 @@ playfield_setup:
         set_io BCR0H, 0
         set_io DMODE, DMODE_BURST
         set_io DCNTL, DCNTL_STREAM
-        ld hl,CAMERA_START
-        ld (play_world),hl
         set_io IAR1L, CARD_HOST         ; packet receive from the IIgs
         set_io IAR1H, 0
         set_io DCNTL, DCNTL_STREAM
@@ -86,9 +79,6 @@ playfield_setup:
         ld bc,SCROLL_PAGE_STATE - 1     ; clear the scroll page state
         ld (hl),0
         ldir
-        ld hl,CAMERA_START
-        ld (scene_previous),hl
-        ld (scene_previous + 2),hl
         ld hl,FOREGROUND_INITIAL
         ld (scene_previous_foreground),hl
 ; The damage maps of both pages and the spare map start empty: left 56,
@@ -137,44 +127,16 @@ update:
 ; visible page while it runs.
         ld a,(cabinet_mode)
         bit LOADING,a
-        jp z,new_rows_loop
+        jp z,draw_picture
         call stream_arm_next
         jp loading_complete
-; The new rows of the retained renderer only move its old sea counter;
-; scroll_draw makes the pixel rows.
-new_rows_loop:
-        ld a,(play_new_row_count)
-        or a
-        jp z,new_rows_done
-        ld hl,play_world
-        add a,(hl)
-        ld (hl),a
-        inc hl
-        ld a,(hl)
-        adc a,0
-        ld (hl),a
-        xor a
-        ld (play_new_row_count),a
-new_rows_done:
+; The DMA banks, all planes and the Oak segments for the drawing.
+draw_picture:
         seq_set SEQ_MAP_MASK, ALL_PLANES
         set_io SAR0B, VGA_WINDOW >> 16
         set_io DAR0B, VGA_WINDOW >> 16
         oak_set OAK_READ_SEGMENT, 1
         oak_set OAK_WRITE_SEGMENT, 0
-        ld a,(play_new_start_row)
-        ld (play_row),a
-back_rows_loop:
-        ld a,(play_back_row_count)
-        or a
-        jp z,back_rows_done
-        call row_address
-        call back_row
-        ld hl,play_row
-        inc (hl)
-        ld hl,play_back_row_count
-        dec (hl)
-        jp back_rows_loop
-back_rows_done:
         plan_and_draw
         call sprite_cache_prefetch
 ; Restore the new start row after the address of the catch-up row.
@@ -271,34 +233,6 @@ row_address:
         inc h
         ld d,(hl)
         ld (play_row_group),de
-        ret
-
-; back_row: copy play_row and its twin from the clean page to the back page.
-; AF, BC, DE, HL changed.
-back_row:
-        ld hl,(play_row_group)
-        ld e,l
-        ld a,(play_back_high)
-        add a,h
-        ld d,a
-        call copy_row
-        ld a,d
-        add a,TWIN_ROW
-        ld d,a
-        jp copy_row
-
-; copy_row: DMA one row of groups from HL to DE (BCR0H is 0). AF changed.
-copy_row:
-        ld a,l
-        out0 (SAR0L),a
-        ld a,h
-        out0 (SAR0H),a
-        ld a,e
-        out0 (DAR0L),a
-        ld a,d
-        out0 (DAR0H),a
-        set_io BCR0L, GROUPS_PER_ROW
-        set_io DSTAT, DSTAT_DE0 | DSTAT_KEEP1 | DSTAT_DME
         ret
 
         .section .text.entry_begin,"ax",@progbits

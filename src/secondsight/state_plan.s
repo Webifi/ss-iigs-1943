@@ -15,7 +15,7 @@
         .global scene_raw, scene_out, scene_screen_base
         .global scene_ring_start, scene_page, scene_items, scene_item, scene_xrec, scene_yrec
         .global scene_attr, scene_desc, scene_value
-        .global scene_fg_camera, scene_previous, hud_p1_score
+        .global scene_fg_camera, hud_p1_score
         .global scene_priority, scene_previous_foreground, scene_bounds, state_object_command
         .global hud_stream_scratch, scene_commands
 
@@ -44,7 +44,6 @@ scene_desc: .ds.b 4                     ; draw header: BBR, pointer
 scene_count: .ds.b 2                    ; not 0: the sprite is clipped
 scene_value: .ds.b 2                    ; x and y value of the object
 scene_fg_camera: .ds.b 2                ; the foreground camera of the packet
-scene_previous: .ds.b 4                 ; the foreground camera of each page
 hud_p1_score: .ds.b SCORE_ENERGY_BYTES  ; score digits, then energy cells
 scene_priority: .ds.b 4                 ; the priority descriptor of a low sprite, or 0
 scene_previous_foreground: .ds.b 2      ; the foreground camera of the last packet; 0xFFFF: none
@@ -60,9 +59,8 @@ scene_commands: .ds.b 0x1000
         .section .text.state_plan_a,"ax",@progbits
 
 ; state_camera: read the cameras of the new state: the ring start, the
-; screen base, the rows to copy back and the new rows, the row cache and
-; the ship alignment; copy the P1 score and energy; then the cabinet or the
-; game camera (scroll_camera).
+; screen base, the row cache and the ship alignment; copy the P1 score and
+; energy; then the cabinet or the game camera (scroll_camera).
 state_camera:
         ld hl,(stream_active_packet)
         ld (scene_raw),hl
@@ -70,8 +68,7 @@ state_camera:
         inc hl
         ld d,(hl)
         inc hl
-        ld (scene_fg_camera),de         ; the sea camera for now
-        ld a,e
+        ld a,e                          ; the sea camera
         neg                             ; ring start
         ld (play_new_start_row),a
         ld l,a
@@ -84,37 +81,6 @@ state_camera:
         or h
         ld h,a
         ld (scene_screen_base),hl
-        ld a,(scene_page)
-        or a
-        ld hl,scene_previous
-        jr z,state_page_camera
-        inc hl
-        inc hl
-state_page_camera:
-        ld e,(hl)
-        inc hl
-        ld d,(hl)
-        inc hl
-        dec hl
-        dec hl
-        ld bc,(scene_fg_camera)
-        ld (hl),c
-        inc hl
-        ld (hl),b
-        ld h,b
-        ld l,c
-        or a
-        sbc hl,de
-        ld a,l
-        ld (play_back_row_count),a      ; rows to copy back on this page
-        ld hl,(play_world)
-        dec h                           ; world - 256
-        ex de,hl
-        ld hl,(scene_fg_camera)
-        or a
-        sbc hl,de
-        ld a,l
-        ld (play_new_row_count),a
         ld hl,(scene_raw)
         inc hl
         inc hl
@@ -560,19 +526,18 @@ state_fg_row:
         ld (scene_out),de
         ret
 
-; state_times56: HL = HL x 56 (GROUPS_PER_ROW). DE changed.
+; state_times56: HL = L x 56 (GROUPS_PER_ROW), from row_offset_low; H is 0
+; on entry. DE changed; A kept.
 state_times56:
-        .rept 3
-        add hl,hl
-        .endr
-        ld d,h
-        ld e,l
-        .rept 3
-        add hl,hl
-        .endr
-        or a
-        sbc hl,de
+        ld h,row_offset_low >> 8
+        ld e,(hl)
+        inc h
+        ld d,(hl)
+        ex de,hl
         ret
+        .if GROUPS_PER_ROW != 56
+        .error "state_times56 multiplies by 56 through row_offset_low"
+        .endif
 
 ; state_word: append HL to the commands at DE. A changed.
 state_word:

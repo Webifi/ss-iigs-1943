@@ -542,6 +542,8 @@ menu_device:
   bne @dead_zone
   a8
   stz a:.loword(joyAbsent)
+  stz a:.loword(joyPresent)     ; the first read waits for the stick again
+  stz a:.loword(joyCheck)
   lda #OPCODE_LDA_DP            ; input_poll works again (joy_read made it RTS)
   sta f:input_poll
   a16

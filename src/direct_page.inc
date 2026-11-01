@@ -8,6 +8,7 @@ STREAM_TOKEN        = $60       ; the handshake byte that says the card takes th
 GAME_UPDATES        = $68       ; 2 bytes: logic updates since the game started
 SEA_CAMERA          = $6c       ; 2 bytes: the sea camera of the packet
 FG_CAMERA           = $6e       ; 2 bytes: the foreground camera of the packet
+WL_RECORD           = $70       ; 3 bytes: the record that the world decoder inflates (src/world_lz.s)
 
 ; Startup: audio_bank_init (src/audio_bank.s) gives audio_binary_upload
 ; (src/audio_binary.s) one packed SSG table at a time.
@@ -209,7 +210,7 @@ SSG_PENDING         = $b8       ; nonzero: audio_ssg_command has a command
 SSG_ACTIVE          = $ba       ; nonzero: an SSG list plays
 SSG_ODD             = $bc       ; the first DOC oscillator of the SSG voice pair (T_ODD)
 SSG_EVEN            = $bd       ; the second one (SSG_ODD + 1)
-SSG_NEXT            = $be       ; empty ticks before the next pending record
+SSG_DUE             = $be       ; audio_ssg_tick: the SSG_PHASES bits of the parts still to test
 SSG_TIME            = $bf       ; low byte of the active SSG tick clock
 SSG_PTR             = $d0       ; 3 bytes: the SSG list record
 SSG_COMMAND_PTR     = $d4       ; 3 bytes: audio_ssg_command: the command table entry
