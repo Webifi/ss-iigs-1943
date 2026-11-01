@@ -70,9 +70,9 @@ cabinet_init:
   rtl
 
 ; cabinet_frame: the cabinet work of a main-loop update, after the input
-; sample: the menu, the live initials, the stage result, the game flow
-; (coins and continues), then the attract (cabinet_tick) during the demo.
-; The demo controls never replace the system and coin input. With the
+; sample: the menu, the live initials, the stage result, a banner, the game
+; flow (coins and continues), then the attract (cabinet_tick) during the
+; demo. The demo controls never replace the system and coin input. With the
 ; SCREEN STOP switch on, only the menu runs. JSL.
 cabinet_frame:
   jsl native_input_menu
@@ -81,6 +81,7 @@ cabinet_frame:
   beq @done
   jsl cabinet_live_tick
   jsl cabinet_result_tick
+  jsl game_banner_tick
   jsl game_flow_tick
   lda CAB_DEMO
   beq @done
@@ -353,6 +354,7 @@ cabinet_clear_play:
   stz PLAYER_UI_MODE
   stz PLAYER_UI_MODE+1
   stz CAB_DEMO
+  stz ALARM_FLAGS               ; arcade $0B87
   rtl
 
 ; cabinet_demo_start: the demo starts when its world is loaded (the quiet
@@ -577,6 +579,16 @@ cabinet_wire_mode:
   lda CAB_DEMO
   cmp #DEMO_END
   beq @demo                     ; INSERT COIN still blinks
+  lda GAME_FLOW
+  bne :+
+  lda STAGE_BANNER_TASK         ; a banner whose text has started
+  cmp #SEQ_BANNER
+  bne :+
+  cmp GAME_SEQUENCE
+  bne :+
+  lda BANNER_LAYOUT
+  rtl
+:
   lda GAME_FLOW
   cmp #PAGE_RANKING_FIRST
   bne :+

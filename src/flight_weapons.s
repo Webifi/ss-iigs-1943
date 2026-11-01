@@ -17,6 +17,7 @@ special_tick_site:
   ; they are JSR special_tick_trampoline, which also loads CAB_RESULT_ACTIVE.
   lda CAB_RESULT_ACTIVE
   bne flight_idle_random        ; the stage result report shows
+  jsl alarm_tick
   lda PLAYER+PL_STATE
   ora PLAYER2+PL_STATE
   bne flight_play

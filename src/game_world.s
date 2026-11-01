@@ -50,8 +50,9 @@ game_world_init:
 .segment "GAMEFLOW"
 ; game_world_append: the world trailer of the packet at X (state_packet):
 ; the camera cross, the wire mode, player 2's score, energy, weapon, the UI
-; fields, the credits, the result digits, the count, the special flags and
-; the trailer flags, the live fields; then the cabinet layout, a cabinet
+; fields, the credits, the result digits, the special timer, the typed
+; letters, the special flags and the trailer flags, the live fields; then
+; the cabinet layout, a cabinet
 ; page, or the next world upload batch. JSL.
 game_world_append:
 .a16
@@ -106,23 +107,10 @@ game_world_append:
     lda CAB_RESULT_DIGITS+2+I*2
     sta a:TRAILER_RESULT_REST+I*2,x
   .endrepeat
-  ; TRAILER_COUNT: SPECIAL_TIMER in play; CAB_ENDING_TEXT on a cabinet page
-  ; and for the stage result once no special uses the card.
-  lda GAME_FLOW
-  cmp #CAB_PAGE_FIRST
-  bcs @typed
-  lda CAB_RESULT_ACTIVE
-  beq @special
   lda SPECIAL_TIMER
-  ora SPECIAL_HOOK
-  beq @typed
-@special:
-  lda SPECIAL_TIMER
-  bra @count
-@typed:
-  lda CAB_ENDING_TEXT
-@count:
   sta a:TRAILER_COUNT,x
+  lda CAB_ENDING_TEXT
+  sta a:TRAILER_TEXT,x
 special_packet_site:
   ; special_install_tick patches this LDA to JSR special_packet_trampoline.
   lda SPECIAL_FLAGS

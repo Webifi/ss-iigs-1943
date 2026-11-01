@@ -7,6 +7,7 @@
 .a8
 .i16
 BOSS_SCROLL_SKIP = $20       ; after the air boss the foreground is this far on
+ALARM_ENERGY = $11           ; alarm_tick: a player below this energy is low (arcade $2E80)
 SCROLL_ACCELERATE = 1        ; STAGE_SCROLL_TASK: the foreground speeds up
 SCROLL_DECELERATE = 2        ; STAGE_SCROLL_TASK: the foreground slows down
 SCROLL_STEPS = 4             ; the entries of the scroll speed tables
@@ -160,8 +161,7 @@ stage_control_boss_replay:
   a8
   lda #1
   sta STAGE_BOSS_PHASE          ; a replay pass
-  .assert SEQ_REPLAY = 1, error
-  sta STAGE_BANNER_TASK
+  jsr .loword(alarm_start)      ; arcade $69C5
   jmp .loword(stage_control_done)
 
 ; stage_control_boss_result: the boss result (arcade $6A11): the foreground
@@ -213,11 +213,109 @@ stage_control_music:
 @done:
   jmp .loword(stage_control_done)
 
-; stage_control_banner: show a banner (arcade $6B41).
+; stage_control_banner: the banner of the stage start (arcade $6B41; the
+; takeoff, bank 1 $934D, sets $E458 to 0 before it).
 stage_control_banner:
+  lda CAMERA_STAGE
+  clc
+  adc #LAYOUT_TARGET
+; stage_banner_start: start the banner of layout A.
+stage_banner_start:
+  sta BANNER_LAYOUT
   lda #SEQ_BANNER
   sta STAGE_BANNER_TASK
   jmp .loword(stage_control_done)
+
+; game_banner_tick: one update of a banner in the play (cabinet_frame): its
+; text types; at its end the banner stops, and after the stage start banner
+; the low energy alarm starts (arcade $2806). JSL.
+game_banner_tick:
+  lda GAME_FLOW
+  bne @done
+  lda GAME_SEQUENCE
+  cmp #SEQ_BANNER
+  bne @done
+  jsl cabinet_text_tick
+  lda CAB_TEXT_DONE
+  beq @done
+  stz STAGE_BANNER_TASK
+  stz GAME_SEQUENCE
+  lda BANNER_LAYOUT
+  cmp #LAYOUT_CONTACT
+  beq @done
+  jsr .loword(alarm_start)
+@done:
+  rtl
+
+; stage_end: the end of a stage, its AIR_RESULT known (game_stage_result;
+; arcade $4AB9): the banner and the low energy alarm stop, all sound stops;
+; then a pass plays SND_CLEAR_MUSIC (SND_CLEAR_REPLAY after a replay pass),
+; a failure SND_RESULT_MUSIC. JSR.
+stage_end:
+  stz STAGE_BANNER_TASK
+  stz GAME_SEQUENCE
+  stz ALARM_FLAGS
+  lda #SND_STOP_ALL
+  jsr .loword(stage_sound_put)
+  lda AIR_RESULT
+  beq :+
+  lda #SND_RESULT_MUSIC
+  jmp .loword(stage_sound_put)
+:
+  lda #SND_STOP_MUSIC
+  jsr .loword(stage_sound_put)
+  lda STAGE_BOSS_PHASE
+  cmp #1                        ; carry 1: a replay pass
+  lda #SND_CLEAR_MUSIC
+  adc #0                        ; SND_CLEAR_REPLAY
+  jmp .loword(stage_sound_put)
+.assert SND_CLEAR_REPLAY = SND_CLEAR_MUSIC+1, error
+
+; alarm_start: the low energy alarm runs from now on, in a paid game only
+; (arcade task $2E3F ends at once in the demo). JSR.
+alarm_start:
+  lda CAB_DEMO
+  bne :+
+  lda #ALARM_RUN
+  tsb ALARM_FLAGS
+:
+  rts
+
+; alarm_tick: one game tick of the low energy alarm (flight_tick; arcade
+; task $2E3F): while a player in the field has less than ALARM_ENERGY,
+; SND_LOW_ENERGY plays; when no player is low, SND_STOP_EFFECTS. JSL.
+alarm_tick:
+  bit ALARM_FLAGS
+  bpl @done                     ; ALARM_RUN
+  lda PLAYER+PL_STATE
+  beq :+                        ; PS_INACTIVE
+  lda PLAYER+PL_ENERGY
+  cmp #ALARM_ENERGY
+  bcc @low
+:
+  lda PLAYER2+PL_STATE
+  beq @none
+  lda PLAYER2+PL_ENERGY
+  cmp #ALARM_ENERGY
+  bcc @low
+@none:
+  bit ALARM_FLAGS
+  bvc @done                     ; ALARM_SOUND
+  lda #ALARM_RUN
+  sta ALARM_FLAGS
+  lda #SND_STOP_EFFECTS
+  bra @sound
+@low:
+  bit ALARM_FLAGS
+  bvs @done
+  lda #ALARM_RUN|ALARM_SOUND
+  sta ALARM_FLAGS
+  lda #SND_LOW_ENERGY
+@sound:
+  jsr .loword(stage_sound_put)
+@done:
+  rtl
+.assert ALARM_RUN = $80 .and ALARM_SOUND = $40, error ; the BIT tests
 
 ; stage_control_accelerate: the takeoff from the carrier: PS_LANDING players
 ; take off and the foreground speeds up (stage_scroll_tick).
@@ -324,8 +422,8 @@ stage_decelerate_speed: .word 2,3,4,5
 stage_decelerate_wait: .word $0e,$20,$5a,$c0
 
 ; stage_control_boss_departure: the players leave for the ship scene (arcade
-; $6BBC): the foreground stops, specials and loops stop, a banner shows and
-; the players dive.
+; $6BBC): the foreground stops, specials and loops stop, the players dive and
+; the banner LAYOUT_CONTACT shows.
 stage_control_boss_departure:
   lda #SCROLL_STOP
   sta CAMERA_BG1_GATE
@@ -341,13 +439,12 @@ stage_control_boss_departure:
   ldx #PLAYER_SIZE
   bra @player
 @ready:
-  lda #SEQ_BANNER
-  sta STAGE_BANNER_TASK
   lda #SND_DIVE
   jsr .loword(stage_sound_put)
   lda #PS_DIVE
   sta STAGE_PLAYER_REQUEST
-  jmp .loword(stage_control_done)
+  lda #LAYOUT_CONTACT           ; arcade $6BD4: $E458 1
+  jmp .loword(stage_banner_start)
 
 ; stage_control_stage_difficulty: STAGE_BULLET_SPEED and STAGE_PLAYER_SPEED
 ; come from stage_difficulty_values at STAGE_SPEED_BASE + CAMERA_STAGE.

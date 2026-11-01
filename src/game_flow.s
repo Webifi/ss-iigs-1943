@@ -5,7 +5,6 @@
 .assert GAME_DIVE_ACTIVE = GAME_BG2_DISABLED+1, error, "dive counter layout"
 COIN_SLOTS = 2
 CREDITS_MAX = 9
-BANNER_TICKS = 180           ; GAME_SEQUENCE_TICKS of a banner
 BOSS_RESULT_TICKS = 2100          ; GAME_SEQUENCE_TICKS of the boss result and its raid
 CAMERA_ARCADE_SIZE = 34      ; the arcade camera block; CAMERA_STAGE follows it
 ENTRY_ALONG = $30            ; the players' along at the start of a stage
@@ -123,8 +122,9 @@ game_flow_tick:
 
 ; game_scene_tick: the scene of this update (59.637 Hz): the stage exit (the
 ; retry, the ending or the result), the departure of the players, then the
-; banner task (GAME_SEQUENCE = STAGE_BANNER_TASK): a banner of BANNER_TICKS,
-; the intro, or the boss result with its raid for BOSS_RESULT_TICKS. JSL.
+; banner task (GAME_SEQUENCE = STAGE_BANNER_TASK): a banner (its text starts
+; here; game_banner_tick types it), the intro, or the boss result with its
+; raid for BOSS_RESULT_TICKS. JSL.
 game_scene_tick:
 .a8
   lda CAB_RESULT_ACTIVE
@@ -162,29 +162,18 @@ game_scene_tick:
   stz GAME_SEQUENCE_TICKS
   a8
   stz STAGE_RAID_WAIT
+  cmp #SEQ_BANNER
+  bne @same
+  lda BANNER_LAYOUT
+  jsl cabinet_text_select
+  rtl
 @same:
   lda GAME_SEQUENCE
-  bne :+
-  rtl
-:
-  cmp #SEQ_REPLAY
-  bne :+
-  stz STAGE_BANNER_TASK
-  rtl
-:
   cmp #SEQ_INTRO
   beq @intro
   cmp #SEQ_RESULT
   beq @result
-  a16                           ; SEQ_BANNER
-  inc GAME_SEQUENCE_TICKS
-  lda GAME_SEQUENCE_TICKS
-  cmp #BANNER_TICKS
-  a8
-  bcc @done
-  stz STAGE_BANNER_TASK
-@done:
-  rtl
+  rtl                           ; none, or SEQ_BANNER
 @intro:
   jmp .loword(native_intro_tick)
 @result:

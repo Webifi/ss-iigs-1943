@@ -271,11 +271,14 @@ STAGE_BOSS_PHASE: .res $1 ; E551
 STAGE_SCROLL_END: ; stage_flow_init clears STAGE_SAVED_CAMERA to STAGE_SCROLL_END
 SOUND_WRITE: .res $1 ; game_sound_request: the next free SOUND_QUEUE entry
 SOUND_READ: .res $1 ; audio_request_tick: the next SOUND_QUEUE entry to play
-SEQ_REPLAY = 1 ; STAGE_BANNER_TASK: the boss pass starts again (arcade task $2E3F)
 SEQ_RESULT = 2 ; STAGE_BANNER_TASK: the boss result and its raid (arcade task $324D)
 SEQ_BANNER = 3 ; STAGE_BANNER_TASK: a banner (arcade task $2778)
 SEQ_INTRO = 4 ; STAGE_BANNER_TASK: the stage intro (arcade task $46E9)
 STAGE_BANNER_TASK: .res $1 ; the next GAME_SEQUENCE (game_flow_tick); 0 none
+BANNER_LAYOUT: .res $1 ; the layout of SEQ_BANNER: LAYOUT_TARGET + stage or LAYOUT_CONTACT
+ALARM_RUN = $80 ; ALARM_FLAGS: the low energy alarm runs (arcade task $2E3F)
+ALARM_SOUND = $40 ; ALARM_FLAGS: SND_LOW_ENERGY plays
+ALARM_FLAGS: .res $1 ; ALARM_* bits (arcade E15A)
 STAGE_MUSIC: .res $1 ; the music of the stage (stage_control_music)
 SOUND_QUEUE_SIZE = $20 ; a power of two
 SOUND_QUEUE: .res SOUND_QUEUE_SIZE ; the sound commands for the sound interrupt

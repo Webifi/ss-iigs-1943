@@ -92,8 +92,9 @@ live_draw:
 
 ; cab_live_damage: mark for repair the rows that the cabinet picture of
 ; cabinet_mode covers (gen/cab_damage.s: cab_damage_demo, cab_damage_idle,
-; cab_damage_result lists of rows, row, left, right; 0 ends a list), then
-; the rows of the live text. Then cab_damage_done (cabinet.s).
+; cab_damage_result, cab_damage_banner lists of rows, row, left, right; 0
+; ends a list), then the rows of the live text. Then cab_damage_done
+; (cabinet.s).
 cab_live_damage:
         ld a,(cabinet_mode)
         cp PAGE_RANKING_FIRST
@@ -106,6 +107,9 @@ cab_live_damage:
         jp c,damage_extra
         cp LAYOUT_LIVE
         jp z,damage_extra
+        cp LAYOUT_TARGET
+        ld hl,cab_damage_banner
+        jp nc,damage_loop
         ld hl,cab_damage_result
 damage_loop:
         ld a,(hl)                       ; rows; 0 ends the list

@@ -36,6 +36,16 @@ def prepare():
         timelines[kind] = t.finish(60)
     layouts[30] = layouts[46]
     timelines[30] = timelines[46]
+    # The banners of the US task $2778: $E458 0 at the start of each stage,
+    # 1 before the dive to the ships (src/cabinet_layouts.inc LAYOUT_TARGET,
+    # LAYOUT_CONTACT). Each holds 180 frames, then the arcade clears it.
+    for stage, name in enumerate(struct.unpack_from("<16H", r, 0x2C2A)):
+        t = Lettering().text(0x2947).wait(30).text(name, instant=True).wait(30).text(0x2952)
+        layouts[87 + stage] = t.layout
+        timelines[87 + stage] = t.finish(180)
+    t = Lettering().text(0x29F8)
+    layouts[103] = t.layout
+    timelines[103] = t.finish(180)
     statistics = []
     for bonus, pointer in enumerate(struct.unpack_from("<12H", r, 0x2CB3)):
         variants = []

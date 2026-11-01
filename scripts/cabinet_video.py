@@ -362,7 +362,7 @@ def install(scene, host):
     from secondsight_link import asset
     from world_stream import card_job
 
-    directory = [(0, 0)] * 96
+    directory = [(0, 0)] * (max(layouts) + 1)
     stored = {}
     prefix = layouts[29][:-3]
     info["post_jobs"] = {}
@@ -475,7 +475,12 @@ def sources(scene):
 def mark_damage(scene):
     """Move the existing dispatcher to descriptor SRAM; keep its bounds."""
     tables = {}
-    for name, kinds in (("demo", (1, 2)), ("idle", (3, 4, 6, 7, 16)), ("result", range(30, 74))):
+    for name, kinds in (
+        ("demo", (1, 2)),
+        ("idle", (3, 4, 6, 7, 16)),
+        ("result", range(30, 74)),
+        ("banner", range(87, 104)),
+    ):
         rows = {}
         for kind in kinds:
             for index, code, attr in scene.cabinet_video["layouts"].get(kind, []):

@@ -31,6 +31,7 @@
         .equ STREAM_TIME2, TRAILER_TIME2 ^ 1
 ; The trailer fields from TRAILER_RESULT (cabinet_values holds them).
         .equ CABINET_COUNT_HIGH, (TRAILER_COUNT ^ 1) - TRAILER_RESULT
+        .equ CABINET_TEXT_COUNT, (TRAILER_TEXT ^ 1) - TRAILER_RESULT
         .equ CABINET_SPECIAL, (TRAILER_SPECIAL ^ 1) - TRAILER_RESULT
         .equ CABINET_FLAGS, (TRAILER_FLAGS ^ 1) - TRAILER_RESULT
 

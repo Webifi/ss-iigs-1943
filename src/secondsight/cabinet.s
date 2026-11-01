@@ -468,7 +468,7 @@ hud_return:
         jp cabinet_ending_clear_bars
 
 ; In: A the mode. Set cab_overlay_count: no limit, or the typed letters of
-; an ending page.
+; an ending page, a stage result or a banner.
 cabinet_text_limit:
         ld b,a
         ld a,0xFF                       ; no limit
@@ -477,8 +477,11 @@ cabinet_text_limit:
         cp PAGE_ENDING_FIRST
         jr c,count_done
         cp LAYOUT_POST_OVER
-        jr nc,count_done
-        ld a,(cabinet_values + 13)
+        jr c,count_typed
+        cp LAYOUT_TARGET
+        jr c,count_done
+count_typed:
+        ld a,(cabinet_values + CABINET_TEXT_COUNT)
         ld (cab_overlay_count),a
 count_done:
         ret
@@ -777,7 +780,7 @@ end_header_ready:
 end_append:
         ld a,(cab_prepared_letters)
         ld b,a
-        ld a,(special_timer)            ; the typed letters
+        ld a,(cabinet_values + CABINET_TEXT_COUNT) ; the typed letters
         sub b
         jp z,cabinet_rank_copy
         cp 17

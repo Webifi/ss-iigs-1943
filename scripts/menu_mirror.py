@@ -11,10 +11,11 @@ def allocate(host):
     contents change while gameplay is paused. The SRAM snapshot (bank $0F)
     and the 32 KiB video snapshot ($E0/$E1 language-card RAM) are areas of
     src/iigs.cfg (src/menu_mirror_host.s)."""
-    # The bootstrap packet: its length word, the 66-byte header (byte 27 is
+    # The bootstrap packet: its length word, the 68-byte header (PKT_OBJECTS
+    # - 2 + TRAILER_HEADER + TRAILER_SIZE of src/packet_layout.inc; byte 27 is
     # 127), then the bootstrap, padded to an even length. The menu code swaps
     # the bytes of each word while it copies the packet for the PEI transport.
-    header = bytearray(66)
+    header = bytearray(68)
     header[27] = 127
     wire = HostData().word("MIRROR_PACKET_END-MIRROR_PACKET-2").data(header).linked_bytes("mirror_bootstrap")
     host.blob_at(wire, "MIRROR_PACKET", length="MIRROR_PACKET_BYTES")

@@ -43,10 +43,11 @@ TRAILER_WEAPON2     = 21        ; P2 PL_WEAPON
 TRAILER_RESULT      = 22        ; CAB_RESULT_DIGITS, the first digit
 TRAILER_CREDITS     = 23        ; GAME_CREDITS
 TRAILER_RESULT_REST = 24        ; the other result digits, in byte pairs
-TRAILER_COUNT       = 34        ; SPECIAL_TIMER, or CAB_ENDING_TEXT
+TRAILER_COUNT       = 34        ; SPECIAL_TIMER
 TRAILER_FLAGS       = 36        ; bit 0 the ending, bit 1 the live fields follow
 TRAILER_SPECIAL     = 37        ; SPECIAL_FLAGS and the SPF_* flash bits
-TRAILER_SIZE        = 38        ; then the live fields, if any
+TRAILER_TEXT        = 38        ; CAB_ENDING_TEXT: the typed letters of the layout
+TRAILER_SIZE        = 40        ; then the live fields, if any
 TRAILER_LIVE_LAYOUT = 12        ; in the live fields: CAB_LIVE_LAYOUT
 ; TRAILER_UI_MODE: the UI mode in bits 0-3, AIR_LIFE (the boss bars) above.
 UI_MODE_MASK        = 15

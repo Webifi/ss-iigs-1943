@@ -255,7 +255,7 @@ def install(out, host, scene):
     from game_enemies import read
     from cabinet_ending import PANELS
 
-    text_directory = [0] * 96
+    text_directory = [0] * (max(scene.cabinet_timelines) + 1)
     for kind, data in scene.cabinet_timelines.items():
         text_directory[kind] = blob(data)
     statistics = HostData().dword(

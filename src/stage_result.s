@@ -39,10 +39,10 @@ game_difficulty_init:
   rts
 
 ; game_stage_result: the end of a stage (game_scene_tick, EXIT_RESULT):
-; the outcome (the ship result, except on the air boss stages); a failed
-; first pass or last stage is a retry; the last stage goes to the ending;
-; else the refill tally starts (EXIT_REFILL), with the awards of a pass.
-; JSL.
+; the outcome (the ship result, except on the air boss stages) and its music
+; (stage_end); a failed first pass or last stage is a retry; the last stage
+; goes to the ending; else the refill tally starts (EXIT_REFILL), with the
+; awards of a pass. JSL.
 game_stage_result:
   lda GAME_STAGE_EXIT
   cmp #EXIT_REFILL
@@ -58,6 +58,7 @@ game_stage_result:
   beq @outcome
   jsr .loword(game_ship_result)
 @outcome:
+  jsr .loword(stage_end)
   jsr .loword(game_result_clear)
   lda AIR_RESULT
   cmp #AR_RETRY
@@ -357,7 +358,7 @@ game_result_clear:
 
 ; game_stage_retry: the stage again (EXIT_RETRY): its retry event
 ; (game_retry_events), the scroll stage * $800, the players enter again at
-; RETRY_ALONG, SND_RESULT_MUSIC. JSL.
+; RETRY_ALONG. JSL.
 game_stage_retry:
   a16
   lda CAMERA_STAGE
@@ -401,6 +402,4 @@ game_stage_retry:
   ldx #PLAYER_SIZE
   bra @player
 @done:
-  lda #SND_RESULT_MUSIC
-  jsl game_sound_request
   rtl
