@@ -176,17 +176,11 @@ display_key:
   lda a:.loword(display_keycode)
   cmp #KEY_UP
   beq @up
-  cmp #KEY_MAC_UP
-  beq @up
   cmp #KEY_DOWN
-  beq @down
-  cmp #KEY_MAC_DOWN
   beq @down
   cmp #KEY_RETURN
   beq @enter
   cmp #KEY_RIGHT
-  beq @enter
-  cmp #KEY_MAC_RIGHT
   beq @enter
   jmp .loword(display_key_done)
 @up:
@@ -282,11 +276,7 @@ display_preset_key:
   lda a:.loword(display_keycode)
   cmp #KEY_UP
   beq @up
-  cmp #KEY_MAC_UP
-  beq @up
   cmp #KEY_DOWN
-  beq @down
-  cmp #KEY_MAC_DOWN
   beq @down
   cmp #KEY_RETURN
   bne @done
@@ -497,11 +487,7 @@ display_edit_key:
   lda a:.loword(display_keycode)
   cmp #KEY_UP
   beq @up
-  cmp #KEY_MAC_UP
-  beq @up
   cmp #KEY_DOWN
-  beq @down
-  cmp #KEY_MAC_DOWN
   beq @down
   cmp #KEY_RETURN
   beq @enter

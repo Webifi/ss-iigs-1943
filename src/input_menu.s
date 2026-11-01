@@ -15,7 +15,6 @@ MENU_FOOTER = 22*MENU_COLUMNS  ; the row of the message
 NAME_SIZE = 10               ; a name of menu_actions, menu_key_names, ...
 SOURCE_NAME_SIZE = 14        ; a name of menu_sources
 LEVEL_TEXT_SIZE = 3          ; a number of menu_audio_numbers
-KEY_NO_NAME = 255            ; menu_key_index: no name; the menu shows the code
 NO_BINDING = BINDINGS_BYTES  ; menu_find_binding: the action has no binding
 ACTION_COLUMN = 2            ; MP_ACTIONS: the action name
 KEY_COLUMN = 14              ; MP_ACTIONS: the name of the bound key
@@ -263,17 +262,11 @@ menu_key:
   jmp .loword(menu_level_key)
 :
   cmp #KEY_UP
-  beq :+
-  cmp #KEY_MAC_UP
-  bne :++
-:
+  bne :+
   jmp .loword(@up)
 :
   cmp #KEY_DOWN
-  beq :+
-  cmp #KEY_MAC_DOWN
-  bne :++
-:
+  bne :+
   jmp .loword(@down)
 :
   cpx #MP_DIPS
@@ -285,8 +278,6 @@ menu_key:
   cmp #KEY_RETURN
   beq @enter
   cmp #KEY_RIGHT
-  beq @right
-  cmp #KEY_MAC_RIGHT
   beq @right
   rts
 @audio:
@@ -421,11 +412,7 @@ menu_key:
 @binding_menu:
   cmp #KEY_UP
   beq @choice_up
-  cmp #KEY_MAC_UP
-  beq @choice_up
   cmp #KEY_DOWN
-  beq @choice_down
-  cmp #KEY_MAC_DOWN
   beq @choice_down
   cmp #KEY_RETURN
   bne @done
@@ -691,6 +678,7 @@ menu_bind:
 :
   plx
 @write:
+  jsr .loword(menu_unbind_key)
   a8
   lda a:.loword(keyAction)
   sta a:.loword(settings+SET_BINDINGS+BIND_KEY),x
@@ -702,6 +690,63 @@ menu_bind:
   stz a:.loword(menuListen)
   stz a:.loword(menuMessage)
   jmp .loword(compile_bindings)
+
+; menu_unbind_key: the key keyAction of actionSource leaves every other
+; binding (X: the record that takes it, kept). A binding of the same device
+; or keyboards goes; one of both keyboards keeps the keyboard that is not
+; taken (SOURCE_ADB and SOURCE_J13 are the bits of SOURCE_KEYBOARDS). JSR;
+; A16.
+menu_unbind_key:
+  stx a:.loword(menuTemp)
+  ldy #0
+@record:
+  cpy a:.loword(menuTemp)
+  beq @next
+  lda a:.loword(settings+SET_BINDINGS+BIND_ACTION),y
+  and #255
+  cmp #BIND_ACTIONS
+  bcs @next                     ; a free record
+  lda a:.loword(settings+SET_BINDINGS+BIND_KEY),y
+  and #255
+  cmp a:.loword(keyAction)
+  bne @next
+  lda a:.loword(settings+SET_BINDINGS+BIND_SOURCE),y
+  and #255
+  tax                           ; X = its source
+  cmp a:.loword(actionSource)
+  beq @free
+  cmp #SOURCE_KEYBOARDS+1
+  bcs @next                     ; another device
+  lda a:.loword(actionSource)
+  cmp #SOURCE_KEYBOARDS+1
+  bcs @next                     ; a device key is no keyboard key
+  eor #$ffff
+  sta a:.loword(menuCount)
+  txa
+  and a:.loword(menuCount)      ; the keyboards that stay
+  beq @free
+  a8
+  sta a:.loword(settings+SET_BINDINGS+BIND_SOURCE),y
+  a16
+  bra @next
+@free:
+  a8
+  lda #BIND_NONE
+  sta a:.loword(settings+SET_BINDINGS+BIND_KEY),y
+  sta a:.loword(settings+SET_BINDINGS+BIND_ACTION),y
+  lda #SOURCE_NONE
+  sta a:.loword(settings+SET_BINDINGS+BIND_SOURCE),y
+  a16
+@next:
+  iny
+  iny
+  iny
+  iny                           ; BINDING_SIZE
+  cpy #BINDINGS_BYTES
+  bcc @record
+  ldx a:.loword(menuTemp)
+  rts
+.assert SOURCE_KEYBOARDS = SOURCE_ADB|SOURCE_J13 .and BINDING_SIZE = 4, error
 
 ; menu_selected_binding: X = the offset of the binding menuAlias of the
 ; action menuAction (past the last one: the first again), or NO_BINDING.
@@ -1108,24 +1153,108 @@ menu_draw_boolean:
   jmp .loword(menu_put)
 
 ; menu_copy_binding_name: at X the name of the key A of the source
-; menuBindingSource: a key name, else KEY and the code in hex; for a device
-; the name of its action (the mouse and joystick, or a pad). JSR; A16.
+; menuBindingSource: the name of a key without a character
+; (menu_named_keys), "PAD" and the character of a keypad key (keypadKeys),
+; the unshifted character of another key (asciiKeys), else KEY and the code
+; in hex; for a device the name of its action (the mouse and joystick, or a
+; pad). JSR; A16.
 menu_copy_binding_name:
   phx
   ldx a:.loword(menuBindingSource)
   cpx #SOURCE_DEVICE_FIRST
-  bcs @device
+  bcc :+
+  jmp .loword(@device)
+:
+  tax                           ; X = the key code
+  a8
+  stx a:.loword(menuTemp)
+  lda #' '
+  ldy #NAME_SIZE-1
+@blank:
+  sta a:.loword(menuKeyName),y
+  dey
+  bpl @blank
+  ldy #NAMED_KEYS-1
+@named:
+  txa
+  cmp a:.loword(menu_named_keys),y
+  beq @long
+  dey
+  bpl @named
+  ldx #KEYPAD_CHARS-1
+@keypad:
+  lda f:keypadKeys,x
+  cmp a:.loword(menuTemp)
+  beq @keypad_key
+  dex
+  bpl @keypad
+  ldy #KEY_CHARACTERS-1
+@character:
+  a16
+  lda a:.loword(menu_key_characters),y
+  and #255
   tax
   a8
-  lda a:.loword(menu_key_index),x
-  cmp #KEY_NO_NAME
-  beq @hex
+  lda f:asciiKeys,x
+  cmp a:.loword(menuTemp)
+  beq @character_key
+  dey
+  bpl @character
+  ldx a:.loword(menuTemp)
+  bra @hex
+@keypad_key:
+  txa                           ; the keypad character
+  sta a:.loword(menuKeyName+4)
+  ldy #3
+@prefix:
+  lda a:.loword(menu_pad_prefix),y
+  sta a:.loword(menuKeyName),y
+  dey
+  bpl @prefix
+  bra @name
+@character_key:
+  txa                           ; the character, a letter as a capital
+  cmp #'a'
+  bcc :+
+  cmp #'z'+1
+  bcs :+
+  and #<~$20
+:
+  sta a:.loword(menuKeyName)
+@name:
   a16
-  and #255
+  ldy #.loword(menuKeyName)
+  plx
+  jmp .loword(menu_copy_name)
+@long:
+  cpy #FUNCTION_FIRST
+  bcs @function
+  a16
+  tya
   jsr .loword(menu_name_offset)
   clc
   adc #.loword(menu_key_names)
   bra @copy
+@function:                      ; F and the number of the key, 1-15
+  lda #'F'
+  sta a:.loword(menuKeyName)
+  tya
+  sec
+  sbc #FUNCTION_FIRST-1
+  cmp #10
+  bcc @digit
+  sbc #10                       ; carry is set
+  pha
+  lda #'1'
+  sta a:.loword(menuKeyName+1)
+  pla
+  ora #'0'
+  sta a:.loword(menuKeyName+2)
+  jmp .loword(@name)
+@digit:
+  ora #'0'
+  sta a:.loword(menuKeyName+1)
+  jmp .loword(@name)
 @hex:
   a16
   txa
@@ -1255,6 +1384,7 @@ menu_title_system: .asciiz "START AND COINS"
 menu_title_devices: .asciiz "DEVICES"
 menu_title_sound: .asciiz "SOUND"
 menu_key_prefix: .asciiz "KEY "
+menu_pad_prefix: .byte "PAD "      ; menu_copy_binding_name: a keypad key
 menu_hex: .byte "0123456789ABCDEF"
 menu_unavailable: .asciiz "NO DEVICE"
 menu_found: .asciiz "FOUND"
@@ -1317,6 +1447,7 @@ menuFindAlias: .word 0          ; menu_find_binding: the binding number
 menuDest: .word 0               ; the MENU_TEXT offset of the next row
 menuBindingSource: .word 0      ; menu_copy_binding_name: the source
 menuTemp: .word 0
+menuKeyName: .res NAME_SIZE       ; menu_copy_binding_name: a key named by its character
 menuCount: .word 0              ; menu_list, menu_copy: the count left
 menuRow: .word 0                ; menu_publish: the row
 menuFlat: .word 0               ; menu_publish: the MENU_TEXT offset
@@ -1361,11 +1492,7 @@ menu_audio_key:
 menu_level_key:
   cmp #KEY_UP
   beq @up
-  cmp #KEY_MAC_UP
-  beq @up
   cmp #KEY_DOWN
-  beq @down
-  cmp #KEY_MAC_DOWN
   beq @down
   cmp #KEY_RETURN
   bne @done
@@ -1588,12 +1715,8 @@ menu_dip_key:
   beq @step
   cmp #KEY_RIGHT
   beq @step
-  cmp #KEY_MAC_RIGHT
-  beq @step
   ldy #$ffff                    ; -1
   cmp #KEY_LEFT
-  beq @step
-  cmp #KEY_MAC_LEFT
   bne @done
 @step:
   sty a:.loword(menuTemp)

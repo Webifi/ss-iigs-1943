@@ -494,7 +494,8 @@ updateModifiers:
   rts
 ; sampleCharacter: a new character that is not a firmware repeat: the press
 ; of its identity (asciiKeys). In J13_MENU the first key is a menu use
-; (in the demo only ESC is), and the held keys are checked first. Then
+; while the menu shows (on the attract pages only ESC is), and the held
+; keys are checked first. Then
 ; sampleRelease: no key down (KBDSTRB) releases the held identities.
 sampleCharacter:
   lda a:.loword(sampleAscii)
@@ -506,7 +507,16 @@ sampleCharacter:
   lda a:.loword(sampleAscii)
   and #<~KBD_STROBE
   tax
+  lda a:.loword(sampleMods)
+  bit #KMOD_KEYPAD              ; a keypad key keeps its own ADB code
+  beq :+
+  cpx #KEYPAD_CHARS
+  bcs :+
+  lda f:keypadKeys,x
+  bra :++
+:
   lda f:asciiKeys,x
+:
   and #255
   cmp #NONE
   beq sampleRelease
@@ -517,9 +527,9 @@ sampleCharacter:
   bne sampleOrdinary
   lda a:.loword(j13MenuSeen)
   bne sampleMenuOrdinary
-  lda f:CAB_DEMO
-  beq sampleMenuUsed
-  lda a:.loword(newKey)
+  lda f:menuMode                ; the menu shows: any key is a menu use
+  bne sampleMenuUsed
+  lda a:.loword(newKey)         ; the attract pages: only ESC (it opens the menu)
   cmp #KEY_ESC
   bne sampleMenuOrdinary
 sampleMenuUsed:
@@ -1237,6 +1247,39 @@ asciiKeys:
   .byte $23,$0c,$0f,$01,$11,$20,$09,$0d,$07,$10,$06,$21,$2a,$1e,$16,$1b  ; $50-$5F
   .byte $32,$00,$0b,$08,$02,$0e,$03,$05,$04,$22,$26,$28,$25,$2e,$2d,$1f  ; $60-$6F
   .byte $23,$0c,$0f,$01,$11,$20,$09,$0d,$07,$10,$06,$21,$2a,$1e,$32,$33  ; $70-$7F
+
+; keypadKeys: the ADB key code of each keypad character below KEYPAD_CHARS
+; (KEYMODREG KMOD_KEYPAD), so the keypad keys differ from the main keys.
+KEYPAD_CHARS = $40
+keypadKeys:
+.repeat KEYPAD_CHARS, C
+  .if C = $0d
+    .byte KEY_PAD_ENTER
+  .elseif C = '0'
+    .byte KEY_PAD_0
+  .elseif C >= '1' .and C <= '7'
+    .byte KEY_PAD_1+C-'1'
+  .elseif C = '8'
+    .byte KEY_PAD_8
+  .elseif C = '9'
+    .byte KEY_PAD_9
+  .elseif C = '.'
+    .byte KEY_PAD_POINT
+  .elseif C = '*'
+    .byte KEY_PAD_TIMES
+  .elseif C = '+'
+    .byte KEY_PAD_PLUS
+  .elseif C = '/'
+    .byte KEY_PAD_DIVIDE
+  .elseif C = '-'
+    .byte KEY_PAD_MINUS
+  .elseif C = '='
+    .byte KEY_PAD_EQUALS
+  .else
+    .byte NONE
+  .endif
+.endrepeat
+.assert KEY_PAD_7 = KEY_PAD_1+6, error  ; the keypad codes 1-7 are in a row
 
 ; readMCU: A8 = the microcontroller byte at X (GLU_READ_MEMORY); carry 1
 ; when the GLU does not answer. JSR.

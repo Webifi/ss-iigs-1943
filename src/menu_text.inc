@@ -39,51 +39,19 @@ menu_actions:
   menu_name "COIN A"
   menu_name "COIN B"
 
-; The key names: KN_* is the menu_key_names entry of a name.
-.enum
-  KN_A
-  KN_S
-  KN_D
-  KN_W
-  KN_1
-  KN_2
-  KN_5
-  KN_6
-  KN_RETURN
-  KN_TAB
-  KN_SPACE
-  KN_DELETE
-  KN_ESC
-  KN_CONTROL
-  KN_COMMAND
-  KN_SHIFT
-  KN_CAPS_LOCK
-  KN_OPTION
-  KN_LEFT
-  KN_RIGHT
-  KN_DOWN
-  KN_UP
-  KN_PAD_ENTER
-  KN_PAD_1
-  KN_PAD_2
-  KN_PAD_3
-  KN_PAD_4
-  KN_PAD_5
-  KN_PAD_6
-  KN_PAD_7
-  KN_PAD_8
-  KN_PAD_9
-  KEY_NAMES
-.endenum
+; The keys without a character: menu_named_keys lists their ADB codes and
+; menu_key_names their names, in the same order. Every other key is named
+; by its character (menu_copy_binding_name).
+menu_named_keys:
+  .byte KEY_RETURN, KEY_TAB, KEY_SPACE, KEY_DELETE, KEY_ESC, KEY_CONTROL
+  .byte KEY_COMMAND, KEY_SHIFT, KEY_CAPS_LOCK, KEY_OPTION
+  .byte KEY_LEFT, KEY_RIGHT, KEY_DOWN, KEY_UP, KEY_PAD_ENTER, KEY_CLEAR
+  .byte KEY_HELP, KEY_HOME, KEY_PAGE_UP, KEY_FORWARD_DELETE, KEY_END, KEY_PAGE_DOWN
+menu_function_keys:                 ; named F and their number
+  .byte KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8
+  .byte KEY_F9, KEY_F10, KEY_F11, KEY_F12, KEY_F13, KEY_F14, KEY_F15
+NAMED_KEYS = *-menu_named_keys
 menu_key_names:
-  menu_name "A"
-  menu_name "S"
-  menu_name "D"
-  menu_name "W"
-  menu_name "1"
-  menu_name "2"
-  menu_name "5"
-  menu_name "6"
   menu_name "RETURN"
   menu_name "TAB"
   menu_name "SPACE"
@@ -99,90 +67,20 @@ menu_key_names:
   menu_name "DOWN"
   menu_name "UP"
   menu_name "PAD ENTER"
-  menu_name "PAD 1"
-  menu_name "PAD 2"
-  menu_name "PAD 3"
-  menu_name "PAD 4"
-  menu_name "PAD 5"
-  menu_name "PAD 6"
-  menu_name "PAD 7"
-  menu_name "PAD 8"
-  menu_name "PAD 9"
-.assert *-menu_key_names = KEY_NAMES*NAME_SIZE, error
-
-; menu_key_index: the KN_* name of each ADB key code, or KEY_NO_NAME (the
-; menu shows the code). (:: names the global key codes of iigs.inc, which
-; .if needs as constants inside the scope.)
-menu_key_index:
-.repeat KEY_CODES, K
-  .if K = ::KEY_A
-    .byte KN_A
-  .elseif K = ::KEY_S
-    .byte KN_S
-  .elseif K = ::KEY_D
-    .byte KN_D
-  .elseif K = ::KEY_W
-    .byte KN_W
-  .elseif K = ::KEY_1
-    .byte KN_1
-  .elseif K = ::KEY_2
-    .byte KN_2
-  .elseif K = ::KEY_5
-    .byte KN_5
-  .elseif K = ::KEY_6
-    .byte KN_6
-  .elseif K = ::KEY_RETURN
-    .byte KN_RETURN
-  .elseif K = ::KEY_TAB
-    .byte KN_TAB
-  .elseif K = ::KEY_SPACE
-    .byte KN_SPACE
-  .elseif K = ::KEY_DELETE
-    .byte KN_DELETE
-  .elseif K = ::KEY_ESC
-    .byte KN_ESC
-  .elseif K = ::KEY_CONTROL
-    .byte KN_CONTROL
-  .elseif K = ::KEY_COMMAND
-    .byte KN_COMMAND
-  .elseif K = ::KEY_SHIFT
-    .byte KN_SHIFT
-  .elseif K = ::KEY_CAPS_LOCK
-    .byte KN_CAPS_LOCK
-  .elseif K = ::KEY_OPTION
-    .byte KN_OPTION
-  .elseif K = ::KEY_LEFT .or K = ::KEY_MAC_LEFT
-    .byte KN_LEFT
-  .elseif K = ::KEY_RIGHT .or K = ::KEY_MAC_RIGHT
-    .byte KN_RIGHT
-  .elseif K = ::KEY_DOWN .or K = ::KEY_MAC_DOWN
-    .byte KN_DOWN
-  .elseif K = ::KEY_UP .or K = ::KEY_MAC_UP
-    .byte KN_UP
-  .elseif K = ::KEY_PAD_ENTER
-    .byte KN_PAD_ENTER
-  .elseif K = ::KEY_PAD_1
-    .byte KN_PAD_1
-  .elseif K = ::KEY_PAD_2
-    .byte KN_PAD_2
-  .elseif K = ::KEY_PAD_3
-    .byte KN_PAD_3
-  .elseif K = ::KEY_PAD_4
-    .byte KN_PAD_4
-  .elseif K = ::KEY_PAD_5
-    .byte KN_PAD_5
-  .elseif K = ::KEY_PAD_6
-    .byte KN_PAD_6
-  .elseif K = ::KEY_PAD_7
-    .byte KN_PAD_7
-  .elseif K = ::KEY_PAD_8
-    .byte KN_PAD_8
-  .elseif K = ::KEY_PAD_9
-    .byte KN_PAD_9
-  .else
-    .byte KEY_NO_NAME
-  .endif
-.endrepeat
+  menu_name "CLEAR"
+  menu_name "HELP"
+  menu_name "HOME"
+  menu_name "PAGE UP"
+  menu_name "DEL"
+  menu_name "END"
+  menu_name "PAGE DOWN"
+FUNCTION_FIRST = menu_function_keys-menu_named_keys
+.assert *-menu_key_names = FUNCTION_FIRST*NAME_SIZE .and NAMED_KEYS-FUNCTION_FIRST = 15, error
+; menu_key_characters: the characters that name the other keys, unshifted:
+; the first that asciiKeys (src/input_j13.s) gives the code of a key names it.
+menu_key_characters:
+  .byte "0123456789abcdefghijklmnopqrstuvwxyz',-./;=[", $5c, "]`"
+KEY_CHARACTERS = *-menu_key_characters
 
 ; menu_device_names: the device actions of the mouse and the joystick.
 menu_device_names:
