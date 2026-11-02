@@ -11,8 +11,7 @@ your own ROM files when you build.
 
 ## What you need to play
 
-- An Apple IIgs with RAM in banks $02-$0F: a ROM 03 with its 1 MB, or a ROM 01
-  with a 1 MB memory card
+- A ROM 03 Apple IIgs, or a ROM 01 with a 1 MB memory card
 - A Second Sight card in slot 3, with a VGA monitor or an AppleColor RGB
   monitor on the card
 - A hard disk device for the disk image (see the list under Build)
@@ -34,9 +33,9 @@ You need:
 1. Put your 1943 ROM set into `roms/` (see `roms/README.md`).
 2. Run `./build.sh`.
 
-The disk images are in `build/game-disk/`. HASH in their names is the first 6
-hex digits of the SHA-256 of the game data (SS1943.SYSTEM and SS1943.DATA), so a
-build with different game data gets a different name:
+The disk images are in `build/game-disk/`. The code in each name (HASH, for
+example `1943-ee19c6.hdv`) changes when the game changes, so you can tell
+builds apart:
 
 - `1943-HASH.hdv`: a ProDOS volume, for a CFFA3000, a FloppyEmu or another
   SmartPort hard disk, a MicroDrive/Turbo, a BOOTI or an emulator
@@ -47,8 +46,8 @@ build with different game data gets a different name:
 
 ## Play
 
-Start the IIgs from the 1943 volume. The game loads and starts its attract
-mode, as the arcade machine does. Put in a coin, then push a start key.
+Boot the IIgs from the 1943 disk. When it has loaded, the game shows its
+attract mode, like the arcade machine. Press 5 to add a coin, then 1 to start.
 
 ### Default controls
 
@@ -60,63 +59,60 @@ mode, as the arcade machine does. Put in a coin, then push a start key.
 | Start | 1 | 2 |
 | Coin | 5 (coin A) | 6 (coin B) |
 
-Esc opens the options menu. You cannot change the Esc key.
+Press Esc for the options menu. Esc cannot be changed.
 
-The keyboard keys work on the ADB keyboard and on a J13 keyboard. The mouse
-is a virtual stick: move the mouse away from its centre to push the plane,
-and move it back to stop.
+The keys work on the ADB keyboard and on a J13 keyboard. The mouse works like
+a joystick: move it to fly that way, and move it back to stop.
 
-SNES pads on a SNES MAX adapter: pad one is player 1, pad two is player 2.
-The direction pad moves, B fires, Y is the special, Start is the start of
-that player, and Select puts in a coin (pad one coin A, pad two coin B). Set
-the slot of the adapter in the DEVICES menu first.
+SNES pads (on a SNES MAX adapter): pad one is player 1, pad two is player 2.
+The D-pad moves, B fires, Y is the special, Start starts and Select adds a
+coin. Set the adapter's slot in the DEVICES menu first.
 
 ### Options menu
 
-Push Esc during the game to stop it and open the menu. Use the up and down
-arrows to choose, and Return to select. Esc goes back one page, and Esc on
-the first page goes back to the game. A joystick, the mouse or a pad also
-works: its directions are the arrows, and its buttons are Return.
+Press Esc during play to pause and open the menu. The up and down arrows
+choose, Return selects, and Esc goes back. Esc on the first page returns to
+the game. A joystick, the mouse or a pad works too: move to choose, press a
+button to select.
 
-- **CONTROLS**: the bindings of PLAYER 1, PLAYER 2 and START AND COINS. Choose
-  an action, then CHANGE (the next key or device input replaces the binding),
-  ADD (the next input is one more binding), REMOVE, NEXT BINDING, or BOTH
-  KEYBOARDS (the binding is for the ADB keyboard, the J13 keyboard, or both).
-  There is space for 64 bindings.
-- **DEVICES**: Return or the right arrow changes a value.
-  - J13 PLAY: ON makes the game read the J13 keyboard during play. The menu
-    always reads it.
-  - SNES MAX SLOT: the slot of the adapter (1, 2, 4, 5 or 6). The default is
-    none.
-  - RECHECK JOYSTICK: look for the joystick again.
-  - MOUSE DEAD ZONE: how far the mouse moves before it pushes the plane (3 to
+- **CONTROLS**: change the keys for PLAYER 1, PLAYER 2 and START AND COINS.
+  Pick an action, then CHANGE its key, ADD another key, or REMOVE one. After
+  CHANGE or ADD, press the new key or button. NEXT BINDING steps through the
+  keys of an action that has more than one. BOTH KEYBOARDS picks whether a key
+  works on the ADB keyboard, the J13 keyboard, or both.
+- **DEVICES**: Return or the right arrow changes a setting.
+  - J13 PLAY: turn on to play with a J13 keyboard. The menu always works with
+    it.
+  - SNES MAX SLOT: the adapter's slot (1, 2, 4, 5 or 6). Default: none.
+  - RECHECK JOYSTICK: look for the joystick again, for example after you plug
+    one in.
+  - MOUSE DEAD ZONE: how far the mouse must move before the plane moves (3 to
     24, default 9).
-  - MOUSE PLAYER and JOYSTICK PLAYER: move that device and its bindings to
-    the other player (default player 2).
-  - RESTORE DEFAULT BINDINGS: all bindings go back to the table above.
-- **SOUND**: MUSIC VOLUME and EFFECTS VOLUME (0 to 100, default 100), DEMO
-  SOUNDS (sound in the attract mode, default ON).
-- **DISPLAY**: the timing of the monitor that the card uses (VGA or
-  AppleColor RGB). The game speed follows the picture rate of the preset.
-  - VGA presets: ARCADE 59.64 HZ (default), 800X600 SYNC 59.65 HZ, 800X600
-    VESA 60.32 HZ, CUSTOM TIMING. VGA SYNC sets the sync polarity.
-  - RGB presets: BALANCED 58.74 HZ (default), NEAR ARCADE 59.59 HZ, 50 HZ
-    FALLBACK 49.92 HZ, CUSTOM TIMING, IIGS LINE RATE 56.36 HZ.
-  - HORIZONTAL and VERTICAL edit the timing. RESTORE DEFAULT puts back the
-    factory timing of the preset.
-- **DIP SWITCHES**: the switches of the arcade machine. Return or the right
-  arrow gives the next value, and the left arrow gives the value before.
-  - DIFFICULTY (1-16): 1 is the easiest (default 8).
-  - 2 PLAYER GAME: 2 players cost 2 credits (default) or 1 credit.
-  - COIN A and COIN B: 1 coin 1 credit (default), up to 1 coin 5 credits or 4
-    coins 1 credit.
-  - CONTINUE: ON (default) or OFF.
-  - DEMO SOUNDS: the same setting as in SOUND.
-  - SCREEN STOP: ON stops the play (default OFF).
-- **SAVE**: write all the settings to the file SS1943.CONFIG on the 1943
-  volume. The game reads them at the next start. Without SAVE, the changes
-  stay only until you switch off or restart the IIgs.
-- **RESUME**: go back to the game.
+  - MOUSE PLAYER, JOYSTICK PLAYER: which player uses the mouse or the joystick
+    (default player 2).
+  - RESTORE DEFAULT BINDINGS: puts all keys back as in the table above.
+- **SOUND**: music and effects volume (0 to 100, default 100). DEMO SOUNDS
+  turns the sound of the attract mode on or off (default on).
+- **DISPLAY**: the refresh rate for your monitor. The game runs at the rate
+  you pick.
+  - VGA: ARCADE 59.64 HZ (default, the arcade speed), 800X600 SYNC 59.65 HZ,
+    800X600 VESA 60.32 HZ, or CUSTOM TIMING. VGA SYNC sets the sync polarity.
+  - AppleColor RGB: BALANCED 58.74 HZ (default), NEAR ARCADE 59.59 HZ, 50 HZ
+    FALLBACK 49.92 HZ, CUSTOM TIMING, or IIGS LINE RATE 56.36 HZ.
+  - HORIZONTAL and VERTICAL edit the timing by hand. RESTORE DEFAULT undoes
+    those edits.
+- **DIP SWITCHES**: the arcade machine's settings. Return or the left and
+  right arrows change a setting.
+  - DIFFICULTY: 1 (easiest) to 16 (hardest), default 8.
+  - 2 PLAYER GAME: a 2 player game costs 2 credits (default) or 1.
+  - COIN A, COIN B: credits for each coin, from 1 coin 1 credit (default) to 1
+    coin 5 credits or 4 coins 1 credit.
+  - CONTINUE: lets you continue after the game ends (default on).
+  - DEMO SOUNDS: the same as in SOUND.
+  - SCREEN STOP: freezes the game (default off).
+- **SAVE**: saves all settings to the disk. Without SAVE, your changes are lost
+  when you restart or switch off the IIgs.
+- **RESUME**: back to the game.
 
 ## Folders
 
