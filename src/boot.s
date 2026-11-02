@@ -1545,8 +1545,9 @@ upload_registers_end:
 loaded_bytes: .dword 0
 progress_done: .word 0
 ; The bytes of SS1943.DATA read when each progress cell fills: a copy of the
-; table of the data file header (DATA_PROGRESS, scripts/boot_disk.py).
-progress_thresholds: .res PROGRESS_CELLS*4
+; table of the data file header (DATA_PROGRESS, scripts/boot_disk.py). The
+; read of that header comes before the copy: $FF bytes keep its cells empty.
+progress_thresholds: .res PROGRESS_CELLS*4, $ff
 path: .byte 11,"SS1943.DATA"
 read_request: .res 2
 read_actual: .res 2
