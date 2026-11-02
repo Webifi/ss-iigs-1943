@@ -15,7 +15,7 @@ from startup_pack import pack, unpack
 sys.path.insert(0, str(ROOT / "bootloader"))
 from prodos_volume import Volume, apm, fitted_blocks
 
-VERSION_DIGITS = 6  # the hex digits of the volume hash in the image names
+VERSION_DIGITS = 6  # the hex digits of the game data hash in the image names
 
 
 PLANE = 0x200000
@@ -204,11 +204,11 @@ def build(case, out=None):
     disk.install("SS1943.SYSTEM", system, 0xFF, system_load)
     disk.install("SS1943.DATA", bundle, 6)
     disk.boot("SS1943.SYSTEM")
-    # The image names end in a short hash of the volume, so a build with
-    # different game data gets a different name. The images of earlier
-    # builds are deleted.
+    # The image names end in a short hash of the game data (the boot loader
+    # and the data file), so a build with different game data gets a
+    # different name. The images of earlier builds are deleted.
     data = bytes(disk.data)
-    version = hashlib.sha256(data).hexdigest()[:VERSION_DIGITS]
+    version = hashlib.sha256(system + bundle).hexdigest()[:VERSION_DIGITS]
     for old in [*out.glob("1943-*.hdv"), *out.glob("1943-*-scsi.hda")]:
         old.unlink()
     image = out / f"1943-{version}.hdv"

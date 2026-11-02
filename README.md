@@ -35,8 +35,8 @@ You need:
 2. Run `./build.sh`.
 
 The disk images are in `build/game-disk/`. HASH in their names is the first 6
-hex digits of the SHA-256 of the volume, so a build with different game data
-gets a different name:
+hex digits of the SHA-256 of the game data (SS1943.SYSTEM and SS1943.DATA), so a
+build with different game data gets a different name:
 
 - `1943-HASH.hdv`: a ProDOS volume, for a CFFA3000, a FloppyEmu or another
   SmartPort hard disk, a MicroDrive/Turbo, a BOOTI or an emulator
