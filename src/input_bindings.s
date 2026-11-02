@@ -214,7 +214,8 @@ set_device:
   a8
   sta a:.loword(deviceKeys),x
   sta a:.loword(devicePressed)
-  beq @apply
+  cmp #0                        ; STA sets no flags: test the new state
+  beq @apply                    ; a release only applies its mask
   a16
   txa
   and #15                       ; the action
