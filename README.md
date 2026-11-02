@@ -34,11 +34,13 @@ You need:
 1. Put your 1943 ROM set into `roms/` (see `roms/README.md`).
 2. Run `./build.sh`.
 
-The disk images are in `build/game-disk/`:
+The disk images are in `build/game-disk/`. HASH in their names is the first 6
+hex digits of the SHA-256 of the volume, so a build with different game data
+gets a different name:
 
-- `1943.hdv`: a ProDOS volume, for a CFFA3000, a FloppyEmu or another
+- `1943-HASH.hdv`: a ProDOS volume, for a CFFA3000, a FloppyEmu or another
   SmartPort hard disk, a MicroDrive/Turbo, a BOOTI or an emulator
-- `1943-scsi.hda`: the same volume with an Apple partition map, for an Apple
+- `1943-HASH-scsi.hda`: the same volume with an Apple partition map, for an Apple
   SCSI card with a BlueSCSI, ZuluSCSI or SCSI2SD
 - `debug.sym`: the debug symbols of this build, every IIgs and Second Sight
   address, for emulator debug runs (format in `scripts/debug_symbols.py`)

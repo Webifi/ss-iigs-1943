@@ -18,4 +18,5 @@ if ! cmp -s requirements.txt .venv/requirements.txt 2>/dev/null; then
   cp requirements.txt .venv/requirements.txt
 fi
 make -j"$(getconf _NPROCESSORS_ONLN)" PYTHON=.venv/bin/python
-echo "Disk image: build/game-disk/1943.hdv"
+echo "Disk images:"
+ls -1 build/game-disk/1943-*.hdv build/game-disk/1943-*-scsi.hda

@@ -4,6 +4,7 @@ A ProDOS volume: boot0 (bootloader/) loads SS1943.SYSTEM, which reads
 SS1943.DATA and SS1943.CONFIG with bootloader/prodos_read.s.
 """
 
+import hashlib
 import sys
 from types import SimpleNamespace
 
@@ -13,6 +14,8 @@ from startup_pack import pack, unpack
 
 sys.path.insert(0, str(ROOT / "bootloader"))
 from prodos_volume import Volume, apm, fitted_blocks
+
+VERSION_DIGITS = 6  # the hex digits of the volume hash in the image names
 
 
 PLANE = 0x200000
@@ -201,7 +204,14 @@ def build(case, out=None):
     disk.install("SS1943.SYSTEM", system, 0xFF, system_load)
     disk.install("SS1943.DATA", bundle, 6)
     disk.boot("SS1943.SYSTEM")
-    image = out / "1943.hdv"
-    image.write_bytes(disk.data)
-    (out / "1943-scsi.hda").write_bytes(apm(bytes(disk.data), "SS1943"))
+    # The image names end in a short hash of the volume, so a build with
+    # different game data gets a different name. The images of earlier
+    # builds are deleted.
+    data = bytes(disk.data)
+    version = hashlib.sha256(data).hexdigest()[:VERSION_DIGITS]
+    for old in [*out.glob("1943-*.hdv"), *out.glob("1943-*-scsi.hda")]:
+        old.unlink()
+    image = out / f"1943-{version}.hdv"
+    image.write_bytes(data)
+    (out / f"1943-{version}-scsi.hda").write_bytes(apm(data, "SS1943"))
     return image

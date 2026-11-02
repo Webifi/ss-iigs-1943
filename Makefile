@@ -13,7 +13,8 @@
 # 4. The boot loader and the boot block (cc65): src/boot.cfg and
 #    bootloader/boot0.cfg.
 # 5. The disk step (scripts/disk.py, Python): the card load records, the boot
-#    volume (build/game-disk/1943.hdv) and its debug symbols.
+#    volume (1943-HASH.hdv and 1943-HASH-scsi.hda in build/game-disk, HASH a
+#    short hash of the volume) and its debug symbols.
 #
 # The memory maps are hand-written; fitters put the asset data into their
 # free space:
@@ -40,7 +41,8 @@ SECONDSIGHT := build/secondsight
 GAME := build/game
 BOOT := build/game-disk
 SOUND := build/sound
-DISK := $(BOOT)/1943.hdv
+# The last file of the disk step (the image names hold a hash).
+DISK := $(BOOT)/debug.sym
 ASSETS := build/assets.stamp
 LINT := build/lint.stamp
 
