@@ -1,5 +1,6 @@
 """ProDOS volumes that boot with boot0.s, and device images for SCSI cards.
 
+    blocks = fitted_blocks([len(code), ...])  # the fewest blocks that hold the files
     volume = Volume("NAME", blocks, boot0)   # boot0: the 512 bytes of block 0
     volume.install("GAME.SYSTEM", code, 0xFF, 0x2000)
     volume.boot("GAME.SYSTEM")
@@ -12,31 +13,56 @@ import struct
 
 BLOCK = 512
 NAME_OFFSET = 4  # boot0.s: the boot file name, a length byte and 15 bytes
+FIRST_FREE = 6  # blocks 0-1 the boot, 2-5 the volume directory; the bitmap follows
+BITMAP_BLOCKS = 4096  # the blocks that one bitmap block maps
+INDEX_POINTERS = 256  # the block numbers of an index block
+
+
+def file_blocks(size):
+    """The blocks of a file of SIZE bytes as install writes it: its data
+    blocks, and a sapling's index block or a tree's index blocks."""
+    data = max(1, -(-size // BLOCK))
+    if data == 1:
+        return 1
+    if data <= INDEX_POINTERS:
+        return data + 1
+    return data + -(-data // INDEX_POINTERS) + 1
+
+
+def fitted_blocks(sizes):
+    """The fewest blocks of a volume that holds files of SIZES bytes: the
+    boot and directory blocks, the bitmap and the files, with no free block
+    (a save writes in place)."""
+    files = sum(file_blocks(size) for size in sizes)
+    bitmap = 1
+    while -(-(FIRST_FREE + bitmap + files) // BITMAP_BLOCKS) > bitmap:
+        bitmap += 1
+    return FIRST_FREE + bitmap + files
 
 
 class Volume:
     def __init__(self, name, blocks, boot):
         assert 1 <= len(name) <= 15 and name.isascii() and name[0].isalpha()
         assert len(boot) == BLOCK
-        bitmap_blocks = -(-blocks // 4096)
+        bitmap_blocks = -(-blocks // BITMAP_BLOCKS)
         self.data = bytearray(blocks * BLOCK)
         self.data[:BLOCK] = boot
-        for block in range(2, 6):  # the volume directory
+        for block in range(2, FIRST_FREE):  # the volume directory
             struct.pack_into(
                 "<HH", self.data, block * BLOCK, block - 1 if block > 2 else 0,
-                block + 1 if block < 5 else 0,
+                block + 1 if block < FIRST_FREE - 1 else 0,
             )
         h = bytearray(39)
         h[0] = 0xF0 | len(name)
         h[1 : 1 + len(name)] = name.encode()
         h[30] = 0xE3
         h[31:33] = bytes((39, 13))
-        struct.pack_into("<HHH", h, 33, 0, 6, blocks)
+        struct.pack_into("<HHH", h, 33, 0, FIRST_FREE, blocks)
         self.data[2 * BLOCK + 4 : 2 * BLOCK + 43] = h
-        self.bitmap = 6
+        self.bitmap = FIRST_FREE
         self.blocks = blocks
-        for block in range(6 + bitmap_blocks, blocks):
-            self.data[6 * BLOCK + block // 8] |= 128 >> (block & 7)
+        for block in range(FIRST_FREE + bitmap_blocks, blocks):
+            self.data[FIRST_FREE * BLOCK + block // 8] |= 128 >> (block & 7)
 
     def block(self, n):
         return self.data[n * BLOCK : (n + 1) * BLOCK]

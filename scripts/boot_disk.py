@@ -12,7 +12,7 @@ from debug_symbols import host_symbols
 from startup_pack import pack, unpack
 
 sys.path.insert(0, str(ROOT / "bootloader"))
-from prodos_volume import Volume, apm
+from prodos_volume import Volume, apm, fitted_blocks
 
 
 PLANE = 0x200000
@@ -169,8 +169,6 @@ def build(case, out=None):
         header[entry : entry + H.SEGMENT_ENTRY] = address.to_bytes(3, "little") + len(
             data
         ).to_bytes(3, "little")
-    # The boot block and the boot loader (the Makefile builds them).
-    disk = Volume("SS1943", 8192, (out / "boot0.bin").read_bytes())
     boot_start, boot_size = area("BOOT")
     assert boot_start <= labels["world_handoff"] < boot_start + boot_size
     setting_addr = labels["settings"]
@@ -183,7 +181,6 @@ def build(case, out=None):
         checksum = ((checksum << 1) | (checksum >> 15)) & 65535
         checksum ^= int.from_bytes(config[offset : offset + 2], "little")
     config[H.SETTINGS_CHECKSUM : H.SETTINGS_CHECKSUM + 2] = checksum.to_bytes(2, "little")
-    disk.install("SS1943.CONFIG", config, 6)
     trailer = (case / "boot-c-world.bin").read_bytes()
     assert len(trailer) == area("C_WORLD")[1]
     dtrailer = (case / "boot-d-world.bin").read_bytes()
@@ -195,8 +192,13 @@ def build(case, out=None):
         at = H.DATA_PROGRESS + 4 * cell
         header[at : at + 4] = ((size * (cell + 1) + H.PROGRESS_CELLS - 1) // H.PROGRESS_CELLS).to_bytes(4, "little")
     bundle = bytes(header) + body
+    system = (out / "boot.bin").read_bytes()
     system_load = symbols(out / "boot.lbl")["__SYSTEM_START__"]
-    disk.install("SS1943.SYSTEM", (out / "boot.bin").read_bytes(), 0xFF, system_load)
+    # The volume: the boot block (the Makefile builds boot0.bin and the boot
+    # loader), just large enough for the three files.
+    disk = Volume("SS1943", fitted_blocks([len(config), len(system), len(bundle)]), (out / "boot0.bin").read_bytes())
+    disk.install("SS1943.CONFIG", config, 6)
+    disk.install("SS1943.SYSTEM", system, 0xFF, system_load)
     disk.install("SS1943.DATA", bundle, 6)
     disk.boot("SS1943.SYSTEM")
     image = out / "1943.hdv"

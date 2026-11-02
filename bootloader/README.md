@@ -58,6 +58,7 @@ Assemble block 0 first: `ca65 boot0.s` and `ld65 -C boot0.cfg` give the 512
 bytes of boot0.bin.
 
 ```python
+blocks = fitted_blocks([len(code)])  # just large enough for the files
 volume = Volume("NAME", blocks, boot0_bin_bytes)
 volume.install("GAME.SYSTEM", code, 0xFF, 0x2000)
 volume.boot("GAME.SYSTEM")
